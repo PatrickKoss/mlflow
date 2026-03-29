@@ -1,0 +1,39 @@
+# Mimics your production Alpine-based image but with memory debug tools
+ARG MLFLOW_VERSION=3.10.0
+ARG PYTHON_VERSION=3.14
+ARG ALPINE_VERSION=3.23
+
+FROM python:${PYTHON_VERSION}-alpine${ALPINE_VERSION}
+
+# Build dependencies
+RUN apk add --no-cache \
+    g++ \
+    postgresql-dev \
+    jemalloc \
+    jemalloc-dev
+
+ARG MLFLOW_VERSION
+
+# Install MLflow + dependencies matching your production image
+RUN pip install --no-cache-dir \
+    mlflow==${MLFLOW_VERSION} \
+    boto3==1.42.56 \
+    psycopg2-binary==2.9.11 \
+    psutil
+
+# Copy memory debug scripts
+COPY memory_debug_server.py /opt/memleak-debug/memory_debug_server.py
+
+# Non-root user (matching your production image)
+RUN addgroup -g 1001 mlflow_app && \
+    adduser -D -u 1001 -G mlflow_app mlflow_app
+
+USER mlflow_app
+WORKDIR /home/mlflow_app
+
+EXPOSE 5000
+
+CMD ["python", "-m", "mlflow", "server", \
+     "--host", "0.0.0.0", \
+     "--port", "5000", \
+     "--workers", "1"]

@@ -1,0 +1,80 @@
+version: "3.8"
+
+# MLflow Memory Leak Reproduction Environment
+#
+# Usage:
+#   cd dev/memleak-debug
+#   docker compose up -d
+#   # Wait for MLflow to start, then:
+#   python memory_collector.py --url http://localhost:5000 --output-dir ./memleak-data
+#
+# To test with jemalloc (musl fragmentation fix):
+#   docker compose --profile jemalloc up -d
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: mlflow
+      POSTGRES_DB: mlflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mlflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.memleak
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    environment:
+      MLFLOW_BACKEND_STORE_URI: "postgresql://mlflow:mlflow@postgres:5432/mlflow"
+      MLFLOW_ENABLE_MEMORY_DEBUG: "true"
+      MLFLOW_LOGGING_LEVEL: "WARNING"
+      # Uncomment to test jemalloc fix:
+      # LD_PRELOAD: /usr/lib/libjemalloc.so.2
+    deploy:
+      resources:
+        limits:
+          memory: 2500m
+        reservations:
+          memory: 1500m
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Jemalloc variant -- run with: docker compose --profile jemalloc up mlflow-jemalloc
+  mlflow-jemalloc:
+    build:
+      context: .
+      dockerfile: Dockerfile.memleak
+    profiles: ["jemalloc"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "5001:5000"
+    environment:
+      MLFLOW_BACKEND_STORE_URI: "postgresql://mlflow:mlflow@postgres:5432/mlflow"
+      MLFLOW_ENABLE_MEMORY_DEBUG: "true"
+      MLFLOW_LOGGING_LEVEL: "WARNING"
+      LD_PRELOAD: /usr/lib/libjemalloc.so.2
+    deploy:
+      resources:
+        limits:
+          memory: 2500m
+
+volumes:
+  pgdata:

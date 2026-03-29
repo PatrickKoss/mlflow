@@ -1,0 +1,5 @@
+# Required for memory profiling (debug server)
+psutil>=5.9.0
+
+# Optional: for chart generation in analyze_memleak.py
+# matplotlib>=3.7.0

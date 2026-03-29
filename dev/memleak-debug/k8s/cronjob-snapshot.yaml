@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: memleak-snapshot-collector
+spec:
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: collector
+              image: python:3.14-alpine
+              command:
+                - python
+                - -c
+                - |
+                  import json, urllib.request, datetime, pathlib
+
+                  base = "http://mlflow-memleak-debug:5000/debug/memory"
+                  ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                  data_dir = pathlib.Path("/data/memleak")
+                  data_dir.mkdir(parents=True, exist_ok=True)
+
+                  for endpoint in ["summary", "snapshot?top_n=50", "objects", "diff?top_n=50"]:
+                      name = endpoint.split("?")[0]
+                      try:
+                          req = urllib.request.Request(f"{base}/{endpoint}")
+                          with urllib.request.urlopen(req, timeout=30) as resp:
+                              result = json.loads(resp.read())
+                          out = data_dir / f"{name}_{ts}.json"
+                          out.write_text(json.dumps(result, indent=2))
+                          print(f"Saved {out}")
+                      except Exception as e:
+                          print(f"Failed {endpoint}: {e}")
+              volumeMounts:
+                - name: profiling-data
+                  mountPath: /data/memleak
+          restartPolicy: OnFailure
+          volumes:
+            - name: profiling-data
+              persistentVolumeClaim:
+                claimName: memleak-data-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: memleak-data-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

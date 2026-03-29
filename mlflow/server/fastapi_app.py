@@ -7,6 +7,7 @@ to FastAPI endpoints.
 """
 
 import json
+import os
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.wsgi import WSGIMiddleware
@@ -95,6 +96,27 @@ def create_fastapi_app(flask_app: Flask = flask_app):
     # Include Assistant API router for AI-powered trace analysis
     # This provides /ajax-api/3.0/mlflow/assistant/* endpoints (localhost only)
     fastapi_app.include_router(assistant_router)
+
+    # Conditionally include memory debug router for profiling memory leaks.
+    # The router lives in dev/memleak-debug/ and is loaded via importlib to avoid
+    # requiring it as a package dependency.
+    if os.environ.get("MLFLOW_ENABLE_MEMORY_DEBUG", "").lower() in ("true", "1", "yes"):
+        import importlib.util
+        import pathlib
+
+        _debug_script = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "dev"
+            / "memleak-debug"
+            / "memory_debug_server.py"
+        )
+        if _debug_script.exists():
+            _spec = importlib.util.spec_from_file_location(
+                "memory_debug_server", _debug_script
+            )
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            fastapi_app.include_router(_mod.debug_memory_router)
 
     # Mount the entire Flask application at the root path
     # This ensures compatibility with existing APIs

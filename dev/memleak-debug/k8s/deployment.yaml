@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow-memleak-debug
+  labels:
+    app: mlflow-memleak-debug
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow-memleak-debug
+  template:
+    metadata:
+      labels:
+        app: mlflow-memleak-debug
+    spec:
+      containers:
+        - name: mlflow
+          # Replace with your custom image to test, or use vanilla MLflow
+          image: ghcr.io/mlflow/mlflow:v3.10.0
+          ports:
+            - containerPort: 5000
+          env:
+            - name: MLFLOW_BACKEND_STORE_URI
+              value: "postgresql://mlflow:mlflow@postgres:5432/mlflow"
+            - name: MLFLOW_ENABLE_MEMORY_DEBUG
+              value: "true"
+            # Uncomment to test jemalloc fix on Alpine:
+            # - name: LD_PRELOAD
+            #   value: /usr/lib/libjemalloc.so.2
+          command:
+            - python
+            - -m
+            - mlflow
+            - server
+            - --host
+            - "0.0.0.0"
+            - --port
+            - "5000"
+            - --workers
+            - "1"
+          resources:
+            requests:
+              memory: "1500Mi"
+              cpu: "500m"
+            limits:
+              memory: "2500Mi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: debug-scripts
+              mountPath: /opt/memleak-debug
+            - name: profiling-data
+              mountPath: /data/memleak
+      volumes:
+        - name: debug-scripts
+          configMap:
+            name: memleak-debug-scripts
+        - name: profiling-data
+          persistentVolumeClaim:
+            claimName: memleak-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow-memleak-debug
+spec:
+  selector:
+    app: mlflow-memleak-debug
+  ports:
+    - port: 5000
+      targetPort: 5000
+  type: ClusterIP

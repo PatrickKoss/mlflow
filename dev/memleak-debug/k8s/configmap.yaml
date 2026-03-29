@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: memleak-debug-scripts
+data:
+  memory_debug_server.py: |
+    # This file is auto-generated. Copy the contents of
+    # dev/memleak-debug/memory_debug_server.py here, or use:
+    #   kubectl create configmap memleak-debug-scripts \
+    #     --from-file=memory_debug_server.py=dev/memleak-debug/memory_debug_server.py
+    #
+    # Then the script will be available at /opt/memleak-debug/memory_debug_server.py
+    # inside the container.
+    pass
