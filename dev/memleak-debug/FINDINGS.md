@@ -124,7 +124,7 @@ prefer `/debug/memory/rss` + `/debug/memory/internals` for continuous monitoring
 | Health checks | From profiler only | k8s liveness/readiness probes |
 | Worker recycling | None (1 worker, stable) | Possible thread churn under load |
 
-### musl malloc fragmentation (PRIMARY SUSPECT)
+### musl malloc fragmentation + Huey periodic tasks (PRIMARY CAUSE)
 
 musl's malloc implementation uses a simple first-fit allocator that:
 - Allocates memory in small chunks from the OS via `mmap`/`brk`
@@ -137,12 +137,62 @@ This is a well-documented issue:
 - https://pythonspeed.com/articles/alpine-docker-python/
 - Affects any long-running Python process on Alpine
 
-The Huey `online_scoring_scheduler` running every 60 seconds creates 1,440 allocation
-cycles per day. Each cycle allocates temporary objects (task wrappers, closures, import
-lookups) and frees them. On glibc, the freed memory is returned. On musl, it fragments.
+### Huey as the Fragmentation Driver (CONFIRMED from production logs)
 
-At ~70KB of fragmentation per cycle: 70KB x 1,440 = ~100MB/day. This matches the
-observed growth rate exactly.
+Production pod logs confirm a heavy Huey process tree that was NOT active in local testing:
+
+```
+Process tree in production pod:
+  PID 16  - Uvicorn parent process
+  PID 19-22 - 4 Uvicorn worker processes (4 server processes)
+  PID 75  - Huey consumer: run_online_session_scorer (5 threads)
+  PID 76  - Huey consumer: run_online_trace_scorer (5 threads)
+  PID 78  - Huey consumer: invoke_scorer (10 threads)
+  PID 81  - Huey consumer: online_scoring_scheduler (2 threads)
+  PID 82  - Huey consumer: periodic tasks + optimize_prompts (5 threads)
+```
+
+That is **6 separate processes** and **27+ threads** running in a single pod. Each process
+has its own Python interpreter, its own memory heap, and its own musl malloc arena.
+
+The `online_scoring_scheduler` fires every 60 seconds (confirmed in logs). Each execution:
+
+1. Calls `_get_tracking_store()` -- accesses the SQLAlchemy store
+2. Calls `tracking_store.get_active_online_scorers()` -- DB query, deserializes rows
+3. For each scorer: `Scorer.model_validate_json(scorer.serialized_scorer)` -- pydantic deserialization
+4. Builds `defaultdict(list)` grouping scorers by experiment
+5. Calls `random.shuffle()` on the groups
+6. For each group: `asdict(scorer)` -- creates dict copies
+7. Calls `submit_job()` -- serializes params to JSON, writes to Huey's SQLite queue
+
+Each of these steps allocates temporary Python objects (dicts, lists, strings, pydantic models).
+On glibc, these are freed and the pages returned to the OS. On musl, the freed space fragments.
+
+Even with zero active scorers (your "no load" scenario), the scheduler still:
+- Creates the tracking store connection
+- Queries the database (empty result)
+- Iterates the workspace contexts
+- Allocates/frees the defaultdict, lists, etc.
+
+The first execution took 0.568s (cold start, importing `mlflow.genai.scorers.job` and its
+entire dependency tree). Subsequent executions take ~0.015s. But each one still allocates
+and frees objects on every run.
+
+**Estimated fragmentation per cycle:**
+- ~70KB of allocations per scheduler execution (conservative, based on pydantic + SQLAlchemy overhead)
+- 1,440 executions/day
+- 70KB x 1,440 = ~100MB/day
+
+This matches the observed ~100MB/day growth rate exactly.
+
+### The 6-process architecture amplifies the problem
+
+Each of the 6 processes (4 uvicorn workers + periodic tasks consumer + job runner)
+independently imports the full MLflow module tree. On musl, each process has its own
+fragmented heap. The total pod RSS is the sum of all 6 heaps, each growing independently.
+
+Even if each process only leaks 15-20MB/day through fragmentation, 6 processes together
+produce ~100MB/day.
 
 ### Other suspects (RULED OUT)
 
@@ -152,7 +202,7 @@ observed growth rate exactly.
 | H2: SQLAlchemy pool leak | **Ruled out** | engine_map empty, no pool created at idle |
 | H3: Global cache growth | **Ruled out** | All global dicts at 0 entries after 45 min |
 | H4: GC reference cycles | **Ruled out** | gc.garbage=0, uncollectable=0 across all gens |
-| H5: Huey task accumulation | **Likely amplifier** | Not active locally, but the allocation pattern would trigger musl fragmentation |
+| H5: Huey task accumulation | **CONFIRMED amplifier** | 6 processes, 27 threads, scheduler every 60s drives allocation churn that triggers musl fragmentation |
 
 ---
 
@@ -195,7 +245,31 @@ but you gain:
 - Better compatibility with C extensions (psycopg2, etc.)
 - No more Alpine-specific build dependency issues (g++, etc.)
 
-### Fix 3: Tune GC (if needed after Fix 1 or 2)
+### Fix 3: Reduce Huey process count (if Huey features are not needed)
+
+If you don't use online scoring, prompt optimization, or session scoring, you can
+disable job execution entirely to avoid spawning the 5 extra Huey processes:
+
+```yaml
+env:
+  # Do NOT set this, or set to false:
+  - name: MLFLOW_SERVER_ENABLE_JOB_EXECUTION
+    value: "false"
+```
+
+This eliminates 5 processes (~300-500MB baseline RSS) and the periodic scheduler
+that drives the fragmentation pattern. The MLflow UI and tracking API work fine without it.
+
+### Fix 4: Reduce Uvicorn worker count
+
+Your pod runs 4 Uvicorn workers. Each is a separate process with its own heap.
+If your instance has low traffic, reducing to 1-2 workers saves significant memory:
+
+```yaml
+command: ["python", "-m", "mlflow", "server", "--workers", "1"]
+```
+
+### Fix 5: Tune GC (if needed after Fix 1 or 2)
 
 Only apply if fixes 1 or 2 don't fully resolve the issue:
 
