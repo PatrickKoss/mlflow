@@ -1,7 +1,7 @@
 # Memory Leak Investigation Findings
 
 **Date:** 2026-03-29
-**Investigated by:** Claude Code + kossp
+**Investigated by:** Claude Code
 **MLflow version:** development branch (based on 3.10.0)
 **Production setup:** Alpine 3.23, Python 3.14.3, Uvicorn, PostgreSQL, custom logout plugin
 **Symptom:** Pod RSS grows from ~1900MB to ~2100MB over 2 days with zero load (~100MB/day)
@@ -10,7 +10,7 @@
 
 ## Summary
 
-Vanilla MLflow does **not** leak memory on macOS/glibc. The server is completely stable at idle.
+Vanilla MLflow does **not** leak memory on glibc. The server is completely stable at idle.
 The production leak is almost certainly caused by **musl libc malloc fragmentation** on Alpine Linux,
 possibly amplified by the Huey periodic task scheduler running every 60 seconds.
 
