@@ -18,7 +18,7 @@ artifact-only exception instead of claiming a Python-free cutover.
 
    | Database | Version table | Required head |
    |---|---|---|
-   | tracking + registry | `alembic_version` | `a8b9c0d1e2f3` |
+   | tracking + registry | `alembic_version` | `6f8d9c3b2a1e` |
    | auth | `alembic_version_auth` | `f1a2b3c4d5e6` |
 
 3. Back up tracking/registry and auth databases with native database tools and

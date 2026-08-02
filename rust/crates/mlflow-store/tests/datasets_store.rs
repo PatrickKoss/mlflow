@@ -435,3 +435,17 @@ async fn get_metric_history_bulk_interval_empty_history() {
         .unwrap();
     assert!(out.is_empty());
 }
+
+#[tokio::test]
+async fn get_metric_history_bulk_interval_requires_both_step_bounds() {
+    let tmp = TempDb::new("bulk_interval_step_bounds").await;
+    let s = store(&tmp).await;
+    let error = s
+        .get_metric_history_bulk_interval(WS, &[], "loss", 10, Some(1), None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "Both start_step and end_step must be specified together, or neither may be specified."
+    );
+}

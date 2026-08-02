@@ -30,6 +30,59 @@ async fn store(temp: &TempDb) -> TrackingStore {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn default_experiment_bootstrap_is_idempotent_after_rename() {
+    let tmp = TempDb::new("default_exp_idempotent_renamed").await;
+    let s = store(&tmp).await;
+    s.rename_experiment(WS, "0", "Renamed Default")
+        .await
+        .unwrap();
+
+    s.ensure_default_experiment().await.unwrap();
+    s.ensure_default_experiment().await.unwrap();
+
+    let experiment = s.get_experiment(WS, "0").await.unwrap();
+    assert_eq!(experiment.name, "Renamed Default");
+}
+
+#[tokio::test]
+async fn default_experiment_bootstrap_propagates_unrelated_name_collision() {
+    let tmp = TempDb::new("default_exp_name_collision").await;
+    let s = store(&tmp).await;
+    let replacement_id = s
+        .create_experiment(WS, "replacement", None, &[])
+        .await
+        .unwrap();
+
+    match s.db() {
+        Db::Sqlite(pool) => {
+            sqlx::query("DELETE FROM experiments WHERE experiment_id = 0")
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        Db::Postgres(pool) => {
+            sqlx::query("DELETE FROM experiments WHERE experiment_id = 0")
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        Db::MySql(pool) => {
+            sqlx::query("DELETE FROM experiments WHERE experiment_id = 0")
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+    }
+    s.rename_experiment(WS, &replacement_id, "Default")
+        .await
+        .unwrap();
+
+    let error = s.ensure_default_experiment().await.unwrap_err();
+    assert!(error.message.contains("database error"), "{error:?}");
+    assert!(s.get_experiment(WS, "0").await.is_err());
+}
+
+#[tokio::test]
 async fn create_and_get_experiment_defaults_artifact_location() {
     let tmp = TempDb::new("create_exp").await;
     let s = store(&tmp).await;

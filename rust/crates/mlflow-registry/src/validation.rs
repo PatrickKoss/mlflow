@@ -180,14 +180,13 @@ pub(crate) fn validate_model_renaming(new_name: &str) -> Result<(), MlflowError>
     validate_model_name(new_name)
 }
 
-/// `_validate_model_version`: the version must parse as an integer.
-pub(crate) fn validate_model_version(version: &str) -> Result<(), MlflowError> {
-    if version.parse::<i64>().is_err() {
-        return Err(MlflowError::invalid_parameter_value(not_integer_value(
-            "version", version,
-        )));
-    }
-    Ok(())
+/// `_validate_model_version`: normalize the version with Python's `int()`
+/// semantics for surrounding whitespace and leading zeroes.
+pub(crate) fn validate_model_version(version: &str) -> Result<i64, MlflowError> {
+    version
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| MlflowError::invalid_parameter_value(not_integer_value("version", version)))
 }
 
 /// `_validate_tag_name`.
@@ -313,7 +312,9 @@ mod tests {
             validate_model_version("abc").unwrap_err().message,
             "Parameter 'version' must be an integer, got 'abc'."
         );
-        assert!(validate_model_version("3").is_ok());
+        assert_eq!(validate_model_version("3").unwrap(), 3);
+        assert_eq!(validate_model_version("03").unwrap(), 3);
+        assert_eq!(validate_model_version(" 3 ").unwrap(), 3);
     }
 
     #[test]

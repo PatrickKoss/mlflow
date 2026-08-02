@@ -680,6 +680,87 @@ async fn get_download_uri() {
     assert_eq!(res.json()["artifact_uri"], "mlflow-artifacts:/m/loc");
 }
 
+#[tokio::test]
+async fn model_version_parameters_are_normalized_to_integers() {
+    let server = TestServer::start("version_cast").await;
+    let name = format!("cast_{}", uniq());
+    post(
+        &server,
+        &format!("{API}/registered-models/create"),
+        &json!({"name": name}),
+    )
+    .await;
+    for version in 1..=3 {
+        server
+            .registry
+            .create_model_version(
+                WS,
+                &name,
+                &format!("mlflow-artifacts:/m/{version}"),
+                None,
+                &[],
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    let res = get(
+        &server,
+        &format!("{API}/model-versions/get?name={name}&version=03"),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.text());
+    assert_eq!(res.json()["model_version"]["version"], "3");
+
+    let res = post(
+        &server,
+        &format!("{API}/model-versions/set-tag"),
+        &json!({"name": name, "version": " 3 ", "key": "cast", "value": "ok"}),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.text());
+
+    let res = get(
+        &server,
+        &format!("{API}/model-versions/get?name={name}&version=03"),
+    )
+    .await;
+    assert!(res.json()["model_version"]["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tag| tag["key"] == "cast" && tag["value"] == "ok"));
+
+    let res = delete(
+        &server,
+        &format!("{API}/model-versions/delete-tag"),
+        &json!({"name": name, "version": "03", "key": "cast"}),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.text());
+
+    let res = post(
+        &server,
+        &format!("{API}/registered-models/alias"),
+        &json!({"name": name, "alias": "normalized", "version": "03"}),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::OK, "{}", res.text());
+
+    let res = get(
+        &server,
+        &format!("{API}/model-versions/get?name={name}&version=abc"),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "{}", res.text());
+    assert_eq!(
+        res.json()["message"],
+        "Parameter 'version' must be an integer, got 'abc'."
+    );
+}
+
 // ===========================================================================
 // Tags (RM + MV)
 // ===========================================================================

@@ -27,6 +27,42 @@ cases:
         - {key: loss, value: 0.6, timestamp: 300, step: 2}
         - {key: loss, value: 0.5, timestamp: 400, step: 3}
 
+  - name: metrics_setup_sparse_run
+    method: POST
+    path: /api/2.0/mlflow/runs/create
+    body: {experiment_id: "${metrics_exp}", start_time: 1000, tags: [{key: mlflow.runName, value: sparse}]}
+    bind:
+      - {bind: metrics_sparse_run, from: "$.run.info.run_id"}
+
+  - name: metrics_log_dense_duplicate_step_zero
+    method: POST
+    path: /api/2.0/mlflow/runs/log-batch
+    body:
+      run_id: "${metrics_run}"
+      metrics:
+        - {key: dense_zero, value: 0.0, timestamp: 1000, step: 0}
+        - {key: dense_zero, value: 1.0, timestamp: 1001, step: 0}
+        - {key: dense_zero, value: 2.0, timestamp: 1002, step: 0}
+        - {key: dense_zero, value: 3.0, timestamp: 1003, step: 0}
+        - {key: dense_zero, value: 4.0, timestamp: 1004, step: 0}
+        - {key: dense_zero, value: 5.0, timestamp: 1005, step: 0}
+        - {key: dense_zero, value: 6.0, timestamp: 1006, step: 0}
+        - {key: dense_zero, value: 7.0, timestamp: 1007, step: 0}
+        - {key: dense_zero, value: 8.0, timestamp: 1008, step: 0}
+        - {key: dense_zero, value: 9.0, timestamp: 1009, step: 0}
+        - {key: dense_zero, value: 10.0, timestamp: 1010, step: 0}
+        - {key: dense_zero, value: "NaN", timestamp: 1011, step: 0}
+
+  - name: metrics_log_sparse_series
+    method: POST
+    path: /api/2.0/mlflow/runs/log-batch
+    body:
+      run_id: "${metrics_sparse_run}"
+      metrics:
+        - {key: dense_zero, value: 20.0, timestamp: 2000, step: 0}
+        - {key: dense_zero, value: 21.0, timestamp: 2001, step: 7}
+        - {key: dense_zero, value: 22.0, timestamp: 2002, step: 99}
+
   - name: metric_get_history
     method: GET
     path: /api/2.0/mlflow/metrics/get-history
@@ -46,6 +82,19 @@ cases:
     path: /ajax-api/2.0/mlflow/metrics/get-history-bulk-interval
     query: {run_ids: "${metrics_run}", metric_key: loss, max_results: 100}
 
+  - name: metric_get_history_bulk_interval_dense_duplicate_steps
+    method: GET
+    path: /ajax-api/2.0/mlflow/metrics/get-history-bulk-interval
+    query: {run_ids: "${metrics_run}", metric_key: dense_zero, max_results: 5}
+
+  - name: metric_get_history_bulk_interval_independent_runs
+    method: GET
+    path: /ajax-api/2.0/mlflow/metrics/get-history-bulk-interval
+    query:
+      run_ids: ["${metrics_run}", "${metrics_sparse_run}"]
+      metric_key: dense_zero
+      max_results: 5
+
   - name: metric_get_history_bulk_ajax
     method: GET
     path: /ajax-api/2.0/mlflow/metrics/get-history-bulk
@@ -57,3 +106,9 @@ cases:
     path: /api/2.0/mlflow/metrics/get-history
     query: {run_id: "nonexistent", metric_key: loss}
     expect_status: 404
+
+  - name: metric_get_history_bulk_interval_lone_start_step
+    method: GET
+    path: /ajax-api/2.0/mlflow/metrics/get-history-bulk-interval
+    query: {run_ids: "${metrics_run}", metric_key: loss, start_step: 1}
+    expect_status: 400

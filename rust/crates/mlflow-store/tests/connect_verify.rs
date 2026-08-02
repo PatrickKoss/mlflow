@@ -2,7 +2,7 @@
 //! real Alembic-migrated SQLite database.
 //!
 //! The fixture `tests/fixtures/tracking.db` is a fully migrated MLflow tracking
-//! DB at Alembic head `a8b9c0d1e2f3`, produced by
+//! DB at Alembic head `6f8d9c3b2a1e`, produced by
 //! `uv run --frozen python rust/tools/make_test_db.py`. Regenerate it with that
 //! command whenever the head changes.
 //!
@@ -46,6 +46,59 @@ async fn connect_and_verify_succeeds_on_migrated_db() {
         .await
         .expect("verify migrated fixture DB");
     assert_eq!(db.dialect(), mlflow_store::Dialect::Sqlite);
+}
+
+#[tokio::test]
+async fn migrated_fixture_has_current_span_budget_and_trace_fk_schema() {
+    let db = Db::connect(&sqlite_uri(&fixture_path()), PoolConfig::default())
+        .await
+        .expect("connect fixture");
+    let Db::Sqlite(pool) = &db else {
+        panic!("expected sqlite pool");
+    };
+
+    let span_indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'spans' ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("read span indexes");
+    assert!(span_indexes.contains(&"index_spans_experiment_id_start_time".to_string()));
+    assert!(!span_indexes.contains(&"index_spans_experiment_id".to_string()));
+
+    let span_index_columns: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM pragma_index_info('index_spans_experiment_id_start_time') ORDER BY seqno",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("read span index columns");
+    assert_eq!(
+        span_index_columns,
+        ["experiment_id", "start_time_unix_nano"]
+    );
+
+    let budget_columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('budget_policies') ORDER BY cid")
+            .fetch_all(pool)
+            .await
+            .expect("read budget columns");
+    assert!(budget_columns.contains(&"target_value".to_string()));
+    let target_indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'budget_policies'",
+    )
+    .fetch_all(pool)
+    .await
+    .expect("read budget indexes");
+    assert!(target_indexes.contains(&"idx_budget_policies_target_value".to_string()));
+
+    let trace_info_ddl: String = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'trace_info'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("read trace_info DDL");
+    assert!(trace_info_ddl.contains("CONSTRAINT fk_trace_info_experiment_id"));
+    assert!(trace_info_ddl.contains("ON DELETE CASCADE"));
 }
 
 #[tokio::test]

@@ -112,6 +112,42 @@ cases:
     normalize:
       drop_paths: ["$.trace.trace_info.tags"]
 
+  - name: trace_otlp_span_search_skew_edges
+    method: POST
+    path: /v1/traces
+    headers:
+      content-type: application/json
+      x-mlflow-experiment-id: "${traces_exp}"
+    raw_body: >-
+      {"resourceSpans":[{"scopeSpans":[{"spans":[
+      {"traceId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","spanId":"0202020202020202","name":"root-within","startTimeUnixNano":"20000000000","endTimeUnixNano":"20100000000","status":{"code":"STATUS_CODE_OK"}},
+      {"traceId":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","spanId":"2222222222222222","parentSpanId":"0202020202020202","name":"skew-match","startTimeUnixNano":"10100000000","endTimeUnixNano":"10200000000","status":{"code":"STATUS_CODE_OK"}},
+      {"traceId":"cccccccccccccccccccccccccccccccc","spanId":"0303030303030303","name":"root-outside","startTimeUnixNano":"20000000000","endTimeUnixNano":"20100000000","status":{"code":"STATUS_CODE_OK"}},
+      {"traceId":"cccccccccccccccccccccccccccccccc","spanId":"3333333333333333","parentSpanId":"0303030303030303","name":"skew-match","startTimeUnixNano":"9900000000","endTimeUnixNano":"10000000000","status":{"code":"STATUS_CODE_OK"}}
+      ]}]}]}
+    expect_status: 200
+    compare_body: false
+
+  - name: trace_search_v3_span_timestamp_skew
+    method: POST
+    path: /api/3.0/mlflow/traces/search
+    body:
+      locations: [{type: MLFLOW_EXPERIMENT, mlflow_experiment: {experiment_id: "${traces_exp}"}}]
+      filter: attributes.timestamp_ms >= 20000 AND span.name = "skew-match"
+      max_results: 100
+    normalize:
+      drop_paths: ["$.traces[0].trace_info.tags"]
+
+  - name: trace_search_v3_span_timestamp_skew_span_filter_first
+    method: POST
+    path: /api/3.0/mlflow/traces/search
+    body:
+      locations: [{type: MLFLOW_EXPERIMENT, mlflow_experiment: {experiment_id: "${traces_exp}"}}]
+      filter: span.name = "skew-match" AND attributes.timestamp_ms >= 20000
+      max_results: 100
+    normalize:
+      drop_paths: ["$.traces[0].trace_info.tags"]
+
   - name: trace_search_v3_walk
     method: POST
     path: /api/3.0/mlflow/traces/search

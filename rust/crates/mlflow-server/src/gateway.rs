@@ -2029,6 +2029,9 @@ fn budget_proto(policy: BudgetPolicy) -> pb::GatewayBudgetPolicy {
         }),
         target_scope: pb::BudgetTargetScope::from_str_name(&policy.target_scope)
             .map(|value| value as i32),
+        // T-S6 owns budget target-value persistence and behavior. Keep the
+        // newly merged protobuf field neutral until that port lands.
+        target_value: None,
         budget_action: pb::BudgetAction::from_str_name(&policy.budget_action)
             .map(|value| value as i32),
         created_by: Some(policy.created_by.unwrap_or_default()),

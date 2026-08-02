@@ -235,8 +235,7 @@ impl RegistryStore {
         version: &str,
     ) -> Result<ModelVersion, MlflowError> {
         validation::validate_model_name(name)?;
-        validation::validate_model_version(version)?;
-        let version_num: i64 = version.parse().expect("validated as integer");
+        let version_num = validation::validate_model_version(version)?;
         let dialect = self.db().dialect();
         let sql = format!(
             "SELECT workspace, name, version, creation_time, last_updated_time, description, \
@@ -570,8 +569,7 @@ impl RegistryStore {
         version: &str,
     ) -> Result<ModelVersionRow, MlflowError> {
         validation::validate_model_name(name)?;
-        validation::validate_model_version(version)?;
-        let version_num: i64 = version.parse().expect("validated as integer");
+        let version_num = validation::validate_model_version(version)?;
         let dialect = self.db().dialect();
         let sql = format!(
             "SELECT workspace, name, version, creation_time, last_updated_time, description, \

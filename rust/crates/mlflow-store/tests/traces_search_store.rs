@@ -530,6 +530,114 @@ async fn span_multiple_predicates_match_same_span() {
 }
 
 #[tokio::test]
+async fn span_filter_uses_trace_timestamp_lower_bound_with_ten_second_skew() {
+    let tmp = TempDb::new("span_timestamp_skew").await;
+    let s = store(&tmp).await;
+    let exp = s.create_experiment(WS, "e", None, &[]).await.unwrap();
+    for trace_id in ["within-skew", "outside-skew"] {
+        create_trace(&s, trace_id, &exp, 20_000, Some(1), "OK", &[], &[]).await;
+    }
+
+    let mut within = span("within-skew", "1", "matching", "LLM");
+    within.start_time_unix_nano = 10_100_000_000;
+    within.end_time_unix_nano = Some(10_200_000_000);
+    let mut outside = span("outside-skew", "1", "matching", "LLM");
+    outside.start_time_unix_nano = 9_900_000_000;
+    outside.end_time_unix_nano = Some(10_000_000_000);
+    s.log_spans(
+        WS,
+        &exp,
+        &[within, outside],
+        &[],
+        &[
+            TraceTimeRange {
+                trace_id: "within-skew".into(),
+                min_start_ms: 10_100,
+                max_end_ms: Some(10_200),
+                root_span_status: Some("OK".into()),
+            },
+            TraceTimeRange {
+                trace_id: "outside-skew".into(),
+                min_start_ms: 9_900,
+                max_end_ms: Some(10_000),
+                root_span_status: Some("OK".into()),
+            },
+        ],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        search_ids(
+            &s,
+            std::slice::from_ref(&exp),
+            Some("attributes.timestamp_ms >= 20000 AND span.name = \"matching\""),
+            &[],
+        )
+        .await,
+        vec!["within-skew"]
+    );
+
+    assert_eq!(
+        search_ids(
+            &s,
+            std::slice::from_ref(&exp),
+            Some("span.name = \"matching\" AND attributes.timestamp_ms >= 20000"),
+            &[],
+        )
+        .await,
+        vec!["within-skew"]
+    );
+}
+
+#[tokio::test]
+async fn absent_locations_searches_all_traces_in_active_workspace() {
+    let tmp = TempDb::new("trace_search_no_locations").await;
+    let s = store(&tmp).await;
+    let default_exp = s
+        .create_experiment(WS, "default-workspace", None, &[])
+        .await
+        .unwrap();
+    create_trace(
+        &s,
+        "default-trace",
+        &default_exp,
+        1,
+        Some(1),
+        "OK",
+        &[],
+        &[],
+    )
+    .await;
+
+    let other_exp = s
+        .create_experiment("other", "other-workspace", None, &[])
+        .await
+        .unwrap();
+    let other = StartTraceInput {
+        trace_id: "other-trace".into(),
+        experiment_id: other_exp,
+        request_time: 2,
+        execution_duration: Some(1),
+        state: "OK".into(),
+        client_request_id: None,
+        request_preview: None,
+        response_preview: None,
+        tags: vec![],
+        trace_metadata: vec![],
+        trace_metrics: vec![],
+        assessments: vec![],
+    };
+    s.start_trace("other", &other).await.unwrap();
+
+    let page = s
+        .search_traces_with_locations(WS, None, None, 100, &[], None)
+        .await
+        .unwrap();
+    assert_eq!(ids(&page.trace_infos), vec!["default-trace"]);
+}
+
+#[tokio::test]
 async fn span_attribute_like_uses_extracted_values() {
     let tmp = TempDb::new("span_attribute_filter").await;
     let s = store(&tmp).await;

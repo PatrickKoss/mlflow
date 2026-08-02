@@ -21,10 +21,11 @@ lives in ``SqlAlchemyStore.get_metric_history_bulk_interval`` (and its SQL-based
 step discovery), NOT in a standalone function. Running the actual store end to
 end is the only faithful oracle.
 
-Edge cases covered: dense (>2500 points), multiple runs, sparse/irregular steps,
-duplicate steps across runs, single point, exactly-at-cap, explicit
-start/end_step windows (including a window that clamps out most data), and a
-window with start_step == end_step.
+Edge cases covered: dense (>2500 points), thousands of duplicate step-zero
+rows, NaN materialization, multiple runs with independent step distributions,
+sparse/irregular steps, single point, exactly-at-cap, non-positive max-results
+clamping, explicit start/end_step windows (including a window that clamps out
+most data), and a window with start_step == end_step.
 """
 
 import argparse
@@ -80,6 +81,7 @@ def build_corpus(out_dir: Path) -> int:
     # run_sparse: irregular gaps.
     # run_single: one point.
     # run_dupsteps: repeated steps (multiple metrics at same step).
+    # run_dense_step_zero: 3000 rows all at step zero, including NaN.
     runs = {}
 
     def make_run(name):
@@ -115,6 +117,13 @@ def build_corpus(out_dir: Path) -> int:
         dup_metrics.append(Metric(key, float(s) + 0.25, 20 + s, s))
     log_metrics(rid_dup, dup_metrics)
 
+    rid_dense_step_zero = make_run("dense-step-zero")
+    dense_step_zero_metrics = [
+        Metric(key, float(i), 10_000 + i, 0) for i in range(2999)
+    ]
+    dense_step_zero_metrics.append(Metric(key, float("nan"), 13_000, 0))
+    log_metrics(rid_dense_step_zero, dense_step_zero_metrics)
+
     rid_atcap = make_run("atcap")
     # Exactly MAX_RESULTS_PER_RUN (2500) distinct steps.
     log_metrics(rid_atcap, [Metric(key, float(s), s, s) for s in range(2500)])
@@ -127,6 +136,8 @@ def build_corpus(out_dir: Path) -> int:
         {"run_names": ["dense"], "max_results": 10, "start_step": None, "end_step": None},
         {"run_names": ["dense"], "max_results": 100, "start_step": None, "end_step": None},
         {"run_names": ["dense"], "max_results": 1, "start_step": None, "end_step": None},
+        # SQL store clamps non-positive values to one result.
+        {"run_names": ["dense"], "max_results": 0, "start_step": None, "end_step": None},
         # explicit window inside the dense range
         {"run_names": ["dense"], "max_results": 50, "start_step": 500, "end_step": 1500},
         # window that clamps out almost everything
@@ -147,9 +158,23 @@ def build_corpus(out_dir: Path) -> int:
         {"run_names": ["sparse"], "max_results": 100, "start_step": None, "end_step": None},
         # single point
         {"run_names": ["single"], "max_results": 2500, "start_step": None, "end_step": None},
-        # duplicate steps (2 metrics per step): sampling on distinct steps
+        # duplicate steps are sampled by row, not by distinct step
         {"run_names": ["dupsteps"], "max_results": 10, "start_step": None, "end_step": None},
         {"run_names": ["dupsteps"], "max_results": 2500, "start_step": None, "end_step": None},
+        # Dense duplicate step zero proves the result stays memory-bounded.
+        {
+            "run_names": ["dense-step-zero"],
+            "max_results": 10,
+            "start_step": None,
+            "end_step": None,
+        },
+        # Different runs are sampled independently and need not share step sets.
+        {
+            "run_names": ["dense-step-zero", "sparse"],
+            "max_results": 7,
+            "start_step": None,
+            "end_step": None,
+        },
         # exactly at cap
         {"run_names": ["atcap"], "max_results": 2500, "start_step": None, "end_step": None},
         {"run_names": ["atcap"], "max_results": 2499, "start_step": None, "end_step": None},

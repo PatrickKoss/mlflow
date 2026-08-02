@@ -67,10 +67,31 @@ cases:
     bind:
       - {bind: mv_version, from: "$.model_version.version"}
 
+  - name: mv_create_second
+    method: POST
+    path: /api/2.0/mlflow/model-versions/create
+    body: {name: model_reg_a2, source: "${reg_run_artifact}", run_id: "${reg_run}"}
+
+  - name: mv_create_third
+    method: POST
+    path: /api/2.0/mlflow/model-versions/create
+    body: {name: model_reg_a2, source: "${reg_run_artifact}", run_id: "${reg_run}"}
+
   - name: mv_get
     method: GET
     path: /api/2.0/mlflow/model-versions/get
     query: {name: model_reg_a2, version: "${mv_version}"}
+
+  - name: mv_get_leading_zero_version
+    method: GET
+    path: /api/2.0/mlflow/model-versions/get
+    query: {name: model_reg_a2, version: "03"}
+
+  - name: mv_get_non_integer_version
+    method: GET
+    path: /api/2.0/mlflow/model-versions/get
+    query: {name: model_reg_a2, version: abc}
+    expect_status: 400
 
   - name: mv_update
     method: PATCH
@@ -105,7 +126,7 @@ cases:
   - name: alias_set
     method: POST
     path: /api/2.0/mlflow/registered-models/alias
-    body: {name: model_reg_a2, alias: champion, version: "${mv_version}"}
+    body: {name: model_reg_a2, alias: champion, version: "03"}
 
   - name: alias_get_by_alias
     method: GET

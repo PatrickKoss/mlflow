@@ -13,8 +13,12 @@ use super::dbutil::{Tx, Val};
 use super::entities::{Experiment, ExperimentTag, LifecycleStage};
 use super::uri_util::{append_to_uri_path, resolve_uri_if_local};
 use super::validation;
+use super::workspaces::DEFAULT_WORKSPACE_NAME;
 use super::TrackingStore;
 use crate::schema::runs::{EXPERIMENTS, EXPERIMENT_TAGS};
+
+const DEFAULT_EXPERIMENT_ID: i64 = 0;
+const DEFAULT_EXPERIMENT_NAME: &str = "Default";
 
 /// View-type filter for lifecycle stages (`ViewType`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +65,64 @@ pub enum WorkspaceArtifactRoot {
 }
 
 impl TrackingStore {
+    /// Ensure the raw default experiment row exists. The insert deliberately
+    /// does not pre-check by name: experiment 0 may have been renamed. A
+    /// unique violation is swallowed only after re-checking the global primary
+    /// key, matching `SqlAlchemyStore._create_default_experiment`.
+    pub async fn ensure_default_experiment(&self) -> Result<(), MlflowError> {
+        let dialect = self.db().dialect();
+        let ph = |i| dialect.placeholder(i);
+        let creation_time = now_millis();
+        let insert_sql = format!(
+            "INSERT INTO {EXPERIMENTS} \
+             (experiment_id, name, artifact_location, lifecycle_stage, creation_time, \
+              last_update_time, workspace) \
+             VALUES ({}, {}, {}, {}, {}, {}, {})",
+            ph(1),
+            ph(2),
+            ph(3),
+            ph(4),
+            ph(5),
+            ph(6),
+            ph(7),
+        );
+        let values = [
+            Val::Int(DEFAULT_EXPERIMENT_ID),
+            Val::Text(DEFAULT_EXPERIMENT_NAME.to_string()),
+            Val::Text(self.default_experiment_artifact_location(DEFAULT_EXPERIMENT_ID)),
+            Val::Text(LifecycleStage::ACTIVE.to_string()),
+            Val::Int(creation_time),
+            Val::Int(creation_time),
+            Val::Text(DEFAULT_WORKSPACE_NAME.to_string()),
+        ];
+        let mut tx = self.db().begin_tx().await.map_err(internal)?;
+        match tx.exec(&insert_sql, &values).await {
+            Ok(_) => tx.commit().await.map_err(internal),
+            Err(error) if is_unique_violation(&error) => {
+                drop(tx);
+                let exists = self
+                    .db()
+                    .fetch_optional(
+                        &format!(
+                            "SELECT experiment_id FROM {EXPERIMENTS} WHERE experiment_id = {}",
+                            ph(1)
+                        ),
+                        &[Val::Int(DEFAULT_EXPERIMENT_ID)],
+                        |row| row.get_int("experiment_id"),
+                    )
+                    .await
+                    .map_err(internal)?
+                    .is_some();
+                if exists {
+                    Ok(())
+                } else {
+                    Err(internal(error))
+                }
+            }
+            Err(error) => Err(internal(error)),
+        }
+    }
+
     /// `create_experiment` (single-tenant). Returns the new experiment id
     /// (stringified). The default artifact location is `<root>/<experiment_id>`.
     pub async fn create_experiment(

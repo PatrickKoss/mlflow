@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
                 mlflow_server::workspace::DEFAULT_WORKSPACE_NAME,
             );
             let store = TrackingStore::new(db.clone(), artifact_root);
+            store.ensure_default_experiment().await?;
             // The registry tables live in the same Alembic-migrated database as
             // the tracking tables, so the registry store shares the same `Db`
             // pool (`_get_model_registry_store()`, `handlers.py:674`).

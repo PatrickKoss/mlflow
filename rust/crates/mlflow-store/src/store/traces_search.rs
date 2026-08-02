@@ -59,13 +59,33 @@ pub struct TracesPage {
 }
 
 impl TrackingStore {
-    /// `search_traces` over `experiment_ids` (locations), filtered/ordered per
-    /// the trace DSL, with offset pagination. Workspace scoping filters the
-    /// requested experiment ids to those in the active workspace.
+    /// `search_traces` over explicit experiment locations.
     pub async fn search_traces(
         &self,
         workspace: &str,
         experiment_ids: &[String],
+        filter: Option<&str>,
+        max_results: i64,
+        order_by: &[String],
+        page_token: Option<&str>,
+    ) -> Result<TracesPage, MlflowError> {
+        self.search_traces_with_locations(
+            workspace,
+            Some(experiment_ids),
+            filter,
+            max_results,
+            order_by,
+            page_token,
+        )
+        .await
+    }
+
+    /// Search over optional experiment locations. When locations are absent,
+    /// all traces reachable from the active workspace are searched.
+    pub async fn search_traces_with_locations(
+        &self,
+        workspace: &str,
+        experiment_ids: Option<&[String]>,
         filter: Option<&str>,
         max_results: i64,
         order_by: &[String],
@@ -78,15 +98,21 @@ impl TrackingStore {
         let dialect = self.db().dialect();
 
         // Workspace + numeric experiment-id filtering (`_filter_experiment_ids`).
-        let exp_ids = self
-            .filter_trace_experiment_ids(workspace, experiment_ids)
-            .await?;
-        if exp_ids.is_empty() {
-            return Ok(TracesPage {
-                trace_infos: vec![],
-                next_page_token: None,
-            });
-        }
+        let exp_ids = match experiment_ids {
+            Some(experiment_ids) => {
+                let exp_ids = self
+                    .filter_trace_experiment_ids(workspace, experiment_ids)
+                    .await?;
+                if exp_ids.is_empty() {
+                    return Ok(TracesPage {
+                        trace_infos: vec![],
+                        next_page_token: None,
+                    });
+                }
+                Some(exp_ids)
+            }
+            None => None,
+        };
 
         let offset = match page_token {
             Some(t) => parse_offset_token(t)?,
@@ -95,7 +121,8 @@ impl TrackingStore {
 
         let query = build_search_sql(
             dialect,
-            &exp_ids,
+            exp_ids.as_deref(),
+            workspace,
             &filters,
             &order_cols,
             max_results,
@@ -369,7 +396,8 @@ impl Ph {
 /// filters, experiment-id predicate, `ORDER BY`, `LIMIT`, `OFFSET`.
 fn build_search_sql(
     dialect: Dialect,
-    exp_ids: &[i64],
+    exp_ids: Option<&[i64]>,
+    workspace: &str,
     filters: &[Comparison],
     order_cols: &[OrderCol],
     max_results: i64,
@@ -393,26 +421,46 @@ fn build_search_sql(
 
     // WHERE.
     let mut wheres: Vec<String> = Vec::new();
-    let exp_phs: Vec<String> = exp_ids
-        .iter()
-        .map(|id| ph.next(&mut binds, Val::Int(*id)))
-        .collect();
-    wheres.push(format!("ti.experiment_id IN ({})", exp_phs.join(", ")));
+    if let Some(exp_ids) = exp_ids {
+        let exp_phs: Vec<String> = exp_ids
+            .iter()
+            .map(|id| ph.next(&mut binds, Val::Int(*id)))
+            .collect();
+        wheres.push(format!("ti.experiment_id IN ({})", exp_phs.join(", ")));
+    } else {
+        let workspace_ph = ph.next(&mut binds, Val::Text(workspace.to_string()));
+        wheres.push(format!(
+            "ti.experiment_id IN (SELECT experiment_id FROM experiments WHERE workspace = {workspace_ph})"
+        ));
+    }
 
     // Filters.
     let mut span_conditions: Vec<String> = Vec::new();
-    for f in filters {
+    // Span predicates are emitted together in the trailing correlated EXISTS.
+    // Allocate every non-span bind first so SQLite/MySQL positional binds follow
+    // the same order as the final SQL text even when the filter starts with a
+    // span predicate. PostgreSQL's numbered placeholders are order-independent.
+    for f in filters.iter().filter(|f| f.entity_type != "span") {
         if let Some(pred) =
             build_filter_predicate(dialect, f, &mut ph, &mut binds, &mut span_conditions)?
         {
             wheres.push(pred);
         }
     }
+    for f in filters.iter().filter(|f| f.entity_type == "span") {
+        let _ = build_filter_predicate(dialect, f, &mut ph, &mut binds, &mut span_conditions)?;
+    }
     // Combined span EXISTS (all span predicates must match the same span).
     if !span_conditions.is_empty() {
+        let mut scoped_conditions = span_conditions;
+        scoped_conditions.push("s.experiment_id = ti.experiment_id".to_string());
+        if let Some(lower_bound_ns) = span_start_time_lower_bound_ns(filters) {
+            let bound_ph = ph.next(&mut binds, Val::Int(lower_bound_ns));
+            scoped_conditions.push(format!("s.start_time_unix_nano >= {bound_ph}"));
+        }
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM spans s WHERE s.trace_id = ti.request_id AND {})",
-            span_conditions.join(" AND ")
+            scoped_conditions.join(" AND ")
         ));
     }
 
@@ -461,18 +509,44 @@ pub(crate) fn build_trace_filter_wheres(
     let filters = parse_filter(filter)?;
     let mut wheres: Vec<String> = Vec::new();
     let mut span_conditions: Vec<String> = Vec::new();
-    for f in &filters {
+    for f in filters.iter().filter(|f| f.entity_type != "span") {
         if let Some(pred) = build_filter_predicate(dialect, f, ph, binds, &mut span_conditions)? {
             wheres.push(pred);
         }
     }
+    for f in filters.iter().filter(|f| f.entity_type == "span") {
+        let _ = build_filter_predicate(dialect, f, ph, binds, &mut span_conditions)?;
+    }
     if !span_conditions.is_empty() {
+        let mut scoped_conditions = span_conditions;
+        scoped_conditions.push("s.experiment_id = ti.experiment_id".to_string());
+        if let Some(lower_bound_ns) = span_start_time_lower_bound_ns(&filters) {
+            let bound_ph = ph.next(binds, Val::Int(lower_bound_ns));
+            scoped_conditions.push(format!("s.start_time_unix_nano >= {bound_ph}"));
+        }
         wheres.push(format!(
             "EXISTS (SELECT 1 FROM spans s WHERE s.trace_id = ti.request_id AND {})",
-            span_conditions.join(" AND ")
+            scoped_conditions.join(" AND ")
         ));
     }
     Ok(wheres)
+}
+
+fn span_start_time_lower_bound_ns(filters: &[Comparison]) -> Option<i64> {
+    filters
+        .iter()
+        .filter(|filter| {
+            filter.entity_type == "attribute"
+                && filter.key == "timestamp_ms"
+                && matches!(filter.comparator.as_str(), ">" | ">=")
+        })
+        .filter_map(|filter| as_i64(&filter.value).ok())
+        .max()
+        .map(|timestamp_ms| {
+            timestamp_ms
+                .saturating_sub(10_000)
+                .saturating_mul(1_000_000)
+        })
 }
 
 /// Build one filter comparison into a WHERE predicate. Span predicates are

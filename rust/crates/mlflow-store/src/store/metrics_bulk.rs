@@ -13,40 +13,21 @@
 //! workspace (mirrors `_filter_entity_ids(RUN)`), so out-of-workspace ids are
 //! silently dropped rather than erroring.
 //!
-//! ## `get_metric_history_bulk_interval` (interval sampling)
+//! ## `get_metric_history_bulk_interval` (row sampling)
 //!
-//! Ported verbatim from the SqlAlchemyStore override:
-//!
-//! 1. `all_steps` = distinct steps across all runs for the key, ordered asc.
-//!    Empty → return `[]`.
-//! 2. `all_mins_and_maxes` = the per-run `MIN(step)`/`MAX(step)` set (grouped by
-//!    run), unioned across runs.
-//! 3. If both `start_step` and `end_step` are `None`: `start_step = 0`,
-//!    `end_step = all_steps.last()`.
-//! 4. Clamp `all_mins_and_maxes` to `[start_step, end_step]`.
-//! 5. `start_idx = bisect_left(all_steps, start_step)`,
-//!    `end_idx = bisect_right(all_steps, end_step)`.
-//! 6. If `end_idx - start_idx <= max_results`: keep every step in the slice.
-//!    Else: `interval = num_steps as f64 / max_results as f64`; for
-//!    `i in 0..max_results`: `idx = start_idx + (i as f64 * interval) as i64`
-//!    (truncate toward zero); if `idx < end_idx` keep `all_steps[idx]`. Always
-//!    additionally keep `all_steps[end_idx - 1]`.
-//! 7. `steps = sort(unique(sampled ∪ mins_and_maxes))`.
-//! 8. For each run **in request order**, fetch rows where `step IN (steps)`,
-//!    ordered `(run_uuid, step, timestamp, value)`, limited to 25000, and
-//!    concatenate (no global re-sort).
-//!
-//! The `interval` division is IEEE-754 f64 and `int()` truncation is reproduced
-//! with `as i64`. `sampled_steps` is a set, so duplicate index picks collapse.
-
-use std::collections::BTreeSet;
+//! Sampling is independent per run and bounded by `max_results`, even when many
+//! values share one step. Rows are canonically ordered by
+//! `(step, timestamp, value, is_nan)`, assigned with `NTILE(max_results)`, and
+//! ranked within each bucket with `ROW_NUMBER`; the first row of every bucket is
+//! kept. The global last row is then appended (or replaces the final sampled
+//! row when already at the cap), preserving both boundaries. This is the
+//! SQLAlchemy-store algorithm from upstream #24305.
 
 use mlflow_error::MlflowError;
 
 use super::dbutil::Val;
 use super::entities::{Metric, MetricWithRunId};
 use super::experiments::internal;
-use super::metrics::GET_METRIC_HISTORY_MAX_RESULTS;
 use super::TrackingStore;
 
 /// Handler cap on run ids per bulk request (`MAX_RUN_IDS_PER_REQUEST` /
@@ -101,10 +82,8 @@ impl TrackingStore {
             .map_err(internal)
     }
 
-    /// `get_metric_history_bulk_interval`: interval-sampled metric history across
-    /// `run_ids`. See the module docs for the exact sampling arithmetic.
-    /// `start_step`/`end_step` are both-or-neither (the handler enforces this);
-    /// passing `None`/`None` defaults the range to `[0, max_step]`.
+    /// `get_metric_history_bulk_interval`: independently row-sampled metric
+    /// history for each run. See the module docs for the exact SQL algorithm.
     pub async fn get_metric_history_bulk_interval(
         &self,
         workspace: &str,
@@ -114,178 +93,104 @@ impl TrackingStore {
         start_step: Option<i64>,
         end_step: Option<i64>,
     ) -> Result<Vec<MetricWithRunId>, MlflowError> {
+        if start_step.is_some() != end_step.is_some() {
+            return Err(MlflowError::invalid_parameter_value(
+                "Both start_step and end_step must be specified together, or neither may be specified.",
+            ));
+        }
+        let max_results = max_results.max(1);
+
         for rid in run_ids {
             // Workspace access check per run (mirrors `_validate_run_accessible`).
             self.resolve_run_row(workspace, rid).await?;
         }
 
-        let all_steps = self.distinct_steps(run_ids, metric_key).await?;
-        if all_steps.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut mins_and_maxes: BTreeSet<i64> = BTreeSet::new();
-        for (min_step, max_step) in self.per_run_min_max_steps(run_ids, metric_key).await? {
-            mins_and_maxes.insert(min_step);
-            mins_and_maxes.insert(max_step);
-        }
-
-        let (start_step, end_step) = match (start_step, end_step) {
-            (None, None) => (0, *all_steps.last().unwrap()),
-            (s, e) => (
-                s.unwrap_or(0),
-                e.unwrap_or_else(|| *all_steps.last().unwrap()),
-            ),
-        };
-
-        let mins_and_maxes: BTreeSet<i64> = mins_and_maxes
-            .into_iter()
-            .filter(|s| start_step <= *s && *s <= end_step)
-            .collect();
-
-        let start_idx = bisect_left(&all_steps, start_step);
-        let end_idx = bisect_right(&all_steps, end_step);
-
-        let mut sampled: BTreeSet<i64> = BTreeSet::new();
-        let window = end_idx.saturating_sub(start_idx);
-        if window <= max_results {
-            for &s in &all_steps[start_idx..end_idx] {
-                sampled.insert(s);
-            }
-        } else {
-            let num_steps = window as f64;
-            let interval = num_steps / max_results as f64;
-            for i in 0..max_results {
-                let idx = start_idx + (i as f64 * interval) as usize;
-                if idx < end_idx {
-                    sampled.insert(all_steps[idx]);
-                }
-            }
-            sampled.insert(all_steps[end_idx - 1]);
-        }
-
-        // steps = sorted(sampled ∪ mins_and_maxes). BTreeSet keeps them sorted.
-        let mut steps: BTreeSet<i64> = sampled;
-        steps.extend(mins_and_maxes);
-        let steps: Vec<i64> = steps.into_iter().collect();
-
-        // Concatenate per-run, in request order (no global re-sort).
-        let mut out: Vec<MetricWithRunId> = Vec::new();
+        let mut out = Vec::new();
         for rid in run_ids {
             out.extend(
-                self.metric_history_from_steps(rid, metric_key, &steps)
-                    .await?,
+                self.sample_metric_history_single_run(
+                    rid,
+                    metric_key,
+                    max_results,
+                    start_step,
+                    end_step,
+                )
+                .await?,
             );
         }
         Ok(out)
     }
 
-    /// `get_metric_history_bulk_interval_from_steps` for one run: rows where
-    /// `step IN (steps)`, ordered `(run_uuid, step, timestamp, value)`, limited
-    /// to `MAX_RESULTS_GET_METRIC_HISTORY` (25000).
-    async fn metric_history_from_steps(
+    async fn sample_metric_history_single_run(
         &self,
         run_id: &str,
         metric_key: &str,
-        steps: &[i64],
+        max_results: usize,
+        start_step: Option<i64>,
+        end_step: Option<i64>,
     ) -> Result<Vec<MetricWithRunId>, MlflowError> {
-        if steps.is_empty() {
-            return Ok(Vec::new());
-        }
         let dialect = self.db().dialect();
         let ph = |i| dialect.placeholder(i);
         let mut vals: Vec<Val> = vec![
-            Val::Text(metric_key.to_string()),
             Val::Text(run_id.to_string()),
+            Val::Text(metric_key.to_string()),
         ];
-        let step_ph: Vec<String> = steps
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                vals.push(Val::Int(*s));
-                ph(i + 3)
-            })
-            .collect();
+        let mut filters = vec![
+            format!("run_uuid = {}", ph(1)),
+            format!("\"key\" = {}", ph(2)),
+        ];
+        if let (Some(start), Some(end)) = (start_step, end_step) {
+            vals.push(Val::Int(start));
+            vals.push(Val::Int(end));
+            filters.push(format!("step >= {}", ph(3)));
+            filters.push(format!("step <= {}", ph(4)));
+        }
+        let filters = filters.join(" AND ");
         let sql = format!(
+            "WITH bucketed AS (\
+                 SELECT run_uuid, \"key\", value, timestamp, step, is_nan, \
+                        NTILE({max_results}) OVER (ORDER BY step, timestamp, value, is_nan) AS bucket \
+                 FROM metrics WHERE {filters}\
+             ), ranked AS (\
+                 SELECT run_uuid, \"key\", value, timestamp, step, is_nan, \
+                        ROW_NUMBER() OVER (\
+                            PARTITION BY bucket ORDER BY step, timestamp, value, is_nan\
+                        ) AS sample_rank \
+                 FROM bucketed\
+             ) \
+             SELECT run_uuid, \"key\", value, timestamp, step, is_nan \
+             FROM ranked WHERE sample_rank = 1 \
+             ORDER BY step, timestamp, value, is_nan"
+        );
+        let mut rows = self
+            .db()
+            .fetch_all(&sql, &vals, sampled_metric_row_from_row)
+            .await
+            .map_err(internal)?;
+
+        let last_sql = format!(
             "SELECT run_uuid, \"key\", value, timestamp, step, is_nan FROM metrics \
-             WHERE \"key\" = {} AND run_uuid = {} AND step IN ({}) \
-             ORDER BY run_uuid, step, timestamp, value \
-             LIMIT {}",
-            ph(1),
-            ph(2),
-            step_ph.join(", "),
-            GET_METRIC_HISTORY_MAX_RESULTS,
+             WHERE {filters} ORDER BY step DESC, timestamp DESC, value DESC, is_nan DESC LIMIT 1"
         );
-        self.db()
-            .fetch_all(&sql, &vals, metric_with_run_id_from_row)
+        let last = self
+            .db()
+            .fetch_optional(&last_sql, &vals, sampled_metric_row_from_row)
             .await
-            .map_err(internal)
-    }
-
-    /// Distinct steps across the runs for `metric_key`, ascending.
-    async fn distinct_steps(
-        &self,
-        run_ids: &[&str],
-        metric_key: &str,
-    ) -> Result<Vec<i64>, MlflowError> {
-        if run_ids.is_empty() {
-            return Ok(Vec::new());
+            .map_err(internal)?;
+        if let Some(last) = last {
+            if rows.last().is_none_or(|row| !row.same_canonical_row(&last)) {
+                if rows.len() >= max_results {
+                    *rows.last_mut().expect("sample is non-empty at the cap") = last;
+                } else {
+                    rows.push(last);
+                }
+            }
         }
-        let dialect = self.db().dialect();
-        let ph = |i| dialect.placeholder(i);
-        let mut vals: Vec<Val> = vec![Val::Text(metric_key.to_string())];
-        let placeholders: Vec<String> = run_ids
-            .iter()
-            .enumerate()
-            .map(|(i, rid)| {
-                vals.push(Val::Text(rid.to_string()));
-                ph(i + 2)
-            })
-            .collect();
-        let sql = format!(
-            "SELECT DISTINCT step FROM metrics \
-             WHERE \"key\" = {} AND run_uuid IN ({}) ORDER BY step",
-            ph(1),
-            placeholders.join(", "),
-        );
-        self.db()
-            .fetch_all(&sql, &vals, |r| r.get_i64("step"))
-            .await
-            .map_err(internal)
-    }
 
-    /// Per-run `(MIN(step), MAX(step))` for `metric_key`.
-    async fn per_run_min_max_steps(
-        &self,
-        run_ids: &[&str],
-        metric_key: &str,
-    ) -> Result<Vec<(i64, i64)>, MlflowError> {
-        if run_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let dialect = self.db().dialect();
-        let ph = |i| dialect.placeholder(i);
-        let mut vals: Vec<Val> = vec![Val::Text(metric_key.to_string())];
-        let placeholders: Vec<String> = run_ids
-            .iter()
-            .enumerate()
-            .map(|(i, rid)| {
-                vals.push(Val::Text(rid.to_string()));
-                ph(i + 2)
-            })
-            .collect();
-        let sql = format!(
-            "SELECT MIN(step) AS min_step, MAX(step) AS max_step FROM metrics \
-             WHERE \"key\" = {} AND run_uuid IN ({}) GROUP BY run_uuid",
-            ph(1),
-            placeholders.join(", "),
-        );
-        self.db()
-            .fetch_all(&sql, &vals, |r| {
-                Ok((r.get_i64("min_step")?, r.get_i64("max_step")?))
-            })
-            .await
-            .map_err(internal)
+        Ok(rows
+            .into_iter()
+            .map(SampledMetricRow::into_metric)
+            .collect())
     }
 
     /// Filter `run_ids` to those whose experiment is in `workspace`
@@ -330,6 +235,50 @@ impl TrackingStore {
     }
 }
 
+#[derive(Debug)]
+struct SampledMetricRow {
+    run_id: String,
+    key: String,
+    value: f64,
+    timestamp: i64,
+    step: i64,
+    is_nan: bool,
+}
+
+impl SampledMetricRow {
+    fn same_canonical_row(&self, other: &Self) -> bool {
+        self.step == other.step
+            && self.timestamp == other.timestamp
+            && self.is_nan == other.is_nan
+            && (self.is_nan || self.value == other.value)
+    }
+
+    fn into_metric(self) -> MetricWithRunId {
+        MetricWithRunId {
+            run_id: self.run_id,
+            metric: Metric {
+                key: self.key,
+                value: if self.is_nan { f64::NAN } else { self.value },
+                timestamp: self.timestamp,
+                step: self.step,
+            },
+        }
+    }
+}
+
+fn sampled_metric_row_from_row(
+    r: &dyn super::dbutil::RowLike,
+) -> Result<SampledMetricRow, sqlx::Error> {
+    Ok(SampledMetricRow {
+        run_id: r.get_string("run_uuid")?,
+        key: r.get_string("key")?,
+        value: r.get_f64("value")?,
+        timestamp: r.get_opt_i64("timestamp")?.unwrap_or(0),
+        step: r.get_i64("step")?,
+        is_nan: r.get_bool("is_nan")?,
+    })
+}
+
 fn metric_with_run_id_from_row(
     r: &dyn super::dbutil::RowLike,
 ) -> Result<MetricWithRunId, sqlx::Error> {
@@ -344,66 +293,4 @@ fn metric_with_run_id_from_row(
             step: r.get_i64("step")?,
         },
     })
-}
-
-/// `bisect.bisect_left`: first index `i` with `a[i] >= x`.
-fn bisect_left(a: &[i64], x: i64) -> usize {
-    a.partition_point(|&v| v < x)
-}
-
-/// `bisect.bisect_right`: first index `i` with `a[i] > x`.
-fn bisect_right(a: &[i64], x: i64) -> usize {
-    a.partition_point(|&v| v <= x)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bisect_matches_python() {
-        let a = [1, 2, 2, 3, 5];
-        // bisect_left
-        assert_eq!(bisect_left(&a, 0), 0);
-        assert_eq!(bisect_left(&a, 2), 1);
-        assert_eq!(bisect_left(&a, 4), 4);
-        assert_eq!(bisect_left(&a, 6), 5);
-        // bisect_right
-        assert_eq!(bisect_right(&a, 2), 3);
-        assert_eq!(bisect_right(&a, 5), 5);
-        assert_eq!(bisect_right(&a, 0), 0);
-    }
-
-    /// The exact index arithmetic of the sampling branch, isolated so it can be
-    /// checked against Python's `int(i * interval)` semantics.
-    fn sample_indices(start_idx: usize, end_idx: usize, max_results: usize) -> BTreeSet<usize> {
-        let window = end_idx - start_idx;
-        let mut out = BTreeSet::new();
-        if window <= max_results {
-            for idx in start_idx..end_idx {
-                out.insert(idx);
-            }
-        } else {
-            let interval = window as f64 / max_results as f64;
-            for i in 0..max_results {
-                let idx = start_idx + (i as f64 * interval) as usize;
-                if idx < end_idx {
-                    out.insert(idx);
-                }
-            }
-            out.insert(end_idx - 1);
-        }
-        out
-    }
-
-    #[test]
-    fn sampling_index_math() {
-        // window <= max_results: keep everything.
-        assert_eq!(sample_indices(0, 5, 10).len(), 5);
-        // window > max_results: even spacing + forced endpoint.
-        let idxs = sample_indices(0, 100, 10);
-        assert!(idxs.contains(&0));
-        assert!(idxs.contains(&99)); // forced endpoint = end_idx - 1
-        assert!(idxs.len() <= 11);
-    }
 }
