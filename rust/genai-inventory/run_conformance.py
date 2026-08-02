@@ -300,7 +300,15 @@ def _run_gateway_budget_suite(args: argparse.Namespace, backend: str) -> dict[st
                 backend,
                 args.postgres_uri,
                 "gateway-budget-policy",
-                extra_env={"MLFLOW_SERVER_ENABLE_JOB_EXECUTION": "false"},
+                extra_env={
+                    "MLFLOW_SERVER_ENABLE_JOB_EXECUTION": "false",
+                    # Python only re-reads policies every
+                    # MLFLOW_GATEWAY_BUDGET_REFRESH_INTERVAL seconds (default
+                    # 600), so a create-policy -> expect-429 sequence races the
+                    # TTL and flakes. Both servers honor the env var; interval 0
+                    # makes enforcement deterministic without weakening parity.
+                    "MLFLOW_GATEWAY_BUDGET_REFRESH_INTERVAL": "0",
+                },
             ) as (url, server_log):
                 observed[implementation] = _run_mcp_sequence(
                     url, cases, {"provider_base": provider_base}
