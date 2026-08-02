@@ -388,6 +388,27 @@ fn build_dispatch() -> Dispatch {
         }
     }
 
+    for (tail, method, validator) in [
+        (
+            "/mlflow/scorers/online-configs",
+            "GET",
+            Validator::ReadOnlineScoringConfigs,
+        ),
+        (
+            "/mlflow/scorers/online-config",
+            "PUT",
+            Validator::UpdateOnlineScoringConfig,
+        ),
+    ] {
+        for prefix in ["/api/3.0", "/ajax-api/3.0"] {
+            d.exact.push(Route {
+                matcher: TemplateMatcher::compile(&format!("{prefix}{tail}")),
+                method,
+                validator,
+            });
+        }
+    }
+
     // Hand-registered RBAC routes (`BEFORE_REQUEST_VALIDATORS.update`,
     // `auth/__init__.py:2669-2720`). Super admins bypass these upstream; the
     // validators below implement workspace-admin, self, and resource-MANAGE

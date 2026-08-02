@@ -135,6 +135,7 @@ class DualServers:
         extra_env: dict[str, str] | None = None,
         python_extra_env: dict[str, str] | None = None,
         rust_extra_env: dict[str, str] | None = None,
+        unset_env: set[str] | None = None,
         python_app: str = "mlflow.server:app",
         python_asgi_app: str | None = None,
     ) -> None:
@@ -144,6 +145,7 @@ class DualServers:
         self.extra_env = extra_env or {}
         self.python_extra_env = python_extra_env or {}
         self.rust_extra_env = rust_extra_env or {}
+        self.unset_env = unset_env or set()
         # The flask `--app` target. The plain sections use the base tracking
         # app; the auth section must use the auth app factory (the auth
         # endpoints exist only there), mirroring
@@ -172,6 +174,8 @@ class DualServers:
             **self.extra_env,
             **(self.python_extra_env if name == "python" else self.rust_extra_env),
         }
+        for variable in self.unset_env:
+            env.pop(variable, None)
         if name == "python" and "MLFLOW_SERVER_ENABLE_JOB_EXECUTION" in self.python_extra_env:
             # The invoke handlers construct MlflowClient/fluent APIs inside the
             # server process. The real `mlflow server` launcher pins those calls
@@ -778,6 +782,7 @@ def _run_sqlite_sections(
                 "mlflow.source.name": "corpus-server",
                 "mlflow.source.type": "LOCAL",
             }),
+            "OPENAI_API_KEY": "compliance-fixture-key",
         }
         python_extra_env = {
             "MLFLOW_SERVER_ENABLE_JOB_EXECUTION": "true",
@@ -953,6 +958,43 @@ def _run_mcp_server_registry_section(
         return [run_case(case, servers, py_bindings, rust_bindings, allow, creds) for case in cases]
 
 
+def _run_issue_credentials_section(
+    cases: list[Case],
+    allow: list[AllowEntry],
+    workroot: Path,
+) -> list[CaseResult]:
+    seed_db = workroot / "seed.db"
+    _seed_tracking_db(seed_db)
+    artifact_root = workroot / "artifacts"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    provider_env = {
+        "OPENAI_API_KEY",
+        "AZURE_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "MISTRAL_API_KEY",
+        "GROQ_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "XAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "TOGETHERAI_API_KEY",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+    }
+    creds: dict[str, tuple[str, str]] = {}
+    with DualServers(
+        workroot,
+        seed_db,
+        artifact_root,
+        extra_env={"MLFLOW_SERVER_ENABLE_JOB_EXECUTION": "false"},
+        unset_env=provider_env,
+    ) as servers:
+        py_bindings: dict[str, Any] = {}
+        rust_bindings: dict[str, Any] = {}
+        return [run_case(case, servers, py_bindings, rust_bindings, allow, creds) for case in cases]
+
+
 def _run_gateway_proxy_validation_section(
     cases: list[Case],
     allow: list[AllowEntry],
@@ -999,6 +1041,7 @@ def main() -> int:
     auth_cases = sections.pop("auth", [])
     workspace_cases = sections.pop("workspaces", [])
     invoke_cases = sections.pop("invoke", [])
+    issue_credentials_cases = sections.pop("issue_credentials", [])
     traces_cases = sections.pop("traces", [])
     gateway_proxy_validation_cases = sections.pop("gateway_proxy_validation", [])
     mcp_server_registry_cases = sections.pop("mcp_server_registry", [])
@@ -1010,6 +1053,11 @@ def main() -> int:
     if invoke_cases:
         with tempfile.TemporaryDirectory(prefix="t124-invoke-") as td:
             all_results.extend(_run_sqlite_sections({"invoke": invoke_cases}, allow, Path(td)))
+    if issue_credentials_cases:
+        with tempfile.TemporaryDirectory(prefix="ts5-issue-credentials-") as td:
+            all_results.extend(
+                _run_issue_credentials_section(issue_credentials_cases, allow, Path(td))
+            )
     if traces_cases:
         with tempfile.TemporaryDirectory(prefix="t124-traces-") as td:
             all_results.extend(

@@ -12,8 +12,18 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::proto_http::{parse_query_pairs, parse_request, proto_response};
+use crate::schema_validation::{validate_request_json_with_schema, SchemaEntry, Validator};
 use crate::state::AppState;
 use crate::workspace::Workspace;
+
+const ONLINE_CONFIGS_SCHEMA: &[SchemaEntry] = &[SchemaEntry {
+    param: "scorer_ids",
+    validators: &[
+        Validator::Required,
+        Validator::Array,
+        Validator::ItemTypeString,
+    ],
+}];
 
 pub const DECORATOR_SCORER_REGISTRATION_NOT_SUPPORTED_ERROR: &str =
     "Custom scorer registration (using @scorer decorator) is not supported outside of Databricks \
@@ -154,18 +164,24 @@ pub async fn get_online_scoring_configs(
     State(state): State<AppState>,
     workspace: Workspace,
     parts: Parts,
+    body: Bytes,
 ) -> Result<Response, MlflowError> {
-    let scorer_ids = parts
-        .uri
-        .query()
-        .map(parse_query_pairs)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(key, value)| (key == "scorer_ids").then_some(value))
+    let query = parts.uri.query().map(parse_query_pairs).unwrap_or_default();
+    let body = if body.is_empty() {
+        None
+    } else {
+        Some(serde_json::from_slice(&body).map_err(|error| {
+            MlflowError::invalid_parameter_value(format!("failed to parse JSON: {error}"))
+        })?)
+    };
+    let request = online_configs_request_json(&query, body.as_ref());
+    validate_request_json_with_schema(&request, ONLINE_CONFIGS_SCHEMA, false)?;
+    let scorer_ids = request["scorer_ids"]
+        .as_array()
+        .expect("validated scorer_ids is an array")
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
         .collect::<Vec<_>>();
-    if scorer_ids.is_empty() {
-        return Err(missing("scorer_ids"));
-    }
     let configs = state
         .tracking_store()
         .get_online_scoring_configs(workspace.name(), &scorer_ids)
@@ -174,6 +190,34 @@ pub async fn get_online_scoring_configs(
         "configs",
         Value::Array(configs.iter().map(config_json).collect()),
     )))
+}
+
+pub(crate) fn online_configs_request_json(
+    query: &[(String, String)],
+    body: Option<&Value>,
+) -> Value {
+    if query.is_empty() {
+        return body.cloned().unwrap_or_else(|| Value::Object(Map::new()));
+    }
+
+    let mut values = Map::new();
+    for (key, _) in query {
+        if values.contains_key(key) {
+            continue;
+        }
+        let matches = query
+            .iter()
+            .filter(|(candidate, _)| candidate == key)
+            .map(|(_, value)| Value::String(value.clone()))
+            .collect::<Vec<_>>();
+        let value = if key == "scorer_ids" || matches.len() != 1 {
+            Value::Array(matches)
+        } else {
+            matches.into_iter().next().unwrap()
+        };
+        values.insert(key.clone(), value);
+    }
+    Value::Object(values)
 }
 
 #[derive(Deserialize)]

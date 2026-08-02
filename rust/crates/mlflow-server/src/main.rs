@@ -177,7 +177,8 @@ async fn main() -> anyhow::Result<()> {
                 let executor = NativeWorkerExecutor::new(worker)
                     .tracking_uri(server_uri)
                     .gateway_uri(gateway_uri)
-                    .internal_gateway_token(internal_token);
+                    .internal_gateway_token(internal_token)
+                    .tracking_store(app_state.tracking_store().clone());
                 JobRunner::new(
                     app_state.job_store(),
                     Arc::new(executor),

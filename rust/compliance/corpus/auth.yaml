@@ -97,3 +97,145 @@ cases:
     query: {filter_string: "name = 'com.example/auth-actions'"}
     auth: admin
     expect_status: 200
+
+  - name: auth_online_config_create_experiment_a
+    method: POST
+    path: /api/2.0/mlflow/experiments/create
+    body: {name: auth_online_config_a}
+    auth: admin
+    bind:
+      - {bind: auth_online_exp_a, from: "$.experiment_id"}
+    expect_status: 200
+
+  - name: auth_online_config_create_experiment_b
+    method: POST
+    path: /api/2.0/mlflow/experiments/create
+    body: {name: auth_online_config_b}
+    auth: admin
+    bind:
+      - {bind: auth_online_exp_b, from: "$.experiment_id"}
+    expect_status: 200
+
+  - name: auth_online_config_register_a
+    method: POST
+    path: /api/3.0/mlflow/scorers/register
+    body:
+      experiment_id: "${auth_online_exp_a}"
+      name: auth-online-a
+      serialized_scorer: '{"name":"auth-online-a","builtin_scorer_class":"ResponseLength","builtin_scorer_pydantic_data":{"max_length":100}}'
+    auth: admin
+    bind:
+      - {bind: auth_online_scorer_a, from: "$.scorer_id"}
+    expect_status: 200
+
+  - name: auth_online_config_register_b
+    method: POST
+    path: /ajax-api/3.0/mlflow/scorers/register
+    body:
+      experiment_id: "${auth_online_exp_b}"
+      name: auth-online-b
+      serialized_scorer: '{"name":"auth-online-b","builtin_scorer_class":"ResponseLength","builtin_scorer_pydantic_data":{"max_length":100}}'
+    auth: admin
+    bind:
+      - {bind: auth_online_scorer_b, from: "$.scorer_id"}
+    expect_status: 200
+
+  - name: auth_online_config_seed_a
+    method: PUT
+    path: /api/3.0/mlflow/scorers/online-config
+    body:
+      experiment_id: "${auth_online_exp_a}"
+      name: auth-online-a
+      sample_rate: 0.0
+    auth: admin
+    compare_body: false
+    expect_status: 200
+
+  - name: auth_online_config_seed_b
+    method: PUT
+    path: /ajax-api/3.0/mlflow/scorers/online-config
+    body:
+      experiment_id: "${auth_online_exp_b}"
+      name: auth-online-b
+      sample_rate: 0.0
+    auth: admin
+    compare_body: false
+    expect_status: 200
+
+  - name: auth_online_configs_query_read_allowed
+    method: GET
+    path: /api/3.0/mlflow/scorers/online-configs
+    query:
+      scorer_ids: ["${auth_online_scorer_a}", "${auth_online_scorer_b}"]
+    auth: user
+    expect_status: 200
+
+  - name: auth_online_configs_body_read_allowed
+    method: GET
+    path: /ajax-api/3.0/mlflow/scorers/online-configs
+    body:
+      scorer_ids: ["${auth_online_scorer_a}", "${auth_online_scorer_b}"]
+    auth: user
+    expect_status: 200
+
+  - name: auth_online_config_put_read_only_denied
+    method: PUT
+    path: /api/3.0/mlflow/scorers/online-config
+    body:
+      experiment_id: "${auth_online_exp_a}"
+      name: auth-online-a
+      sample_rate: 0.0
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_online_config_put_missing_experiment_denied
+    method: PUT
+    path: /ajax-api/3.0/mlflow/scorers/online-config
+    body: {name: auth-online-a, sample_rate: 0.0}
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_online_config_deny_experiment_b
+    method: POST
+    path: /api/3.0/mlflow/users/permissions/grant
+    body:
+      username: alice
+      resource_type: experiment
+      resource_id: "${auth_online_exp_b}"
+      permission: NO_PERMISSIONS
+    auth: admin
+    compare_body: false
+    expect_status: 200
+
+  - name: auth_online_configs_every_experiment_required
+    method: GET
+    path: /api/3.0/mlflow/scorers/online-configs
+    query:
+      scorer_ids: ["${auth_online_scorer_a}", "${auth_online_scorer_b}"]
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_online_config_grant_edit_a
+    method: POST
+    path: /ajax-api/3.0/mlflow/users/permissions/grant
+    body:
+      username: alice
+      resource_type: experiment
+      resource_id: "${auth_online_exp_a}"
+      permission: EDIT
+    auth: admin
+    compare_body: false
+    expect_status: 200
+
+  - name: auth_online_config_put_edit_allowed
+    method: PUT
+    path: /ajax-api/3.0/mlflow/scorers/online-config
+    body:
+      experiment_id: "${auth_online_exp_a}"
+      name: auth-online-a
+      sample_rate: 0.0
+    auth: user
+    expect_status: 200

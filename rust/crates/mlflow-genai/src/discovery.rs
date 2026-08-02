@@ -63,12 +63,9 @@ struct IdentifiedIssue {
     name: String,
     description: String,
     root_cause: String,
-    #[serde(default)]
     example_indices: Vec<usize>,
     severity: String,
-    #[serde(default)]
     categories: Vec<String>,
-    #[serde(default)]
     category_rationale: String,
 }
 
@@ -1896,15 +1893,56 @@ fn cluster_schema() -> Value {
 
 fn issue_schema() -> Value {
     json_schema(
-        "IdentifiedIssue",
+        "_IdentifiedIssue",
         json!({
-            "properties": {
-                "name": {"type": "string"}, "description": {"type": "string"},
-                "root_cause": {"type": "string"}, "example_indices": {"items": {"type": "integer"}, "type": "array"},
-                "severity": {"enum": ["not_an_issue", "low", "medium", "high"], "type": "string"},
-                "categories": {"items": {"type": "string"}, "type": "array"}, "category_rationale": {"type": "string"}
+            "$defs": {
+                "IssueSeverity": {
+                    "enum": ["not_an_issue", "low", "medium", "high"],
+                    "title": "IssueSeverity",
+                    "type": "string"
+                }
             },
-            "required": ["name", "description", "root_cause", "severity", "categories"], "type": "object"
+            "properties": {
+                "name": {
+                    "description": "Title prefixed with 'Issue: ' followed by a short readable description (3-8 words), e.g. 'Issue: Media control commands ignored'",
+                    "title": "Name",
+                    "type": "string"
+                },
+                "description": {
+                    "description": "What the issue is",
+                    "title": "Description",
+                    "type": "string"
+                },
+                "root_cause": {
+                    "description": "Why this issue occurs",
+                    "title": "Root Cause",
+                    "type": "string"
+                },
+                "example_indices": {
+                    "description": "Indices into the input trace summary list that exemplify this issue",
+                    "items": {"type": "integer"},
+                    "title": "Example Indices",
+                    "type": "array"
+                },
+                "severity": {
+                    "$ref": "#/$defs/IssueSeverity",
+                    "description": "Severity of this issue. not_an_issue=not a real issue, low=minor issue, medium=moderate issue, high=critical issue"
+                },
+                "categories": {
+                    "description": "Categories of this issue. Each category MUST be substantiated by concrete evidence in the description and root cause.",
+                    "items": {"type": "string"},
+                    "title": "Categories",
+                    "type": "array"
+                },
+                "category_rationale": {
+                    "description": "For EACH assigned category, explain in 1-2 sentences WHY this issue belongs to that category with specific evidence from the failure. Return an empty string if no categories are assigned. E.g. 'execution: The assistant claimed playback resumed when no action occurred. correctness: It provided conflicting timer states in adjacent responses.'",
+                    "title": "Category Rationale",
+                    "type": "string"
+                }
+            },
+            "required": ["name", "description", "root_cause", "example_indices", "severity", "categories", "category_rationale"],
+            "title": "_IdentifiedIssue",
+            "type": "object"
         }),
     )
 }
@@ -1920,10 +1958,34 @@ fn dedup_schema() -> Value {
 }
 
 fn json_schema(name: &str, mut schema: Value) -> Value {
-    if let Some(object) = schema.as_object_mut() {
-        object.insert("additionalProperties".to_string(), Value::Bool(false));
-    }
+    enforce_strict_json_schema(&mut schema);
     json!({"type": "json_schema", "json_schema": {"name": name, "schema": schema, "strict": true}})
+}
+
+fn enforce_strict_json_schema(node: &mut Value) {
+    match node {
+        Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").cloned() {
+                object.clear();
+                object.insert("$ref".to_string(), reference);
+                return;
+            }
+            if object.get("type").and_then(Value::as_str) == Some("object")
+                || object.contains_key("properties")
+            {
+                object.insert("additionalProperties".to_string(), Value::Bool(false));
+            }
+            for value in object.values_mut() {
+                enforce_strict_json_schema(value);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                enforce_strict_json_schema(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn env_usize(name: &str, default: usize) -> Result<usize, EngineError> {
@@ -2036,5 +2098,97 @@ mod tests {
     #[test]
     fn summary_is_python_compatible() {
         assert_eq!(build_summary(&[], 3), "Analyzed 3 traces. No issues found.");
+    }
+
+    #[test]
+    fn identified_issue_schema_matches_python_response_format() {
+        let expected = json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "_IdentifiedIssue",
+                "schema": {
+                    "$defs": {
+                        "IssueSeverity": {
+                            "enum": ["not_an_issue", "low", "medium", "high"],
+                            "title": "IssueSeverity",
+                            "type": "string"
+                        }
+                    },
+                    "properties": {
+                        "name": {
+                            "description": "Title prefixed with 'Issue: ' followed by a short readable description (3-8 words), e.g. 'Issue: Media control commands ignored'",
+                            "title": "Name",
+                            "type": "string"
+                        },
+                        "description": {
+                            "description": "What the issue is",
+                            "title": "Description",
+                            "type": "string"
+                        },
+                        "root_cause": {
+                            "description": "Why this issue occurs",
+                            "title": "Root Cause",
+                            "type": "string"
+                        },
+                        "example_indices": {
+                            "description": "Indices into the input trace summary list that exemplify this issue",
+                            "items": {"type": "integer"},
+                            "title": "Example Indices",
+                            "type": "array"
+                        },
+                        "severity": {"$ref": "#/$defs/IssueSeverity"},
+                        "categories": {
+                            "description": "Categories of this issue. Each category MUST be substantiated by concrete evidence in the description and root cause.",
+                            "items": {"type": "string"},
+                            "title": "Categories",
+                            "type": "array"
+                        },
+                        "category_rationale": {
+                            "description": "For EACH assigned category, explain in 1-2 sentences WHY this issue belongs to that category with specific evidence from the failure. Return an empty string if no categories are assigned. E.g. 'execution: The assistant claimed playback resumed when no action occurred. correctness: It provided conflicting timer states in adjacent responses.'",
+                            "title": "Category Rationale",
+                            "type": "string"
+                        }
+                    },
+                    "required": ["name", "description", "root_cause", "example_indices", "severity", "categories", "category_rationale"],
+                    "title": "_IdentifiedIssue",
+                    "type": "object",
+                    "additionalProperties": false
+                },
+                "strict": true
+            }
+        });
+        assert_eq!(issue_schema(), expected);
+    }
+
+    #[test]
+    fn strict_schema_removes_every_ref_sibling_without_recursing() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "severity": {
+                    "$ref": "#/$defs/Severity",
+                    "description": "removed",
+                    "properties": {"also": {"type": "object"}}
+                }
+            }
+        });
+        enforce_strict_json_schema(&mut schema);
+        assert_eq!(
+            schema["properties"]["severity"],
+            json!({"$ref": "#/$defs/Severity"})
+        );
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn identified_issue_requires_structured_output_fields() {
+        let missing = json!({
+            "name": "Issue: Missing evidence",
+            "description": "description",
+            "root_cause": "root cause",
+            "severity": "low",
+            "categories": []
+        });
+        assert!(serde_json::from_value::<IdentifiedIssue>(missing).is_err());
     }
 }

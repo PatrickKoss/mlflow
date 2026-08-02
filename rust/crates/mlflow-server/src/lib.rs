@@ -492,8 +492,8 @@ fn register_proto_routes(state: AppState, artifacts_only: bool) -> Router {
     );
     // ---- end Gateway runtime ----
 
-    // AUTH GAP: online configs (D21) are authenticated-only in Python; no
-    // experiment/scorer-specific validator is applied.
+    // Online-config GET resolves every returned scorer config to its owning
+    // experiment and requires READ; PUT requires UPDATE on its experiment.
     for prefix in ["/api/3.0", "/ajax-api/3.0"] {
         router = router.route(
             &format!("{prefix}/mlflow/scorers/online-configs"),

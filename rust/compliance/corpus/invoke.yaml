@@ -65,6 +65,15 @@ cases:
     body: {experiment_id: "0", serialized_scorer: not-json, trace_ids: [tr-corpus-a]}
     expect_status: 400
 
+  - name: scorer_invoke_decorator_rejected
+    method: POST
+    path: /ajax-api/3.0/mlflow/scorer/invoke
+    body:
+      experiment_id: "0"
+      serialized_scorer: '{"name":"pwned","call_source":"return true","call_signature":"(outputs)","original_func_name":"pwned"}'
+      trace_ids: [tr-corpus-a]
+    expect_status: 400
+
   - name: issues_invoke_submit
     method: POST
     path: /ajax-api/3.0/mlflow/issues/invoke
@@ -72,7 +81,7 @@ cases:
       experiment_id: "0"
       trace_ids: [tr-corpus-a, tr-corpus-b]
       categories: [correctness, safety]
-      provider: openai
+      provider: OpenAI
       model: gpt-5
     bind:
       - {bind: issues_job_id, from: "$.job_id"}

@@ -1,5 +1,6 @@
 //! T17.4 invoke submission parity and runner-fixture integration.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -194,6 +195,7 @@ async fn invoke_routes_are_authenticated_only_under_basic_auth() {
                 "categories": ["correctness"],
                 "provider": "openai",
                 "model": "gpt-5",
+                "endpoint_name": "fixture-endpoint",
             }),
         ),
     ];
@@ -248,7 +250,17 @@ async fn validation_errors_match_python_exactly() {
             "/ajax-api/3.0/mlflow/scorer/invoke",
             json!({"experiment_id": fixture.experiment_id, "serialized_scorer": "not-json", "trace_ids": ["tr-1"]}),
             StatusCode::BAD_REQUEST,
-            "Invalid JSON in serialized scorer: Expecting value: line 1 column 1 (char 0)",
+            "serialized_scorer must be valid JSON",
+        ),
+        (
+            "/ajax-api/3.0/mlflow/scorer/invoke",
+            json!({
+                "experiment_id": fixture.experiment_id,
+                "serialized_scorer": r#"{"name":"pwned","call_source":"return true"}"#,
+                "trace_ids": ["tr-1"]
+            }),
+            StatusCode::BAD_REQUEST,
+            mlflow_server::scorers::DECORATOR_SCORER_REGISTRATION_NOT_SUPPORTED_ERROR,
         ),
         (
             "/ajax-api/3.0/mlflow/issues/invoke",
@@ -450,6 +462,7 @@ async fn evaluate_and_issue_precreate_python_shaped_runs_and_tags() {
                 "categories": ["correctness", "safety"],
                 "provider": "openai",
                 "model": "gpt-5",
+                "endpoint_name": "fixture-endpoint",
             }),
         )
         .await;
@@ -470,12 +483,65 @@ async fn evaluate_and_issue_precreate_python_shaped_runs_and_tags() {
         .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(tags["mlflow.runType"], "issue_detection");
     assert_eq!(tags["categories"], "correctness,safety");
-    assert_eq!(tags["model"], "openai:/gpt-5");
+    assert_eq!(tags["model"], "gateway:/fixture-endpoint");
     assert_eq!(tags["total_traces"], "2");
     assert_eq!(tags["mlflow.issueDetection.jobId"], response["job_id"]);
     assert!(tags.contains_key("mlflow.user"));
     assert!(tags.contains_key("mlflow.source.name"));
     assert_eq!(tags["mlflow.source.type"], "LOCAL");
+}
+
+#[tokio::test]
+async fn issue_provider_secret_lookup_is_case_normalized() {
+    let fixture = Fixture::new().await;
+    let secret = fixture
+        .tracking
+        .create_gateway_secret(
+            WS,
+            "uppercase-openai",
+            &HashMap::from([("api_key".to_string(), "fixture-key".to_string())]),
+            Some("openai"),
+            &HashMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+    let (status, body) = fixture
+        .post(
+            "/ajax-api/3.0/mlflow/issues/invoke",
+            json!({
+                "experiment_id": fixture.experiment_id,
+                "trace_ids": ["tr-a"],
+                "categories": ["correctness"],
+                "provider": "OpenAI",
+                "model": "gpt-5",
+                "secret_id": secret.secret_id,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let response: Value = serde_json::from_slice(&body).unwrap();
+    let run = fixture
+        .tracking
+        .get_run(WS, response["run_id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        run.data
+            .tags
+            .iter()
+            .find(|tag| tag.key == "model")
+            .unwrap()
+            .value,
+        "openai:/gpt-5"
+    );
+    let job = fixture
+        .jobs
+        .get_job(WS, response["job_id"].as_str().unwrap())
+        .await
+        .unwrap();
+    let params: Value = serde_json::from_str(&job.params).unwrap();
+    assert_eq!(params["_mlflow_provider_name"], "openai");
 }
 
 #[derive(Clone)]
@@ -537,7 +603,7 @@ async fn every_invoke_kind_and_prompt_optimization_reach_fixture_results_through
         ),
         (
             "/ajax-api/3.0/mlflow/issues/invoke",
-            json!({"experiment_id": fixture.experiment_id, "trace_ids": ["tr-a"], "categories": ["correctness"], "provider": "openai", "model": "gpt-5"}),
+            json!({"experiment_id": fixture.experiment_id, "trace_ids": ["tr-a"], "categories": ["correctness"], "provider": "openai", "model": "gpt-5", "endpoint_name": "fixture-endpoint"}),
         ),
         (
             "/api/3.0/mlflow/prompt-optimization/jobs",

@@ -271,6 +271,127 @@ async fn default_no_permission_denies_read_without_grant() {
 }
 
 #[tokio::test]
+async fn online_scoring_config_routes_enforce_every_experiment_permission() {
+    let srv = TestServer::start("nd_online_configs").await;
+    let exp_a = srv.create_experiment("online-auth-a").await;
+    let exp_b = srv.create_experiment("online-auth-b").await;
+    let scorer_a = srv
+        .tracking
+        .register_scorer(WS, &exp_a, "judge-a", "{}")
+        .await
+        .unwrap();
+    let scorer_b = srv
+        .tracking
+        .register_scorer(WS, &exp_b, "judge-b", "{}")
+        .await
+        .unwrap();
+    srv.tracking
+        .upsert_online_scoring_config(WS, &exp_a, "judge-a", 0.0, None)
+        .await
+        .unwrap();
+    srv.tracking
+        .upsert_online_scoring_config(WS, &exp_b, "judge-b", 0.0, None)
+        .await
+        .unwrap();
+    let (user, password) = srv.create_user("online_config_user").await;
+    let auth = Some((user.as_str(), password.as_str()));
+    let query_path = format!(
+        "/api/3.0/mlflow/scorers/online-configs?scorer_ids={}&scorer_ids={}",
+        scorer_a.scorer_id, scorer_b.scorer_id
+    );
+
+    let denied_without_grants = send(&srv.base, Method::GET, &query_path, auth, None).await;
+    assert_eq!(denied_without_grants.status, StatusCode::FORBIDDEN);
+
+    srv.grant(&user, "experiment", &exp_a, "READ").await;
+    let denied_one_of_two = send(&srv.base, Method::GET, &query_path, auth, None).await;
+    assert_eq!(denied_one_of_two.status, StatusCode::FORBIDDEN);
+
+    srv.grant(&user, "experiment", &exp_b, "READ").await;
+    let allowed_query = send(&srv.base, Method::GET, &query_path, auth, None).await;
+    assert_eq!(
+        allowed_query.status,
+        StatusCode::OK,
+        "{}",
+        allowed_query.body
+    );
+
+    let allowed_body = send(
+        &srv.base,
+        Method::GET,
+        "/ajax-api/3.0/mlflow/scorers/online-configs",
+        auth,
+        Some(json!({"scorer_ids": [scorer_a.scorer_id, scorer_b.scorer_id]})),
+    )
+    .await;
+    assert_eq!(allowed_body.status, StatusCode::OK, "{}", allowed_body.body);
+
+    let missing_ids = send(
+        &srv.base,
+        Method::GET,
+        "/api/3.0/mlflow/scorers/online-configs",
+        auth,
+        None,
+    )
+    .await;
+    assert_eq!(missing_ids.status, StatusCode::BAD_REQUEST);
+
+    let unrelated_query = send(
+        &srv.base,
+        Method::GET,
+        "/api/3.0/mlflow/scorers/online-configs?ignored=value",
+        auth,
+        None,
+    )
+    .await;
+    assert_eq!(unrelated_query.status, StatusCode::BAD_REQUEST);
+
+    let missing_experiment = send(
+        &srv.base,
+        Method::PUT,
+        "/api/3.0/mlflow/scorers/online-config",
+        auth,
+        Some(json!({"name": "judge-a", "sample_rate": 0.0})),
+    )
+    .await;
+    assert_eq!(missing_experiment.status, StatusCode::FORBIDDEN);
+
+    let denied_update = send(
+        &srv.base,
+        Method::PUT,
+        "/api/3.0/mlflow/scorers/online-config",
+        auth,
+        Some(json!({
+            "experiment_id": exp_a,
+            "name": "judge-a",
+            "sample_rate": 0.0,
+        })),
+    )
+    .await;
+    assert_eq!(denied_update.status, StatusCode::FORBIDDEN);
+
+    srv.grant(&user, "experiment", &exp_a, "EDIT").await;
+    let allowed_update = send(
+        &srv.base,
+        Method::PUT,
+        "/ajax-api/3.0/mlflow/scorers/online-config",
+        auth,
+        Some(json!({
+            "experiment_id": exp_a,
+            "name": "judge-a",
+            "sample_rate": 0.0,
+        })),
+    )
+    .await;
+    assert_eq!(
+        allowed_update.status,
+        StatusCode::OK,
+        "{}",
+        allowed_update.body
+    );
+}
+
+#[tokio::test]
 async fn model_version_create_source_read_denied_with_no_default() {
     // The MV-create dual requirement's source-READ half: user has MANAGE on the
     // target model but no READ on the source run's experiment (and the default

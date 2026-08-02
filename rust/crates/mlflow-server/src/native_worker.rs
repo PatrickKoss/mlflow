@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use mlflow_genai::{
     JobKind, WorkerLaunchError, WorkerLauncher, WorkerRequest, NATIVE_WORKER_PROTOCOL_VERSION,
 };
+use mlflow_store::TrackingStore;
 use serde_json::{json, Value};
 
 use crate::job_runner::{
@@ -92,6 +93,7 @@ pub struct NativeWorkerExecutor {
     tracking_uri: Option<String>,
     gateway_uri: Option<String>,
     internal_gateway_token: Option<String>,
+    tracking_store: Option<TrackingStore>,
 }
 
 impl NativeWorkerExecutor {
@@ -109,6 +111,7 @@ impl NativeWorkerExecutor {
             tracking_uri: None,
             gateway_uri: None,
             internal_gateway_token: None,
+            tracking_store: None,
         }
     }
 
@@ -126,10 +129,15 @@ impl NativeWorkerExecutor {
         self.internal_gateway_token = Some(token.into());
         self
     }
+
+    pub fn tracking_store(mut self, store: TrackingStore) -> Self {
+        self.tracking_store = Some(store);
+        self
+    }
 }
 
 impl JobExecutor for NativeWorkerExecutor {
-    fn execute(&self, request: JobExecutionRequest) -> JobExecutionFuture {
+    fn execute(&self, mut request: JobExecutionRequest) -> JobExecutionFuture {
         let job_kind = match request.job_name.parse::<JobKind>() {
             Ok(job_kind) => job_kind,
             Err(job_name) => {
@@ -148,6 +156,22 @@ impl JobExecutor for NativeWorkerExecutor {
             }
         };
 
+        let credential_request = request.params.as_object_mut().and_then(|params| {
+            let provider = params
+                .remove("_mlflow_provider_name")?
+                .as_str()?
+                .to_string();
+            let secret_id = params
+                .remove("_mlflow_provider_secret_id")?
+                .as_str()?
+                .to_string();
+            let workspace = params
+                .remove("_mlflow_provider_secret_workspace")?
+                .as_str()?
+                .to_string();
+            Some((provider, secret_id, workspace))
+        });
+        let tracking_store = self.tracking_store.clone();
         let mut launcher = self
             .launcher
             .clone()
@@ -181,6 +205,35 @@ impl JobExecutor for NativeWorkerExecutor {
             subject: request.subject,
         };
         Box::pin(async move {
+            if let Some((provider, secret_id, workspace)) = credential_request {
+                let Some(store) = tracking_store else {
+                    return JobExecutionResult::Failed {
+                        error: python_runtime_error(
+                            "Native worker provider credentials require a tracking store",
+                        ),
+                        transient: false,
+                        details: None,
+                    };
+                };
+                match crate::invoke::fetch_provider_credentials(
+                    &store, &workspace, &provider, &secret_id,
+                )
+                .await
+                {
+                    Ok(credentials) => {
+                        for (name, value) in credentials {
+                            launcher = launcher.env(name, value);
+                        }
+                    }
+                    Err(error) => {
+                        return JobExecutionResult::Failed {
+                            error: python_runtime_error(&error.message),
+                            transient: false,
+                            details: None,
+                        };
+                    }
+                }
+            }
             match launcher.run_with_status(&envelope).await {
                 Ok(output) => match output.status_details {
                     Some(details) => JobExecutionResult::SucceededWithDetails {

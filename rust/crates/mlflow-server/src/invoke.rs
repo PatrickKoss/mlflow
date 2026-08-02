@@ -1,5 +1,7 @@
 //! UI-only GenAI invoke submission routes (plan T17.4, §12.2-§12.4).
 
+use std::collections::BTreeMap;
+
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::header;
@@ -13,6 +15,7 @@ use serde_json::{json, Map, Value};
 
 use crate::auth_middleware::AuthContext;
 use crate::schema_validation::{validate_request_json_with_schema, SchemaEntry, Validator};
+use crate::scorers::DECORATOR_SCORER_REGISTRATION_NOT_SUPPORTED_ERROR;
 use crate::state::AppState;
 use crate::workspace::Workspace;
 
@@ -176,6 +179,17 @@ pub async fn invoke_scorer(
     let serialized_scorer = serialized_scorer.as_str().ok_or_else(|| {
         MlflowError::internal_error("the JSON object must be str, bytes or bytearray, not dict")
     })?;
+    let serialized_data: Value = serde_json::from_str(serialized_scorer).map_err(|_| {
+        MlflowError::invalid_parameter_value("serialized_scorer must be valid JSON")
+    })?;
+    if serialized_data
+        .get("call_source")
+        .is_some_and(|value| !value.is_null())
+    {
+        return Err(MlflowError::invalid_parameter_value(
+            DECORATOR_SCORER_REGISTRATION_NOT_SUPPORTED_ERROR,
+        ));
+    }
     let scorer = validate_serialized_scorer(serialized_scorer)?;
     let trace_ids = trace_ids
         .as_array()
@@ -232,7 +246,9 @@ pub async fn invoke_issue_detection(
     let trace_ids = object["trace_ids"].as_array().unwrap();
     let categories = object["categories"].as_array().unwrap();
     let provider = object["provider"].as_str().unwrap();
+    let provider_name = provider.to_lowercase();
     let model = object.get("model").and_then(Value::as_str);
+    let secret_id = object.get("secret_id").and_then(Value::as_str);
     let endpoint_name = object.get("endpoint_name").and_then(Value::as_str);
     if endpoint_name.is_none_or(str::is_empty)
         && (provider.is_empty() || model.is_none_or(str::is_empty))
@@ -240,6 +256,21 @@ pub async fn invoke_issue_detection(
         return Err(MlflowError::internal_error(
             "Either 'endpoint_name' or both 'provider' and 'model' must be provided",
         ));
+    }
+    if endpoint_name.is_none_or(str::is_empty) {
+        if let Some(secret_id) = secret_id.filter(|value| !value.is_empty()) {
+            let _credentials = fetch_provider_credentials(
+                state.tracking_store(),
+                workspace.name(),
+                &provider_name,
+                secret_id,
+            )
+            .await?;
+        } else {
+            validate_provider_environment(provider, &provider_name, |name| {
+                std::env::var_os(name).is_some_and(|value| !value.is_empty())
+            })?;
+        }
     }
     let categories = categories
         .iter()
@@ -250,7 +281,7 @@ pub async fn invoke_issue_detection(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let model_name = endpoint_name.filter(|value| !value.is_empty()).map_or_else(
-        || format!("{provider}:/{}", model.unwrap()),
+        || format!("{provider_name}:/{}", model.unwrap()),
         |name| format!("gateway:/{name}"),
     );
     let start_time = chrono::Utc::now().timestamp_millis();
@@ -287,7 +318,7 @@ pub async fn invoke_issue_detection(
         )
         .await?;
     let run_id = run.info.run_id;
-    let params = ordered_object([
+    let mut params = ordered_object([
         ("experiment_id", Value::String(experiment_id.to_string())),
         ("trace_ids", Value::Array(trace_ids.clone())),
         (
@@ -297,9 +328,21 @@ pub async fn invoke_issue_detection(
         ("run_id", Value::String(run_id.clone())),
         ("model", Value::String(model_name)),
     ]);
-    // Provider-secret decryption belongs to T18.1. The secret identifier is
-    // deliberately not persisted in Python's durable job row; fixture-mode
-    // T17 execution therefore has the same DB contract with or without it.
+    if let Some(secret_id) = secret_id.filter(|value| !value.is_empty()) {
+        let params = params.as_object_mut().expect("job params is an object");
+        params.insert(
+            "_mlflow_provider_name".to_string(),
+            Value::String(provider_name),
+        );
+        params.insert(
+            "_mlflow_provider_secret_id".to_string(),
+            Value::String(secret_id.to_string()),
+        );
+        params.insert(
+            "_mlflow_provider_secret_workspace".to_string(),
+            Value::String(workspace.name().to_string()),
+        );
+    }
     let job = create_job(&state, workspace.name(), "invoke_issue_detection", params).await?;
     state
         .tracking_store()
@@ -521,6 +564,114 @@ fn json_truthy(value: &Value) -> bool {
     }
 }
 
+fn validate_provider_environment(
+    provider: &str,
+    provider_name: &str,
+    is_set: impl Fn(&str) -> bool,
+) -> Result<(), MlflowError> {
+    let env_vars = provider_environment_variables(provider_name).ok_or_else(|| {
+        MlflowError::invalid_parameter_value(format!(
+            "Unsupported provider '{provider}'. Choose a supported provider or AI Gateway endpoint."
+        ))
+    })?;
+    if env_vars.iter().any(|name| is_set(name)) {
+        return Ok(());
+    }
+    let hint = if env_vars.len() == 1 {
+        env_vars[0].to_string()
+    } else {
+        format!("one of {}", env_vars.join(", "))
+    };
+    Err(MlflowError::invalid_parameter_value(format!(
+        "No API key available for provider '{provider}'. Save an API key in AI Gateway, or set {hint} on the MLflow server."
+    )))
+}
+
+fn provider_environment_variables(provider: &str) -> Option<&'static [&'static str]> {
+    match provider {
+        "openai" => Some(&["OPENAI_API_KEY"]),
+        "azure" => Some(&["AZURE_API_KEY"]),
+        "anthropic" => Some(&["ANTHROPIC_API_KEY"]),
+        "gemini" => Some(&["GEMINI_API_KEY"]),
+        "mistral" => Some(&["MISTRAL_API_KEY"]),
+        "groq" => Some(&["GROQ_API_KEY"]),
+        "deepseek" => Some(&["DEEPSEEK_API_KEY"]),
+        "xai" => Some(&["XAI_API_KEY"]),
+        "openrouter" => Some(&["OPENROUTER_API_KEY"]),
+        "togetherai" => Some(&["TOGETHERAI_API_KEY"]),
+        "bedrock" => Some(&[
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+        ]),
+        _ => None,
+    }
+}
+
+pub(crate) async fn fetch_provider_credentials(
+    store: &mlflow_store::TrackingStore,
+    workspace: &str,
+    provider: &str,
+    secret_id: &str,
+) -> Result<BTreeMap<String, String>, MlflowError> {
+    let fields = provider_secret_fields(provider).ok_or_else(|| {
+        MlflowError::internal_error(format!(
+            "Unknown provider '{provider}'. Supported providers: openai, azure, anthropic, gemini, mistral, groq, deepseek, xai, openrouter, togetherai, bedrock. To use other providers, create an AI Gateway endpoint instead."
+        ))
+    })?;
+    let secret_value = store
+        .get_decrypted_gateway_secret(workspace, secret_id)
+        .await?;
+    let secret_info = store
+        .get_gateway_secret_info(workspace, Some(secret_id), None)
+        .await?;
+    let mut values = secret_value.as_object().cloned().unwrap_or_default();
+    values.extend(
+        secret_info
+            .auth_config
+            .into_iter()
+            .map(|(key, value)| (key, Value::String(value))),
+    );
+    Ok(fields
+        .iter()
+        .filter_map(|(field, env_var)| {
+            values
+                .get(*field)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(|value| ((*env_var).to_string(), value.to_string()))
+        })
+        .collect())
+}
+
+fn provider_secret_fields(provider: &str) -> Option<&'static [(&'static str, &'static str)]> {
+    match provider {
+        "openai" => Some(&[
+            ("api_key", "OPENAI_API_KEY"),
+            ("api_base", "OPENAI_API_BASE"),
+        ]),
+        "azure" => Some(&[
+            ("api_key", "AZURE_API_KEY"),
+            ("api_base", "AZURE_API_BASE"),
+            ("api_version", "AZURE_API_VERSION"),
+        ]),
+        "anthropic" => Some(&[("api_key", "ANTHROPIC_API_KEY")]),
+        "gemini" => Some(&[("api_key", "GEMINI_API_KEY")]),
+        "mistral" => Some(&[("api_key", "MISTRAL_API_KEY")]),
+        "groq" => Some(&[("api_key", "GROQ_API_KEY")]),
+        "deepseek" => Some(&[("api_key", "DEEPSEEK_API_KEY")]),
+        "xai" => Some(&[("api_key", "XAI_API_KEY")]),
+        "openrouter" => Some(&[("api_key", "OPENROUTER_API_KEY")]),
+        "togetherai" => Some(&[("api_key", "TOGETHERAI_API_KEY")]),
+        "bedrock" => Some(&[
+            ("aws_access_key_id", "AWS_ACCESS_KEY_ID"),
+            ("aws_secret_access_key", "AWS_SECRET_ACCESS_KEY"),
+            ("aws_session_token", "AWS_SESSION_TOKEN"),
+        ]),
+        _ => None,
+    }
+}
+
 fn python_json_error(input: &str, error: &serde_json::Error) -> String {
     let line = error.line();
     let column = error.column();
@@ -549,4 +700,35 @@ fn flask_json(value: Value) -> Result<Response, MlflowError> {
         .map_err(|error| MlflowError::internal_error(error.to_string()))?;
     body.push('\n');
     Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_environment_errors_match_python() {
+        let unsupported =
+            validate_provider_environment("UnknownAI", "unknownai", |_| false).unwrap_err();
+        assert_eq!(
+            unsupported.message,
+            "Unsupported provider 'UnknownAI'. Choose a supported provider or AI Gateway endpoint."
+        );
+
+        let openai = validate_provider_environment("OpenAI", "openai", |_| false).unwrap_err();
+        assert_eq!(
+            openai.message,
+            "No API key available for provider 'OpenAI'. Save an API key in AI Gateway, or set OPENAI_API_KEY on the MLflow server."
+        );
+
+        let bedrock = validate_provider_environment("Bedrock", "bedrock", |_| false).unwrap_err();
+        assert_eq!(
+            bedrock.message,
+            "No API key available for provider 'Bedrock'. Save an API key in AI Gateway, or set one of AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN on the MLflow server."
+        );
+        assert!(validate_provider_environment("OpenAI", "openai", |name| {
+            name == "OPENAI_API_KEY"
+        })
+        .is_ok());
+    }
 }

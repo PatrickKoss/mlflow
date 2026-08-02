@@ -56,7 +56,17 @@ use mlflow_error::{ErrorCode, MlflowError};
 use mlflow_store::TrackingStore;
 use serde_json::Value;
 
+use crate::schema_validation::{validate_request_json_with_schema, SchemaEntry};
+use crate::scorers::online_configs_request_json;
 use crate::workspace::DEFAULT_WORKSPACE_NAME;
+
+const ONLINE_CONFIGS_AUTH_SCHEMA: &[SchemaEntry] = &[SchemaEntry {
+    param: "scorer_ids",
+    validators: &[
+        crate::schema_validation::Validator::Array,
+        crate::schema_validation::Validator::ItemTypeString,
+    ],
+}];
 
 /// Everything a validator needs about the current request. Built once by the
 /// middleware after buffering the body.
@@ -162,6 +172,8 @@ pub enum Validator {
     ReadScorerList,
     ReadScorer,
     DeleteScorer,
+    ReadOnlineScoringConfigs,
+    UpdateOnlineScoringConfig,
     // ---- AI Gateway ----
     ReadGatewaySecret,
     UpdateGatewaySecret,
@@ -284,6 +296,8 @@ impl Validator {
             ReadScorerList => validate_can_read_scorer_list(ctx).await,
             ReadScorer => Ok(scorer_permission(ctx).await?.can_read),
             DeleteScorer => Ok(scorer_permission(ctx).await?.can_delete),
+            ReadOnlineScoringConfigs => validate_can_read_online_scoring_configs(ctx).await,
+            UpdateOnlineScoringConfig => validate_can_update_online_scoring_config(ctx).await,
             ReadGatewaySecret => Ok(gateway_permission(ctx, "gateway_secret", "secret_id")
                 .await?
                 .can_read),
@@ -776,6 +790,64 @@ async fn scorer_permission(ctx: &RequestCtx<'_>) -> Result<&'static Permission, 
         &pattern,
     )
     .await
+}
+
+async fn validate_can_update_online_scoring_config(
+    ctx: &RequestCtx<'_>,
+) -> Result<bool, MlflowError> {
+    let Some(experiment_id) = ctx
+        .json_body
+        .and_then(Value::as_object)
+        .and_then(|body| body.get("experiment_id"))
+        .filter(|value| json_truthy(value))
+        .and_then(Value::as_str)
+    else {
+        return Ok(false);
+    };
+    Ok(experiment_permission(ctx, experiment_id).await?.can_update)
+}
+
+async fn validate_can_read_online_scoring_configs(
+    ctx: &RequestCtx<'_>,
+) -> Result<bool, MlflowError> {
+    let request = online_configs_request_json(ctx.query, ctx.json_body);
+    validate_request_json_with_schema(&request, ONLINE_CONFIGS_AUTH_SCHEMA, false)?;
+    let scorer_ids = request
+        .get("scorer_ids")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .map(|id| id.as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if scorer_ids.is_empty() {
+        return Ok(true);
+    }
+    let configs = ctx
+        .tracking_store
+        .get_online_scoring_configs(ctx.workspace, &scorer_ids)
+        .await?;
+    for config in configs {
+        if !experiment_permission(ctx, &config.experiment_id)
+            .await?
+            .can_read
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn json_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
 }
 
 // ---- Permission resolution ----
