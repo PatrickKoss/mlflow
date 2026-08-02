@@ -118,9 +118,7 @@ def build_corpus(out_dir: Path) -> int:
     log_metrics(rid_dup, dup_metrics)
 
     rid_dense_step_zero = make_run("dense-step-zero")
-    dense_step_zero_metrics = [
-        Metric(key, float(i), 10_000 + i, 0) for i in range(2999)
-    ]
+    dense_step_zero_metrics = [Metric(key, float(i), 10_000 + i, 0) for i in range(2999)]
     dense_step_zero_metrics.append(Metric(key, float("nan"), 13_000, 0))
     log_metrics(rid_dense_step_zero, dense_step_zero_metrics)
 

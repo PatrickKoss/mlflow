@@ -124,7 +124,7 @@ jobs:
       - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
           workspaces: rust
-      - uses: ./.github/actions/setup-python
+      - uses: $/.github/actions/setup-python
       - name: Install Python oracle dependencies
         working-directory: .
         run: uv sync --frozen
@@ -195,7 +195,7 @@ jobs:
       - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
           workspaces: rust
-      - uses: ./.github/actions/setup-python
+      - uses: $/.github/actions/setup-python
       - name: Allow trigger creation in MySQL service
         if: matrix.dialect == 'mysql'
         working-directory: .
@@ -298,7 +298,7 @@ jobs:
           workspaces: rust
       - name: Build mlflow-server and native GenAI worker
         run: cargo build -p mlflow-server -p mlflow-genai-worker
-      - uses: ./.github/actions/setup-python
+      - uses: $/.github/actions/setup-python
       - name: Install Python mlflow with auth + db extras
         working-directory: .
         # `auth` -> flask-wtf, needed for the `auth` corpus section's
@@ -355,7 +355,7 @@ jobs:
           cargo build -p mlflow-server --bin mlflow-server \
             --example assistant_provider_recorder \
             --example assistant_openai_recorder
-      - uses: ./.github/actions/setup-python
+      - uses: $/.github/actions/setup-python
       - name: Install recorder dependencies
         working-directory: .
         run: uv sync --no-default-groups --group pytest
@@ -417,7 +417,7 @@ jobs:
           workspaces: rust
       - name: Build release Rust server and native worker
         run: cargo build --release -p mlflow-server -p mlflow-genai-worker
-      - uses: ./.github/actions/setup-python
+      - uses: $/.github/actions/setup-python
       - name: Install Python test and Postgres dependencies
         working-directory: .
         run: uv sync --extra db
@@ -475,7 +475,7 @@ jobs:
           workspaces: rust
       - name: Build release Rust server and native worker
         run: cargo build --release -p mlflow-server -p mlflow-genai-worker
-      - uses: ./.github/actions/setup-python
+      - uses: $/.github/actions/setup-python
       - name: Install Python test and Postgres dependencies
         working-directory: .
         run: uv sync --extra db
@@ -516,7 +516,7 @@ jobs:
       - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
           workspaces: rust
-      - uses: ./.github/actions/setup-python
+      - uses: $/.github/actions/setup-python
       - name: Install Python mlflow
         working-directory: .
         run: uv sync
@@ -572,7 +572,7 @@ jobs:
       - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
           workspaces: rust
-      - uses: ./.github/actions/setup-python
+      - uses: $/.github/actions/setup-python
       - name: Provision schema (mlflow db upgrade)
         working-directory: .
         env:

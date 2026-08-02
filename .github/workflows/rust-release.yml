@@ -209,7 +209,7 @@ jobs:
           fi
           echo "version=${RELEASE_TAG#rust-v}" >> "$GITHUB_OUTPUT"
 
-      - uses: ./.github/actions/setup-node
+      - uses: $/.github/actions/setup-node
 
       - name: Build MLflow UI
         working-directory: mlflow/server/js

@@ -968,9 +968,7 @@ def _run_artifacts_only_auth_section(
         auth_store.create_experiment_permission("987654321", granted_user, "READ")
         auth_store.engine.dispose()
     except Exception as exc:
-        skipped.append(
-            {"section": "auth_artifacts_only", "reason": f"auth DB setup failed: {exc}"}
-        )
+        skipped.append({"section": "auth_artifacts_only", "reason": f"auth DB setup failed: {exc}"})
         return []
 
     artifact_root = workroot / "artifacts"
@@ -999,16 +997,13 @@ def _run_artifacts_only_auth_section(
             py_bindings: dict[str, Any] = {}
             rust_bindings: dict[str, Any] = {}
             return [
-                run_case(case, servers, py_bindings, rust_bindings, allow, creds)
-                for case in cases
+                run_case(case, servers, py_bindings, rust_bindings, allow, creds) for case in cases
             ]
     except Exception as exc:
-        skipped.append(
-            {
-                "section": "auth_artifacts_only",
-                "reason": f"artifacts-only auth boot failed: {exc}",
-            }
-        )
+        skipped.append({
+            "section": "auth_artifacts_only",
+            "reason": f"artifacts-only auth boot failed: {exc}",
+        })
         return []
 
 
