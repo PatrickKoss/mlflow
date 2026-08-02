@@ -1,6 +1,6 @@
 # Rust upstream sync plan — 2026-08-02
 
-Status: **OPEN** · From: `9f872c10cd88eaa062e612b6726b06cedbd75084` · To: `0489fb31d8a144ec3c80d15eb44dbe24b790465e`
+Status: **COMPLETE** (2026-08-02) · From: `9f872c10cd88eaa062e612b6726b06cedbd75084` · To: `0489fb31d8a144ec3c80d15eb44dbe24b790465e`
 
 | Bucket       | Commits |
 | ------------ | ------: |
@@ -83,7 +83,8 @@ When in doubt, the merged upstream Python implementation is the behavioral spec.
   - **AC:** (1) The six trace endpoints (StartTraceV3, GetTraceInfoV3, BatchGetTraceInfos, SearchTracesV3, BatchGetTraces, GetTrace) emit compact JSON exactly like merged Python (no indent; int64-as-number convention unchanged elsewhere; TraceInfo endpoints' conversion flag is value-neutral today) so byte-level differentials stay green. (2) Rust-served model catalog data equals the merged five-commit end state (note `b1e5ef1d91` removes azure_ai entries — removals must propagate). (3) Saved views need no new endpoints: verify experiment tag CRUD accepts `mlflow.sharedViewState.<id>` keys with compressed-envelope-sized values identically to Python (length limits) and GetExperiment returns them — coverage, not code, unless a divergence is found.
   - **VER:** Corpus replay over the six trace endpoints (byte comparison catches formatting drift both ways); `rust/genai-inventory/validate_ledger.py` green + catalog conformance rows incl. an azure_ai removed-model case; corpus case setting/getting a realistic saved-view tag envelope at the size boundary.
 
-- [ ] T-S10 Rebuild the upstream UI and run UI smoke
+- [x] T-S10 Rebuild the upstream UI and run UI smoke
+  - **DONE 2026-08-02:** coordinator-executed (commits `fd55e9eda`, `b05f1c6cd`). `bash rust/e2e/run.sh` fully green from final head: rc=0, both rounds — genai 16/16, part1 16/16, auth suite green; zero Python-attributed responses across all suites. Two Playwright specs needed adapting to merged-UI UX drift (verified against live stacks before committing, neither a Rust bug): (1) assistant panel now auto-opens with contextual prompt suggestions + popular-provider quick select (Claude Code/Codex CLI probed server-side and disabled, Ollama/gateway enabled) replacing the Welcome/Get Started screen — the old generic `data-assistant-ui` toggle locator matched the open panel and its click sent a suggestion into the remote-gated message endpoint (403 = exact Python parity; now asserted explicitly, satisfying the provider quick-select coverage ask); (2) traces list shows a first-visit Detect Issues onboarding modal, and with an empty default 7-day window the UI re-anchors a CUSTOM window at the oldest trace's request_time filtered with upstream's strict `timestamp_ms >` (`useMlflowTraces.tsx`), excluding the oldest seeded trace by upstream design — test now dismisses the modal and asserts the fencepost. Production UI build verified separately pre-run (rc=0).
   - **Upstream refs:** all 30 `ui` commits (MCP registry UI, saved views, Assistant panel/settings/providers, issue detection background jobs, presigned artifact downloads in UI, permission-denied notifications)
   - **Rust target:** production React static build served by the Rust deployment
   - **AC:** The merged UI builds cleanly and all e2e-covered surfaces work against Rust with zero `X-MLflow-Backend: python` responses and no unexpected 4xx; new UI surfaces that call new server routes (MCP registry detail/access endpoints, Assistant `GET /providers`, presigned downloads, saved views) function against the Rust implementations from T-S1/T-S2/T-S8.
@@ -97,13 +98,21 @@ When in doubt, the merged upstream Python implementation is the behavioral spec.
 
 ## Completion checklist
 
-- [ ] Unary differential corpus replay is green:
+- [x] Unary differential corpus replay is green:
       `uv run --no-sync python rust/compliance/replay.py`.
-- [ ] Required Python-over-HTTP conformance matrix is green:
+      (2026-08-02, final head: 467 cases, 0 non-allowlisted diffs, 9 allowlisted,
+      0 status mismatches, 0 errors, 0 skipped sections; report freshly regenerated.)
+- [x] Required Python-over-HTTP conformance matrix is green:
       `uv run --no-sync python rust/genai-inventory/run_conformance.py --profile required`.
-- [ ] SSE/streaming recorder differentials are green:
-      `uv run --no-sync pytest -q rust/compliance/recorders/`.
-- [ ] Three-phase Playwright UI smoke is green: `bash rust/e2e/run.sh`.
-- [ ] Production UI was rebuilt if the `ui` bucket was non-empty.
-- [ ] New upstream endpoints have new corpus/conformance cases, not code-only coverage.
-- [ ] `rust/sync/state.json` advances to `0489fb31d8a144ec3c80d15eb44dbe24b790465e` and records this plan.
+      (2026-08-02: rc=0, sqlite + repo compose postgres on 55432.)
+- [x] SSE/streaming recorder differentials are green:
+      `uv run --no-sync pytest -q rust/compliance/recorders/`. (2026-08-02: 39 passed.)
+- [x] Three-phase Playwright UI smoke is green: `bash rust/e2e/run.sh`.
+      (2026-08-02: rc=0, both rounds genai 16/16 + part1 16/16 + auth green.)
+- [x] Production UI was rebuilt if the `ui` bucket was non-empty.
+      (Standalone build rc=0, plus rebuilt inside `rust/e2e/run.sh`.)
+- [x] New upstream endpoints have new corpus/conformance cases, not code-only coverage.
+      (Presigned-download, MCP registry end-state, budget-policy CRUD/enforcement,
+      assistant providers/config-keys, artifacts-only workspace matrix, invoke gates —
+      all landed as corpus/conformance/recorder cases; see per-task DONE notes.)
+- [x] `rust/sync/state.json` advances to `0489fb31d8a144ec3c80d15eb44dbe24b790465e` and records this plan.
