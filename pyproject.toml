@@ -552,6 +552,12 @@ extend-ignore-re = [
   "AKS",
   # Song lyrics - "Don't Stop Believin'" by Journey
   "livin'",
+  # Backtick-quoted git commit SHAs (e.g. in generated drift reports) —
+  # 7-40 hex chars often collide with real words as substrings.
+  "`[0-9a-f]{7,40}`",
+  # Verbatim-quoted upstream PR title naming their own pre-fix typo
+  # (RateLimite -> RateLimiter); not our typo to fix.
+  "RateLimite",
 ]
 
 [tool.pytest]
