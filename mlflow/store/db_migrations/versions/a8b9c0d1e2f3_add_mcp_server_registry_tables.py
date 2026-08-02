@@ -61,7 +61,6 @@ def upgrade():
         sa.Column("version_patch", sa.Integer(), nullable=False),
         sa.Column("version_prerelease_sort_key", sa.String(length=512), nullable=False),
         sa.Column("server_json", json_type, nullable=False),
-        sa.Column("display_name", sa.String(length=256), nullable=True),
         sa.Column(
             "status",
             sa.String(length=20),
@@ -70,6 +69,7 @@ def upgrade():
         ),
         sa.Column("tools", json_type, nullable=True),
         sa.Column("source", sa.String(length=512), nullable=True),
+        sa.Column("connect_options", json_type, nullable=True),
         sa.Column("created_by", sa.String(length=256), nullable=True),
         sa.Column("last_updated_by", sa.String(length=256), nullable=True),
         sa.Column("created_at", sa.BigInteger(), nullable=False),
