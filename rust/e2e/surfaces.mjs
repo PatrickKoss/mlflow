@@ -143,7 +143,7 @@ export function surfaces(state) {
       surface: "Assistant panel (compose unauthenticated state)",
       route: `${experiment}/evaluation-runs`,
       assertion:
-        "Global Assistant drawer opened and setup/unauthenticated state rendered; zero Python-attributed responses, including assistant config.",
+        "Assistant panel auto-opens with contextual prompt suggestions and the popular-provider quick select (local CLI providers disabled, Ollama/gateway available); remote message send rejected with the localhost-only detail; zero Python-attributed responses, including assistant config.",
       screenshot: "assistant.png",
       notes:
         "The expected config response was Rust-attributed 403. Authenticated CLI chat frame parity is covered by rust/compliance/recorders/test_assistant_cli_provider_differential.py (T20.2).",

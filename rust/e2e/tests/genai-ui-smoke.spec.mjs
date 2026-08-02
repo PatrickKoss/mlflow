@@ -166,7 +166,7 @@ test("prompt-optimization", async ({ page }) => {
   await capture(page, definition);
 });
 
-test("assistant", async ({ page }) => {
+test("assistant", async ({ page, browserAudit }) => {
   const assistantConfigResponse = page.waitForResponse((response) =>
     response.url().includes("/assistant/config"),
   );
@@ -177,12 +177,29 @@ test("assistant", async ({ page }) => {
   expect(response.status()).toBe(200);
   const configBody = await response.json();
   expect(configBody.remote_access_allowed).toBe(false);
-  const toggle = page.locator('[data-assistant-ui="true"]').first();
-  await expect(toggle).toBeVisible();
-  if ((await toggle.getAttribute("aria-pressed")) !== "true") await toggle.click();
+  // Upstream 57f8f07e4d + c6ad4d51a0: the panel auto-opens with the route's
+  // contextual prompt suggestions and a popular-provider quick select; the
+  // Welcome/Get Started screen is gone.
+  const panel = page.locator('[data-assistant-ui="true"]').first();
+  await expect(panel).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Welcome to MLflow Assistant", exact: true }),
+    panel.getByText("Summarize the evaluation results.", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Get Started", exact: true })).toBeVisible();
+  await expect(panel.getByPlaceholder("Ask a question...")).toBeVisible();
+  const picker = panel.getByRole("button", { name: "Change assistant provider" });
+  await picker.click();
+  const menu = page.getByRole("menu", { name: "Change assistant provider" });
+  // Local CLI providers are probed server-side and disabled when the CLIs are
+  // absent from the container; keyless Ollama and the gateway group remain.
+  await expect(menu.getByRole("menuitem", { name: "Claude Code" })).toBeDisabled();
+  await expect(menu.getByRole("menuitem", { name: "Codex CLI" })).toBeDisabled();
+  await expect(menu.getByRole("menuitem", { name: "Ollama" })).toBeEnabled();
+  await expect(menu.getByRole("menuitem", { name: "MLflow AI Gateway" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  // Sending from a non-localhost client is rejected (remote gate parity with
+  // Python's localhost-only assistant policy) and surfaced in the chat.
+  browserAudit.allowFailure("/ajax-api/3.0/mlflow/assistant/message", 403);
+  await panel.getByText("Summarize the evaluation results.", { exact: true }).click();
+  await expect(panel.getByText(/only accessible from the same host/)).toBeVisible();
   await capture(page, definition);
 });
