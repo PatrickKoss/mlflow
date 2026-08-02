@@ -87,10 +87,16 @@ pub struct RequestCtx<'a> {
     /// Request headers relevant to auth (currently only OTLP experiment id).
     pub experiment_id_header: Option<&'a str>,
     pub auth_store: &'a AuthStore,
-    pub tracking_store: &'a TrackingStore,
+    pub tracking_store: Option<&'a TrackingStore>,
 }
 
 impl RequestCtx<'_> {
+    fn tracking_store(&self) -> Result<&TrackingStore, MlflowError> {
+        self.tracking_store.ok_or_else(|| {
+            MlflowError::internal_error("Tracking store is unavailable in artifacts-only mode")
+        })
+    }
+
     /// `_get_request_param(param)` for the current method: GET reads query;
     /// POST/PATCH read the JSON body; DELETE reads body when JSON else query.
     /// Path params override, mirroring `args | (request.view_args or {})`.
@@ -423,7 +429,7 @@ async fn validate_mcp_server_permission(ctx: &RequestCtx<'_>) -> Result<bool, Ml
             .any(|(key, value)| key == "mcp_create_version" && value == "true")
     {
         match ctx
-            .tracking_store
+            .tracking_store()?
             .get_mcp_server(ctx.workspace, &name)
             .await
         {
@@ -491,7 +497,7 @@ async fn validate_gateway_endpoint_use(ctx: &RequestCtx<'_>) -> Result<bool, Mlf
         .or_else(|| ctx.get_param("model"))
         .ok_or_else(|| MlflowError::invalid_parameter_value("No endpoint name found"))?;
     let endpoint = match ctx
-        .tracking_store
+        .tracking_store()?
         .get_gateway_endpoint(ctx.workspace, None, Some(&endpoint_name))
         .await
     {
@@ -567,7 +573,7 @@ async fn validate_update_gateway_model_definition(
 
 async fn review_queue(ctx: &RequestCtx<'_>) -> Result<mlflow_store::ReviewQueue, MlflowError> {
     let queue_id = require_param(ctx, "queue_id")?;
-    ctx.tracking_store
+    ctx.tracking_store()?
         .get_review_queue(ctx.workspace, &queue_id)
         .await
 }
@@ -672,7 +678,7 @@ async fn validate_can_view_review_queue_by_name(ctx: &RequestCtx<'_>) -> Result<
     }
     let name = require_param(ctx, "name")?;
     let queue = ctx
-        .tracking_store
+        .tracking_store()?
         .get_review_queue_by_name(ctx.workspace, &experiment_id, &name)
         .await?;
     Ok(review_queue_has_member(&queue, ctx.username)
@@ -825,7 +831,7 @@ async fn validate_can_read_online_scoring_configs(
         return Ok(true);
     }
     let configs = ctx
-        .tracking_store
+        .tracking_store()?
         .get_online_scoring_configs(ctx.workspace, &scorer_ids)
         .await?;
     for config in configs {
@@ -1096,7 +1102,7 @@ async fn validate_can_get_user_permission(ctx: &RequestCtx<'_>) -> Result<bool, 
     let resource_id = require_param(ctx, "resource_id")?;
     let workspace = match resource_type.as_str() {
         "experiment" => match ctx
-            .tracking_store
+            .tracking_store()?
             .get_experiment(ctx.workspace, &resource_id)
             .await
         {
@@ -1110,7 +1116,7 @@ async fn validate_can_get_user_permission(ctx: &RequestCtx<'_>) -> Result<bool, 
                 return Ok(false);
             };
             match ctx
-                .tracking_store
+                .tracking_store()?
                 .get_experiment(ctx.workspace, experiment_id)
                 .await
             {
@@ -1196,7 +1202,7 @@ async fn experiment_perm_from_name(
 ) -> Result<&'static Permission, MlflowError> {
     let name = require_param(ctx, "experiment_name")?;
     let exp = ctx
-        .tracking_store
+        .tracking_store()?
         .get_experiment_by_name(ctx.workspace, &name)
         .await?
         .ok_or_else(|| {
@@ -1211,7 +1217,10 @@ async fn experiment_perm_from_run(
     ctx: &RequestCtx<'_>,
 ) -> Result<&'static Permission, MlflowError> {
     let run_id = require_param(ctx, "run_id")?;
-    let run = ctx.tracking_store.get_run(ctx.workspace, &run_id).await?;
+    let run = ctx
+        .tracking_store()?
+        .get_run(ctx.workspace, &run_id)
+        .await?;
     experiment_permission(ctx, &run.info.experiment_id).await
 }
 
@@ -1223,7 +1232,7 @@ async fn experiment_perm_from_prompt_optimization_job(
     ctx: &RequestCtx<'_>,
 ) -> Result<&'static Permission, MlflowError> {
     let job_id = require_param(ctx, "job_id")?;
-    let job = mlflow_store::JobStore::new(ctx.tracking_store.db().clone())
+    let job = mlflow_store::JobStore::new(ctx.tracking_store()?.db().clone())
         .get_job(ctx.workspace, &job_id)
         .await?;
     let params: Value = serde_json::from_str(&job.params)
@@ -1244,7 +1253,7 @@ async fn experiment_perm_from_model(
 ) -> Result<&'static Permission, MlflowError> {
     let model_id = require_param(ctx, "model_id")?;
     let model = ctx
-        .tracking_store
+        .tracking_store()?
         .get_logged_model(ctx.workspace, &model_id, true)
         .await?;
     experiment_permission(ctx, &model.experiment_id).await
@@ -1255,7 +1264,7 @@ async fn experiment_perm_from_label_schema(
 ) -> Result<&'static Permission, MlflowError> {
     let schema_id = require_param(ctx, "schema_id")?;
     let schema = ctx
-        .tracking_store
+        .tracking_store()?
         .get_label_schema(ctx.workspace, &schema_id)
         .await?;
     experiment_permission(ctx, &schema.experiment_id).await
@@ -1296,7 +1305,7 @@ async fn validate_can_create_model_version(ctx: &RequestCtx<'_>) -> Result<bool,
         if run_id.is_empty() {
             return Ok(false);
         }
-        let run = ctx.tracking_store.get_run(ctx.workspace, run_id).await?;
+        let run = ctx.tracking_store()?.get_run(ctx.workspace, run_id).await?;
         if !experiment_permission(ctx, &run.info.experiment_id)
             .await?
             .can_read
@@ -1311,7 +1320,7 @@ async fn validate_can_create_model_version(ctx: &RequestCtx<'_>) -> Result<bool,
             return Ok(false);
         }
         let model = ctx
-            .tracking_store
+            .tracking_store()?
             .get_logged_model(ctx.workspace, model_id, true)
             .await?;
         if !experiment_permission(ctx, &model.experiment_id)
@@ -1346,7 +1355,7 @@ async fn trace_perm_from_query(ctx: &RequestCtx<'_>) -> Result<&'static Permissi
     // Unlike `_get_permission_from_trace`, `_get_permission_from_trace_request_id`
     // lets a missing trace error propagate.
     let trace = ctx
-        .tracking_store
+        .tracking_store()?
         .get_trace_info(ctx.workspace, &request_id)
         .await?;
     experiment_permission(ctx, &trace.experiment_id).await
@@ -1357,7 +1366,7 @@ async fn resolve_trace_perm(
     trace_id: &str,
 ) -> Result<&'static Permission, MlflowError> {
     match ctx
-        .tracking_store
+        .tracking_store()?
         .get_trace_info(ctx.workspace, trace_id)
         .await
     {
@@ -1415,7 +1424,11 @@ async fn validate_batch_get_traces(ctx: &RequestCtx<'_>) -> Result<bool, MlflowE
     };
     let mut experiment_ids = Vec::new();
     for tid in &trace_ids {
-        match ctx.tracking_store.get_trace_info(ctx.workspace, tid).await {
+        match ctx
+            .tracking_store()?
+            .get_trace_info(ctx.workspace, tid)
+            .await
+        {
             Ok(t) => experiment_ids.push(t.experiment_id),
             Err(e) if e.error_code == ErrorCode::ResourceDoesNotExist => return Ok(false),
             Err(e) => return Err(e),
@@ -1430,7 +1443,7 @@ async fn validate_batch_get_traces(ctx: &RequestCtx<'_>) -> Result<bool, MlflowE
 /// fail-closed validator.
 async fn validate_link_traces_to_run(ctx: &RequestCtx<'_>) -> Result<bool, MlflowError> {
     let run_id = require_param(ctx, "run_id")?;
-    let run = match ctx.tracking_store.get_run(ctx.workspace, &run_id).await {
+    let run = match ctx.tracking_store()?.get_run(ctx.workspace, &run_id).await {
         Ok(run) => run,
         Err(e) if e.error_code == ErrorCode::ResourceDoesNotExist => return Ok(false),
         Err(e) => return Err(e),
@@ -1453,7 +1466,7 @@ async fn validate_link_traces_to_run(ctx: &RequestCtx<'_>) -> Result<bool, Mlflo
     }
     for trace_id in trace_ids {
         let trace = match ctx
-            .tracking_store
+            .tracking_store()?
             .get_trace_info(ctx.workspace, trace_id)
             .await
         {
@@ -1520,7 +1533,7 @@ async fn validate_metric_history_bulk(
         ));
     }
     for run_id in &run_ids {
-        let run = ctx.tracking_store.get_run(ctx.workspace, run_id).await?;
+        let run = ctx.tracking_store()?.get_run(ctx.workspace, run_id).await?;
         if !experiment_permission(ctx, &run.info.experiment_id)
             .await?
             .can_read

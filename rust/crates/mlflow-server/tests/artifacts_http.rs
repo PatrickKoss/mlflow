@@ -13,6 +13,7 @@
 //! * a bounded-memory streaming download of a large file.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
 use http_body_util::{BodyExt, Full};
@@ -22,7 +23,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use mlflow_server::{build_app_with_recorder, AppState, ServerConfig};
-use mlflow_store::{Db, PoolConfig, TrackingStore};
+use mlflow_store::{Db, PoolConfig, TrackingStore, Workspace, WorkspaceStore};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::net::TcpListener;
@@ -103,7 +104,11 @@ impl TestServer {
     }
 
     async fn start_with(tag: &str, serve_artifacts: bool, artifacts_only: bool) -> Self {
-        Self::start_with_destination(tag, serve_artifacts, artifacts_only, None).await
+        Self::start_with_destination(tag, serve_artifacts, artifacts_only, None, false, None).await
+    }
+
+    async fn start_artifacts_only_with_workspaces(tag: &str) -> Self {
+        Self::start_with_destination(tag, true, true, None, true, None).await
     }
 
     async fn start_with_destination(
@@ -111,6 +116,8 @@ impl TestServer {
         serve_artifacts: bool,
         artifacts_only: bool,
         destination: Option<String>,
+        enable_workspaces: bool,
+        repo_override: Option<Arc<dyn mlflow_artifacts::ArtifactRepo>>,
     ) -> Self {
         let db_file = TempDb::new(tag);
         let art_dir = TempDir::new().expect("art dir");
@@ -119,6 +126,7 @@ impl TestServer {
         let db = Db::connect(&db_file.uri(), PoolConfig::default())
             .await
             .expect("connect temp fixture");
+        let workspace_db = db.clone();
         let store = TrackingStore::new(db, art_root);
 
         let dest_dir = destination
@@ -126,7 +134,10 @@ impl TestServer {
             .then(|| TempDir::new().expect("dest dir"));
         let dest_uri = destination
             .unwrap_or_else(|| format!("file://{}", dest_dir.as_ref().unwrap().path().display()));
-        let proxy_repo = mlflow_artifacts::factory::repo_from_uri(&dest_uri).expect("proxy repo");
+        let proxy_repo = match repo_override {
+            Some(repo) => repo,
+            None => mlflow_artifacts::factory::repo_from_uri(&dest_uri).expect("proxy repo"),
+        };
 
         let config = ServerConfig {
             host: "127.0.0.1".to_string(),
@@ -136,6 +147,7 @@ impl TestServer {
             default_artifact_root: None,
             serve_artifacts,
             artifacts_only,
+            enable_workspaces,
             artifacts_destination: Some(dest_uri),
             allowed_hosts: None,
             cors_allowed_origins: None,
@@ -143,12 +155,20 @@ impl TestServer {
             ..Default::default()
         };
         let recorder = PrometheusBuilder::new().build_recorder().handle();
-        let app_state = AppState::with_artifacts(
+        let mut app_state = AppState::with_artifacts(
             store,
             serve_artifacts,
             Some(proxy_repo),
             config.artifacts_destination.clone(),
         );
+        if enable_workspaces {
+            let workspace_store = WorkspaceStore::new(workspace_db, db_file.uri());
+            workspace_store
+                .create_workspace(Workspace::named("team-a"))
+                .await
+                .expect("create team-a workspace");
+            app_state = app_state.with_workspace_store(workspace_store);
+        }
         let app = build_app_with_recorder(&config, recorder, Some(app_state));
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
@@ -199,6 +219,56 @@ struct HttpResponse {
     content_type_options: Option<String>,
 }
 
+struct RecordingPresignedRepo {
+    path: Mutex<Option<String>>,
+}
+
+#[async_trait::async_trait]
+impl mlflow_artifacts::ArtifactRepo for RecordingPresignedRepo {
+    fn supports_multipart_download(&self) -> bool {
+        true
+    }
+
+    async fn get(
+        &self,
+        _path: &str,
+    ) -> Result<mlflow_artifacts::ArtifactDownload, mlflow_error::MlflowError> {
+        Err(mlflow_error::MlflowError::resource_does_not_exist("unused"))
+    }
+
+    async fn put(
+        &self,
+        _path: &str,
+        _body: futures::stream::BoxStream<'static, Result<Bytes, mlflow_error::MlflowError>>,
+    ) -> Result<(), mlflow_error::MlflowError> {
+        Ok(())
+    }
+
+    async fn list(
+        &self,
+        _path: Option<&str>,
+    ) -> Result<Vec<mlflow_artifacts::ArtifactFileInfo>, mlflow_error::MlflowError> {
+        Ok(Vec::new())
+    }
+
+    async fn delete(&self, _path: &str) -> Result<(), mlflow_error::MlflowError> {
+        Ok(())
+    }
+
+    async fn get_download_presigned_url(
+        &self,
+        path: &str,
+        _expiration_seconds: u64,
+    ) -> Result<mlflow_artifacts::PresignedDownloadResult, mlflow_error::MlflowError> {
+        *self.path.lock().unwrap() = Some(path.to_string());
+        Ok(mlflow_artifacts::PresignedDownloadResult {
+            url: format!("https://storage.invalid/{path}"),
+            headers: Vec::new(),
+            file_size: Some(7),
+        })
+    }
+}
+
 impl HttpResponse {
     fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
@@ -215,9 +285,22 @@ async fn send_bytes(
     path: &str,
     body: Option<Vec<u8>>,
 ) -> HttpResponse {
+    send_bytes_with_workspace(server, method, path, body, None).await
+}
+
+async fn send_bytes_with_workspace(
+    server: &TestServer,
+    method: Method,
+    path: &str,
+    body: Option<Vec<u8>>,
+    workspace: Option<&str>,
+) -> HttpResponse {
     let client = Client::builder(TokioExecutor::new()).build_http();
     let url = format!("{}{path}", server.base);
     let mut builder = Request::builder().method(method).uri(&url);
+    if let Some(workspace) = workspace {
+        builder = builder.header("X-MLFLOW-WORKSPACE", workspace);
+    }
     let request = match body {
         Some(b) => {
             builder = builder.header("content-type", "application/json");
@@ -509,9 +592,15 @@ async fn s3_proxy_roundtrip_and_multipart_lifecycle() {
         std::process::id(),
         uniq()
     );
-    let server =
-        TestServer::start_with_destination("s3_proxy", true, false, Some(destination.clone()))
-            .await;
+    let server = TestServer::start_with_destination(
+        "s3_proxy",
+        true,
+        false,
+        Some(destination.clone()),
+        false,
+        None,
+    )
+    .await;
 
     let artifact = "ordinary/nested.txt";
     let upload = send_bytes(
@@ -689,6 +778,46 @@ async fn proxy_presigned_is_not_implemented() {
     let server = TestServer::start("proxy_presigned", true).await;
     let res = get(&server, "/api/2.0/mlflow-artifacts/presigned/x.bin").await;
     assert_eq!(res.status, StatusCode::NOT_IMPLEMENTED, "{}", res.text());
+}
+
+#[tokio::test]
+async fn proxy_presigned_scopes_validated_path_to_request_workspace() {
+    let repo = Arc::new(RecordingPresignedRepo {
+        path: Mutex::new(None),
+    });
+    let server = TestServer::start_with_destination(
+        "proxy_presigned_workspace",
+        true,
+        false,
+        Some("recording://unused".to_string()),
+        true,
+        Some(repo.clone()),
+    )
+    .await;
+
+    let response = send_bytes_with_workspace(
+        &server,
+        Method::GET,
+        "/api/2.0/mlflow-artifacts/presigned/run/artifacts/model.pkl",
+        None,
+        Some("team-a"),
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::OK, "{}", response.text());
+    assert_eq!(
+        repo.path.lock().unwrap().as_deref(),
+        Some("workspaces/team-a/run/artifacts/model.pkl")
+    );
+
+    let traversal = send_bytes_with_workspace(
+        &server,
+        Method::GET,
+        "/api/2.0/mlflow-artifacts/presigned/../default/secret",
+        None,
+        Some("team-a"),
+    )
+    .await;
+    assert_ne!(traversal.status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -1074,50 +1203,94 @@ async fn proxy_download_large_file_is_memory_bounded() {
 }
 
 // ===========================================================================
-// --artifacts-only mode (plan T11.1): only the artifact proxy surface + the
-// root /get-artifact and /upload-artifact endpoints are registered. The
-// presigned-download tracking RPC is explicitly retained to reproduce Python's
-// `_disable_if_artifacts_only` 503 response; unrelated tracking RPCs stay 404.
+// --artifacts-only mode: the proxy surface remains live, while tracking-backed
+// artifact handlers and workspace CRUD return `_disable_if_artifacts_only` 503s.
 // ===========================================================================
 
 #[tokio::test]
-async fn artifacts_only_serves_proxy_but_not_tracking() {
-    let server = TestServer::start_artifacts_only("artifacts_only").await;
+async fn artifacts_only_503_matrix_is_exact_with_workspaces_on_and_off() {
+    for enable_workspaces in [false, true] {
+        let server = if enable_workspaces {
+            TestServer::start_artifacts_only_with_workspaces("artifacts_only_ws").await
+        } else {
+            TestServer::start_artifacts_only("artifacts_only").await
+        };
 
-    // Proxy upload/list still works.
-    let res = send_bytes(
-        &server,
-        Method::PUT,
-        "/api/2.0/mlflow-artifacts/artifacts/exp/run/f.txt",
-        Some(b"payload".to_vec()),
-    )
-    .await;
-    assert_eq!(res.status, StatusCode::OK, "{}", res.text());
+        // Proxy upload/list still works.
+        let res = send_bytes(
+            &server,
+            Method::PUT,
+            "/api/2.0/mlflow-artifacts/artifacts/exp/run/f.txt",
+            Some(b"payload".to_vec()),
+        )
+        .await;
+        assert_eq!(res.status, StatusCode::OK, "{}", res.text());
 
-    let res = get(&server, "/api/2.0/mlflow-artifacts/artifacts?path=exp/run").await;
-    assert_eq!(res.status, StatusCode::OK, "{}", res.text());
+        let res = get(&server, "/api/2.0/mlflow-artifacts/artifacts?path=exp/run").await;
+        assert_eq!(res.status, StatusCode::OK, "{}", res.text());
 
-    // A tracking RPC (search-experiments) is NOT registered in artifacts-only
-    // mode, so it 404s (route absent) rather than executing.
-    let res = get(&server, "/api/2.0/mlflow/experiments/search").await;
-    assert_eq!(res.status, StatusCode::NOT_FOUND, "{}", res.text());
+        // Unrelated tracking RPCs remain absent.
+        let res = get(&server, "/api/2.0/mlflow/experiments/search").await;
+        assert_eq!(res.status, StatusCode::NOT_FOUND, "{}", res.text());
 
-    for prefix in ["/api/2.0", "/ajax-api/2.0"] {
-        let path = format!("{prefix}/mlflow/artifacts/presigned-download-url");
-        let res = post(&server, &path, r#"{"run_id":"x","path":"x"}"#).await;
-        assert_eq!(
-            res.status,
-            StatusCode::SERVICE_UNAVAILABLE,
-            "{}",
-            res.text()
-        );
-        assert_eq!(
-            res.text(),
-            format!(
-                "Endpoint: {path} disabled due to the mlflow server running in \
-                 `--artifacts-only` mode. To enable tracking server functionality, run \
-                 `mlflow server` without `--artifacts-only`"
-            )
-        );
+        let cases = [
+            (Method::GET, "/get-artifact", "/get-artifact"),
+            (
+                Method::POST,
+                "/ajax-api/2.0/mlflow/upload-artifact",
+                "/ajax-api/2.0/mlflow/upload-artifact",
+            ),
+            (
+                Method::GET,
+                "/api/3.0/mlflow/workspaces",
+                "/api/3.0/mlflow/workspaces",
+            ),
+            (
+                Method::POST,
+                "/api/3.0/mlflow/workspaces",
+                "/api/3.0/mlflow/workspaces",
+            ),
+            (
+                Method::GET,
+                "/api/3.0/mlflow/workspaces/team-a",
+                "/api/3.0/mlflow/workspaces/<workspace_name>",
+            ),
+            (
+                Method::PATCH,
+                "/api/3.0/mlflow/workspaces/team-a",
+                "/api/3.0/mlflow/workspaces/<workspace_name>",
+            ),
+            (
+                Method::DELETE,
+                "/api/3.0/mlflow/workspaces/team-a",
+                "/api/3.0/mlflow/workspaces/<workspace_name>",
+            ),
+        ];
+        for (method, path, rule) in cases {
+            let res = send_bytes(&server, method, path, None).await;
+            assert_eq!(res.status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(
+                res.text(),
+                format!(
+                    "Endpoint: {rule} disabled due to the mlflow server running in \
+                     `--artifacts-only` mode. To enable tracking server functionality, run \
+                     `mlflow server` without `--artifacts-only`"
+                )
+            );
+        }
+
+        for prefix in ["/api/2.0", "/ajax-api/2.0"] {
+            let path = format!("{prefix}/mlflow/artifacts/presigned-download-url");
+            let res = post(&server, &path, r#"{"run_id":"x","path":"x"}"#).await;
+            assert_eq!(res.status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            assert_eq!(
+                res.text(),
+                format!(
+                    "Endpoint: {path} disabled due to the mlflow server running in \
+                     `--artifacts-only` mode. To enable tracking server functionality, run \
+                     `mlflow server` without `--artifacts-only`"
+                )
+            );
+        }
     }
 }

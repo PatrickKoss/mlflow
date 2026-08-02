@@ -55,145 +55,177 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind((config.host.as_str(), config.port)).await?;
     let local_addr = listener.local_addr()?;
 
-    // Serve the tracking API when a backend store is configured; otherwise run
-    // the ops-only app (health/version/metrics). The store is verified against
-    // the expected Alembic head at connect time.
+    // Artifacts-only mode deliberately does not connect to the tracking
+    // backend. When workspaces are enabled, initialize only the explicitly
+    // configured workspace provider so request headers can still be validated
+    // and artifact paths can be scoped.
     let mut online_scoring_scheduler = None;
     let mut trace_archival_scheduler = None;
-    let (app, job_runner) = match &config.backend_store_uri {
-        Some(uri) => {
-            let db = Db::connect_and_verify_with(uri, PoolConfig::from_env()).await?;
-            let artifact_root = config
-                .default_artifact_root
-                .clone()
-                .unwrap_or_else(|| DEFAULT_ARTIFACT_ROOT.to_string());
-            // The webhook store shares the tracking DB pool (`Db` is a cheap
-            // Arc-backed clone). Its Fernet cipher is resolved from
-            // `MLFLOW_WEBHOOK_SECRET_ENCRYPTION_KEY` (ephemeral key when unset).
-            let webhook_store = WebhookStore::new(db.clone())?;
-            // The async delivery engine (T8.3) over the same store. Scoped to the
-            // default workspace (single-tenant server); T8.4's registry event
-            // triggers call `dispatcher.fire(event, payload)`.
-            let webhook_dispatcher = WebhookDispatcher::new(
-                webhook_store.clone(),
-                mlflow_server::workspace::DEFAULT_WORKSPACE_NAME,
-            );
-            let store = TrackingStore::new(db.clone(), artifact_root);
-            store.ensure_default_experiment().await?;
-            // The registry tables live in the same Alembic-migrated database as
-            // the tracking tables, so the registry store shares the same `Db`
-            // pool (`_get_model_registry_store()`, `handlers.py:674`).
-            let registry_store = RegistryStore::new(store.db().clone());
-
-            // Resolve the `--artifacts-destination` proxy repo once (parity with
-            // Python's memoized `_artifact_repo`). Stock builds include local
-            // filesystems and S3; GCS/Azure remain fail-loud seams.
-            let proxied_repo = match &config.artifacts_destination {
-                Some(dest) => Some(mlflow_artifacts::factory::repo_from_uri(dest)?),
-                None => None,
-            };
-            let mut app_state = AppState::with_registry(
-                store,
-                registry_store,
-                config.serve_artifacts,
-                proxied_repo,
-                config.artifacts_destination.clone(),
-            )
-            .with_webhook_store(webhook_store, webhook_dispatcher);
-
-            // Enable the auth/RBAC API (T9.2 users, later T9.3 roles) when the
-            // basic-auth app is configured (`--app-name basic-auth` or
-            // `MLFLOW_AUTH_CONFIG_PATH`; resolved in `ServerConfig`, T11.1).
-            if config.auth_enabled {
-                if let Some(auth_store) = build_auth_store().await? {
-                    app_state = app_state.with_auth_store(auth_store);
-                }
+    let (app, job_runner) = if config.artifacts_only {
+        let proxied_repo = match &config.artifacts_destination {
+            Some(dest) => Some(mlflow_artifacts::factory::repo_from_uri(dest)?),
+            None => None,
+        };
+        let mut app_state = AppState::artifacts_only(
+            config.serve_artifacts,
+            proxied_repo,
+            config.artifacts_destination.clone(),
+        );
+        if config.auth_enabled {
+            if let Some(auth_store) = build_auth_store().await? {
+                app_state = app_state.with_auth_store(auth_store);
             }
-
-            // Workspace REST endpoints (T10.2) are enabled iff the resolved
-            // workspaces signal is on (`--enable-workspaces`/`--disable-workspaces`
-            // overriding `MLFLOW_ENABLE_WORKSPACES`, T11.1). When on, the
-            // workspace store shares the tracking DB pool; `--workspace-store-uri`
-            // (unset → tracking URI) only names the `mlflow gc` hint. When off,
-            // the endpoints return a 503.
-            let mut runner_workspaces =
-                vec![mlflow_server::workspace::DEFAULT_WORKSPACE_NAME.to_string()];
-            if config.enable_workspaces {
-                let workspace_uri = config
-                    .workspace_store_uri
+        }
+        if config.enable_workspaces {
+            let workspace_uri = config
+                .workspace_store_uri
+                .as_deref()
+                .expect("artifacts-only workspace URI was validated");
+            let workspace_db =
+                Db::connect_and_verify_with(workspace_uri, PoolConfig::from_env()).await?;
+            app_state = app_state
+                .with_workspace_store(WorkspaceStore::new(workspace_db, workspace_uri.to_string()));
+        }
+        (build_app_with_state(&config, app_state), None)
+    } else {
+        // Serve the tracking API when a backend store is configured; otherwise
+        // run the ops-only app (health/version/metrics). The store is verified
+        // against the expected Alembic head at connect time.
+        match &config.backend_store_uri {
+            Some(uri) => {
+                let db = Db::connect_and_verify_with(uri, PoolConfig::from_env()).await?;
+                let artifact_root = config
+                    .default_artifact_root
                     .clone()
-                    .unwrap_or_else(|| uri.clone());
-                let workspace_store = WorkspaceStore::new(db.clone(), workspace_uri);
-                runner_workspaces = workspace_store
-                    .list_workspaces()
-                    .await?
-                    .into_iter()
-                    .map(|workspace| workspace.name)
-                    .collect();
-                app_state = app_state.with_workspace_store(workspace_store);
-            } else {
-                // Single-tenant startup guard (T10.3): if a previous
-                // workspaces-enabled run left root entities outside the `default`
-                // workspace, refuse to boot single-tenant (they'd be unreachable).
-                // Mirrors Python's store-construction guard
-                // (`INVALID_STATE`); byte-matched messages live in
-                // `verify_single_tenant_data`.
-                mlflow_store::verify_single_tenant_data(
-                    &db,
-                    &[
-                        ("experiments", "experiments"),
-                        ("registered_models", "registered models"),
-                        ("webhooks", "webhooks"),
-                    ],
+                    .unwrap_or_else(|| DEFAULT_ARTIFACT_ROOT.to_string());
+                // The webhook store shares the tracking DB pool (`Db` is a cheap
+                // Arc-backed clone). Its Fernet cipher is resolved from
+                // `MLFLOW_WEBHOOK_SECRET_ENCRYPTION_KEY` (ephemeral key when unset).
+                let webhook_store = WebhookStore::new(db.clone())?;
+                // The async delivery engine (T8.3) over the same store. Scoped to the
+                // default workspace (single-tenant server); T8.4's registry event
+                // triggers call `dispatcher.fire(event, payload)`.
+                let webhook_dispatcher = WebhookDispatcher::new(
+                    webhook_store.clone(),
+                    mlflow_server::workspace::DEFAULT_WORKSPACE_NAME,
+                );
+                let store = TrackingStore::new(db.clone(), artifact_root);
+                store.ensure_default_experiment().await?;
+                // The registry tables live in the same Alembic-migrated database as
+                // the tracking tables, so the registry store shares the same `Db`
+                // pool (`_get_model_registry_store()`, `handlers.py:674`).
+                let registry_store = RegistryStore::new(store.db().clone());
+
+                // Resolve the `--artifacts-destination` proxy repo once (parity with
+                // Python's memoized `_artifact_repo`). Stock builds include local
+                // filesystems and S3; GCS/Azure remain fail-loud seams.
+                let proxied_repo = match &config.artifacts_destination {
+                    Some(dest) => Some(mlflow_artifacts::factory::repo_from_uri(dest)?),
+                    None => None,
+                };
+                let mut app_state = AppState::with_registry(
+                    store,
+                    registry_store,
+                    config.serve_artifacts,
+                    proxied_repo,
+                    config.artifacts_destination.clone(),
                 )
-                .await?;
-            }
-            if config.job_execution_enabled {
-                online_scoring_scheduler = Some(
-                    mlflow_server::online_scoring_scheduler::OnlineScoringScheduler::new(
-                        app_state.tracking_store().clone(),
-                        app_state.workspace_store().cloned(),
-                    ),
-                );
-                trace_archival_scheduler = Some(
-                    mlflow_server::trace_archival_scheduler::TraceArchivalScheduler::new(
-                        app_state.tracking_store().clone(),
-                        app_state.workspace_store().cloned(),
-                        config.clone(),
-                    ),
-                );
-            }
-            let job_runner = if config.job_execution_enabled {
-                let worker = resolve_worker_program().map_err(|error| {
+                .with_webhook_store(webhook_store, webhook_dispatcher);
+
+                // Enable the auth/RBAC API (T9.2 users, later T9.3 roles) when the
+                // basic-auth app is configured (`--app-name basic-auth` or
+                // `MLFLOW_AUTH_CONFIG_PATH`; resolved in `ServerConfig`, T11.1).
+                if config.auth_enabled {
+                    if let Some(auth_store) = build_auth_store().await? {
+                        app_state = app_state.with_auth_store(auth_store);
+                    }
+                }
+
+                // Workspace REST endpoints (T10.2) are enabled iff the resolved
+                // workspaces signal is on (`--enable-workspaces`/`--disable-workspaces`
+                // overriding `MLFLOW_ENABLE_WORKSPACES`, T11.1). When on, the
+                // workspace store shares the tracking DB pool; `--workspace-store-uri`
+                // (unset → tracking URI) only names the `mlflow gc` hint. When off,
+                // the endpoints return a 503.
+                let mut runner_workspaces =
+                    vec![mlflow_server::workspace::DEFAULT_WORKSPACE_NAME.to_string()];
+                if config.enable_workspaces {
+                    let workspace_uri = config
+                        .workspace_store_uri
+                        .clone()
+                        .unwrap_or_else(|| uri.clone());
+                    let workspace_store = WorkspaceStore::new(db.clone(), workspace_uri);
+                    runner_workspaces = workspace_store
+                        .list_workspaces()
+                        .await?
+                        .into_iter()
+                        .map(|workspace| workspace.name)
+                        .collect();
+                    app_state = app_state.with_workspace_store(workspace_store);
+                } else {
+                    // Single-tenant startup guard (T10.3): if a previous
+                    // workspaces-enabled run left root entities outside the `default`
+                    // workspace, refuse to boot single-tenant (they'd be unreachable).
+                    // Mirrors Python's store-construction guard
+                    // (`INVALID_STATE`); byte-matched messages live in
+                    // `verify_single_tenant_data`.
+                    mlflow_store::verify_single_tenant_data(
+                        &db,
+                        &[
+                            ("experiments", "experiments"),
+                            ("registered_models", "registered models"),
+                            ("webhooks", "webhooks"),
+                        ],
+                    )
+                    .await?;
+                }
+                if config.job_execution_enabled {
+                    online_scoring_scheduler = Some(
+                        mlflow_server::online_scoring_scheduler::OnlineScoringScheduler::new(
+                            app_state.tracking_store().clone(),
+                            app_state.workspace_store().cloned(),
+                        ),
+                    );
+                    trace_archival_scheduler = Some(
+                        mlflow_server::trace_archival_scheduler::TraceArchivalScheduler::new(
+                            app_state.tracking_store().clone(),
+                            app_state.workspace_store().cloned(),
+                            config.clone(),
+                        ),
+                    );
+                }
+                let job_runner = if config.job_execution_enabled {
+                    let worker = resolve_worker_program().map_err(|error| {
                     anyhow::anyhow!(
                         "native job execution is enabled but mlflow-genai-worker is unavailable: {error}"
                     )
                 })?;
-                let server_uri = worker_server_uri(local_addr);
-                let gateway_uri =
-                    std::env::var("MLFLOW_GATEWAY_URI").unwrap_or_else(|_| server_uri.clone());
-                let internal_token = std::env::var("_MLFLOW_INTERNAL_GATEWAY_AUTH_TOKEN")
-                    .unwrap_or_else(|_| uuid::Uuid::new_v4().simple().to_string());
-                let executor = NativeWorkerExecutor::new(worker)
-                    .tracking_uri(server_uri)
-                    .gateway_uri(gateway_uri)
-                    .internal_gateway_token(internal_token)
-                    .tracking_store(app_state.tracking_store().clone());
-                JobRunner::new(
-                    app_state.job_store(),
-                    Arc::new(executor),
-                    native_job_functions()?,
-                    runner_workspaces,
-                    JobRunnerConfig::from_server_config(&config)?,
-                )
-                .start()
-                .await?
-            } else {
-                None
-            };
-            (build_app_with_state(&config, app_state), job_runner)
+                    let server_uri = worker_server_uri(local_addr);
+                    let gateway_uri =
+                        std::env::var("MLFLOW_GATEWAY_URI").unwrap_or_else(|_| server_uri.clone());
+                    let internal_token = std::env::var("_MLFLOW_INTERNAL_GATEWAY_AUTH_TOKEN")
+                        .unwrap_or_else(|_| uuid::Uuid::new_v4().simple().to_string());
+                    let executor = NativeWorkerExecutor::new(worker)
+                        .tracking_uri(server_uri)
+                        .gateway_uri(gateway_uri)
+                        .internal_gateway_token(internal_token)
+                        .tracking_store(app_state.tracking_store().clone());
+                    JobRunner::new(
+                        app_state.job_store(),
+                        Arc::new(executor),
+                        native_job_functions()?,
+                        runner_workspaces,
+                        JobRunnerConfig::from_server_config(&config)?,
+                    )
+                    .start()
+                    .await?
+                } else {
+                    None
+                };
+                (build_app_with_state(&config, app_state), job_runner)
+            }
+            None => (build_app(&config), None),
         }
-        None => (build_app(&config), None),
     };
 
     tracing::info!(address = %local_addr, static_prefix = ?config.static_prefix, "mlflow-server listening");

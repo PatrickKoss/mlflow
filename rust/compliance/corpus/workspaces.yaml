@@ -55,3 +55,9 @@ cases:
     method: GET
     path: /api/3.0/mlflow/workspaces/nonexistent-ws
     expect_status: 404
+
+  - name: ws_presigned_proxy_rejects_cross_workspace_path
+    method: GET
+    path: /api/2.0/mlflow-artifacts/presigned/workspaces/default/run/artifacts/model.pkl
+    headers: {X-MLFLOW-WORKSPACE: team-a}
+    expect_status: 400

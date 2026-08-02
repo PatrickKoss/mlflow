@@ -23,6 +23,7 @@ use mlflow_auth::{AuthConfig, AuthDb, AuthStore};
 use mlflow_server::{build_app_with_recorder, AppState, ServerConfig};
 use mlflow_store::{Db, PoolConfig, TrackingStore};
 use serde_json::{json, Value};
+use tempfile::TempDir;
 use tokio::net::TcpListener;
 
 const ART_ROOT: &str = "s3://bucket/mlruns";
@@ -90,6 +91,7 @@ struct TestServer {
     auth: AuthStore,
     _tracking_db: TempDb,
     _auth_db: TempDb,
+    _artifact_dir: Option<TempDir>,
 }
 
 impl TestServer {
@@ -98,6 +100,18 @@ impl TestServer {
     }
 
     async fn start_with_prefix(tag: &str, static_prefix: Option<&str>) -> Self {
+        Self::start_configured(tag, static_prefix, false).await
+    }
+
+    async fn start_artifacts_only(tag: &str) -> Self {
+        Self::start_configured(tag, None, true).await
+    }
+
+    async fn start_configured(
+        tag: &str,
+        static_prefix: Option<&str>,
+        artifacts_only: bool,
+    ) -> Self {
         let tracking_db = TempDb::new(&format!("{tag}_track"), &tracking_fixture_path());
         let db = Db::connect(&tracking_db.uri(), PoolConfig::default())
             .await
@@ -111,7 +125,23 @@ impl TestServer {
                 .expect("connect + verify auth fixture");
         let auth = AuthStore::with_config(auth_db, no_permission_config());
 
-        let state = AppState::new(tracking.clone()).with_auth_store(auth.clone());
+        let artifact_dir = artifacts_only.then(|| TempDir::new().expect("artifact dir"));
+        let artifacts_destination = artifact_dir
+            .as_ref()
+            .map(|dir| format!("file://{}", dir.path().display()));
+        let state = if let Some(destination) = artifacts_destination.as_deref() {
+            AppState::artifacts_only(
+                true,
+                Some(
+                    mlflow_artifacts::factory::repo_from_uri(destination)
+                        .expect("artifact repository"),
+                ),
+                Some(destination.to_string()),
+            )
+        } else {
+            AppState::new(tracking.clone())
+        }
+        .with_auth_store(auth.clone());
         let config = ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
@@ -119,7 +149,8 @@ impl TestServer {
             backend_store_uri: None,
             default_artifact_root: None,
             serve_artifacts: true,
-            artifacts_destination: None,
+            artifacts_only,
+            artifacts_destination,
             allowed_hosts: None,
             cors_allowed_origins: None,
             x_frame_options: "SAMEORIGIN".to_string(),
@@ -148,6 +179,7 @@ impl TestServer {
             auth,
             _tracking_db: tracking_db,
             _auth_db: auth_db_file,
+            _artifact_dir: artifact_dir,
         }
     }
 
@@ -481,6 +513,49 @@ async fn presigned_download_routes_require_run_or_experiment_read() {
     )
     .await;
     assert_ne!(allowed.status, StatusCode::FORBIDDEN, "{}", allowed.body);
+}
+
+#[tokio::test]
+async fn artifacts_only_honors_default_workspace_grant_without_tracking_store() {
+    let srv = TestServer::start_artifacts_only("nd_artifacts_only_grant").await;
+    let experiment_id = "987654321";
+    let path =
+        format!("/api/2.0/mlflow-artifacts/artifacts/{experiment_id}/run-id/artifacts/model.bin");
+
+    let (granted_user, granted_password) = srv.create_user("artifact_grantee").await;
+    let denied = send(
+        &srv.base,
+        Method::GET,
+        &path,
+        Some((&granted_user, &granted_password)),
+        None,
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN, "{}", denied.body);
+
+    srv.grant(&granted_user, "experiment", experiment_id, "READ")
+        .await;
+    let allowed = send(
+        &srv.base,
+        Method::GET,
+        &path,
+        Some((&granted_user, &granted_password)),
+        None,
+    )
+    .await;
+    assert_ne!(allowed.status, StatusCode::FORBIDDEN, "{}", allowed.body);
+    assert_eq!(allowed.status, StatusCode::NOT_FOUND, "{}", allowed.body);
+
+    let (stranger, stranger_password) = srv.create_user("artifact_stranger").await;
+    let no_grant = send(
+        &srv.base,
+        Method::GET,
+        &path,
+        Some((&stranger, &stranger_password)),
+        None,
+    )
+    .await;
+    assert_eq!(no_grant.status, StatusCode::FORBIDDEN, "{}", no_grant.body);
 }
 
 #[tokio::test]

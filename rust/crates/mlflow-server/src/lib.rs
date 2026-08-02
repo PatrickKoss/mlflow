@@ -255,12 +255,9 @@ pub fn build_app_with_recorder(
 /// non-proto-backed `get-history-bulk` (plan T3.3).
 ///
 /// When `artifacts_only` is set (`--artifacts-only` / `MLFLOW_ARTIFACTS_ONLY`),
-/// only the artifact-serving surface is registered: the `MlflowArtifactsService`
-/// proxy routes plus the root `/get-artifact` and `/upload-artifact` endpoints
-/// (which Python leaves enabled — they are NOT `@_disable_if_artifacts_only`,
-/// `handlers.py:1519,2408`). Every tracking RPC and the artifacts-only-disabled
-/// endpoints (e.g. `/model-versions/get-artifact`, `handlers.py:3033`) are
-/// omitted, matching Python's 503-on-disabled semantics with an outright 404.
+/// only the artifact-serving surface is registered. Tracking-backed artifact
+/// routes and workspace CRUD are retained as 503 stubs because Python decorates
+/// those handlers with `_disable_if_artifacts_only`.
 fn register_proto_routes(state: AppState, artifacts_only: bool) -> Router {
     use axum::routing::get;
 
@@ -275,8 +272,24 @@ fn register_proto_routes(state: AppState, artifacts_only: bool) -> Router {
                 for route in spec.expand("") {
                     router = router.route(
                         &to_axum_path(&route.path),
-                        axum::routing::post(artifacts::artifacts_only_disabled_presigned_download),
+                        axum::routing::post(artifacts::artifacts_only_disabled),
                     );
+                }
+            } else if spec.service == "MlflowService"
+                && matches!(
+                    spec.method,
+                    "listWorkspaces"
+                        | "createWorkspace"
+                        | "getWorkspace"
+                        | "updateWorkspace"
+                        | "deleteWorkspace"
+                )
+            {
+                let Some(handler) = artifacts_only_workspace_handler(spec.http_method) else {
+                    continue;
+                };
+                for route in spec.expand("") {
+                    router = router.route(&to_axum_path(&route.path), handler.clone());
                 }
             }
             continue;
@@ -289,22 +302,28 @@ fn register_proto_routes(state: AppState, artifacts_only: bool) -> Router {
         }
     }
 
-    // `/get-artifact` and `/upload-artifact` are the two artifact-plane
-    // endpoints Python leaves enabled in artifacts-only mode, so they are always
-    // registered. Everything gated behind `!artifacts_only` below is a tracking
-    // endpoint (or an artifacts-only-disabled artifact endpoint).
-    router = router.route("/get-artifact", get(artifacts::get_artifact));
+    let get_artifact_handler = if artifacts_only {
+        get(artifacts::artifacts_only_disabled)
+    } else {
+        get(artifacts::get_artifact)
+    };
+    router = router.route("/get-artifact", get_artifact_handler);
     // The `upload_artifact` handler enforces the 10 MB cap itself and returns a
     // 400 ("Artifact size is too large. ...") on overflow, mirroring
     // `handlers.py:2424-2439`. axum's `Bytes` extractor otherwise rejects bodies
     // over its 2 MB default with a bare 413 before the handler runs, so raise the
     // per-route body limit just past the cap: the handler still sees a 10 MB + 1
     // body and produces Python's 400, while absurdly larger bodies short-circuit.
+    let upload_artifact_handler = if artifacts_only {
+        axum::routing::post(artifacts::artifacts_only_disabled)
+    } else {
+        axum::routing::post(artifacts::upload_artifact).layer(axum::extract::DefaultBodyLimit::max(
+            artifacts::MAX_UPLOAD_ARTIFACT_BYTES + 1024,
+        ))
+    };
     router = router.route(
         "/ajax-api/2.0/mlflow/upload-artifact",
-        axum::routing::post(artifacts::upload_artifact).layer(
-            axum::extract::DefaultBodyLimit::max(artifacts::MAX_UPLOAD_ARTIFACT_BYTES + 1024),
-        ),
+        upload_artifact_handler,
     );
     // Legacy deployments bridge (`server/__init__.py:146-148`). Unlike the
     // discovery handlers below, Python does not decorate this route with
@@ -517,6 +536,17 @@ fn register_proto_routes(state: AppState, artifacts_only: bool) -> Router {
     }
 
     register_role_and_auth_layers(router, state)
+}
+
+fn artifacts_only_workspace_handler(http_method: &str) -> Option<MethodRouter<AppState>> {
+    use axum::routing::{delete, get, patch, post};
+    Some(match http_method {
+        "GET" => get(artifacts::artifacts_only_disabled),
+        "POST" => post(artifacts::artifacts_only_disabled),
+        "PATCH" => patch(artifacts::artifacts_only_disabled),
+        "DELETE" => delete(artifacts::artifacts_only_disabled),
+        _ => return None,
+    })
 }
 
 /// Apply the auth-user routes (T9.2), role/permission routes (T9.3), and the

@@ -81,6 +81,7 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 
 [dev-dependencies]
+async-trait = "0.1"
 tokio = { workspace = true, features = ["full", "test-util"] }
 hyper = { workspace = true, features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = [

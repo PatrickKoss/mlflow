@@ -185,6 +185,10 @@ class DualServers:
             env[ARTIFACTS_DESTINATION_ENV_VAR] = str(art)
         if self.artifacts_only:
             env["_MLFLOW_SERVER_ARTIFACTS_ONLY"] = "true"
+            if env.get("MLFLOW_ENABLE_WORKSPACES", "").lower() in {"true", "1"}:
+                # Each side validates against its own identical DB copy. The
+                # real CLI requires an explicit provider URI for this mode.
+                env["MLFLOW_WORKSPACE_STORE_URI"] = backend_uri
         if name == "python" and "MLFLOW_SERVER_ENABLE_JOB_EXECUTION" in self.python_extra_env:
             # The invoke handlers construct MlflowClient/fluent APIs inside the
             # server process. The real `mlflow server` launcher pins those calls
@@ -245,6 +249,8 @@ class DualServers:
             del rust_cmd[destination_index : destination_index + 2]
         if self.artifacts_only:
             rust_cmd.append("--artifacts-only")
+            if self.extra_env.get("MLFLOW_ENABLE_WORKSPACES", "").lower() in {"true", "1"}:
+                rust_cmd.extend(["--workspace-store-uri", f"sqlite:///{rust_db}"])
         self.rust = self._boot("rust", rust_cmd, f"sqlite:///{rust_db}", rust_art)
         return self
 
@@ -920,6 +926,92 @@ def _run_auth_section(
     return results
 
 
+def _run_artifacts_only_auth_section(
+    cases: list[Case],
+    allow: list[AllowEntry],
+    workroot: Path,
+    skipped: list[dict[str, str]],
+) -> list[CaseResult]:
+    """Prove default-workspace grants without a tracking store."""
+    admin_user, admin_pass = "admin", "password1234"
+    granted_user, granted_pass = "artifact_grantee", "artifact-grantee-password"
+    stranger_user, stranger_pass = "artifact_stranger", "artifact-stranger-password"
+    creds = {
+        "granted": (granted_user, granted_pass),
+        "stranger": (stranger_user, stranger_pass),
+    }
+
+    seed_db = workroot / "seed.db"
+    _seed_tracking_db(seed_db)
+    auth_db = workroot / "auth.db"
+    auth_db_uri = f"sqlite:///{auth_db}"
+    ini = workroot / "basic_auth.ini"
+    ini.write_text(
+        "[mlflow]\n"
+        "default_permission = NO_PERMISSIONS\n"
+        f"database_uri = {auth_db_uri}\n"
+        f"admin_username = {admin_user}\n"
+        f"admin_password = {admin_pass}\n"
+        "authorization_function = mlflow.server.auth:authenticate_request_basic_auth\n"
+        "grant_default_workspace_access = false\n"
+    )
+    try:
+        os.environ["_COMPLIANCE_ADMIN_USER"] = admin_user
+        os.environ["_COMPLIANCE_ADMIN_PASS"] = admin_pass
+        _migrate_auth_db(auth_db_uri)
+        from mlflow.server.auth.sqlalchemy_store import SqlAlchemyStore
+
+        auth_store = SqlAlchemyStore()
+        auth_store.init_db(auth_db_uri)
+        auth_store.create_user(granted_user, granted_pass, is_admin=False)
+        auth_store.create_user(stranger_user, stranger_pass, is_admin=False)
+        auth_store.create_experiment_permission("987654321", granted_user, "READ")
+        auth_store.engine.dispose()
+    except Exception as exc:
+        skipped.append(
+            {"section": "auth_artifacts_only", "reason": f"auth DB setup failed: {exc}"}
+        )
+        return []
+
+    artifact_root = workroot / "artifacts"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    artifact_path = Path("987654321/run-id/artifacts/granted.txt")
+    for side in ("python", "rust"):
+        side_path = artifact_root / side / artifact_path
+        side_path.parent.mkdir(parents=True, exist_ok=True)
+        side_path.write_text("default-workspace grant honored\n")
+    extra_env = {
+        "MLFLOW_AUTH_CONFIG_PATH": str(ini),
+        "MLFLOW_FLASK_SERVER_SECRET_KEY": "t-s3-artifacts-only-secret",
+        "MLFLOW_SERVER_ENABLE_JOB_EXECUTION": "false",
+        "MLFLOW_ENABLE_WORKSPACES": "false",
+        "_MLFLOW_SGI_NAME": "uvicorn",
+    }
+    try:
+        with DualServers(
+            workroot,
+            seed_db,
+            artifact_root,
+            extra_env=extra_env,
+            python_asgi_app="mlflow.server.auth:create_app",
+            artifacts_only=True,
+        ) as servers:
+            py_bindings: dict[str, Any] = {}
+            rust_bindings: dict[str, Any] = {}
+            return [
+                run_case(case, servers, py_bindings, rust_bindings, allow, creds)
+                for case in cases
+            ]
+    except Exception as exc:
+        skipped.append(
+            {
+                "section": "auth_artifacts_only",
+                "reason": f"artifacts-only auth boot failed: {exc}",
+            }
+        )
+        return []
+
+
 def _run_workspace_section(
     cases: list[Case],
     allow: list[AllowEntry],
@@ -1087,6 +1179,7 @@ def main() -> int:
     skipped: list[dict[str, str]] = []
 
     auth_cases = sections.pop("auth", [])
+    artifacts_only_auth_cases = sections.pop("auth_artifacts_only", [])
     workspace_cases = sections.pop("workspaces", [])
     invoke_cases = sections.pop("invoke", [])
     issue_credentials_cases = sections.pop("issue_credentials", [])
@@ -1098,6 +1191,7 @@ def main() -> int:
     artifacts_unconfigured_cases = sections.pop("artifacts_native_unconfigured", [])
     server_info_no_artifacts_cases = sections.pop("server_info_no_artifacts", [])
     presigned_artifacts_only_cases = sections.pop("presigned_download_artifacts_only", [])
+    artifacts_only_workspace_cases = sections.pop("artifacts_only_workspaces", [])
     presigned_bad_env_cases = sections.pop("presigned_download_bad_env", [])
 
     all_results: list[CaseResult] = []
@@ -1156,6 +1250,17 @@ def main() -> int:
                     artifacts_only=True,
                 )
             )
+    if artifacts_only_workspace_cases:
+        with tempfile.TemporaryDirectory(prefix="mlflow-t-s3-artifacts-only-workspaces-") as td:
+            all_results.extend(
+                _run_deployment_section(
+                    artifacts_only_workspace_cases,
+                    allow,
+                    Path(td),
+                    artifacts_only=True,
+                    extra_env={"MLFLOW_ENABLE_WORKSPACES": "true"},
+                )
+            )
     if presigned_bad_env_cases:
         with tempfile.TemporaryDirectory(prefix="mlflow-t124-presigned-bad-env-") as td:
             all_results.extend(
@@ -1164,6 +1269,13 @@ def main() -> int:
                     allow,
                     Path(td),
                     extra_env={"MLFLOW_PRESIGNED_DOWNLOAD_URL_TTL_SECONDS": "604801"},
+                )
+            )
+    if artifacts_only_auth_cases:
+        with tempfile.TemporaryDirectory(prefix="mlflow-t-s3-auth-artifacts-only-") as td:
+            all_results.extend(
+                _run_artifacts_only_auth_section(
+                    artifacts_only_auth_cases, allow, Path(td), skipped
                 )
             )
     if invoke_cases:

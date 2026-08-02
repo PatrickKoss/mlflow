@@ -204,6 +204,11 @@ pub enum ConfigError {
          servers do not initialize the tracking store required for server-owned trace archival."
     )]
     TraceArchivalArtifactsOnlyConflict,
+    #[error(
+        "--workspace-store-uri is required when combining --enable-workspaces with \
+         --artifacts-only so artifact requests can be validated against a workspace provider."
+    )]
+    WorkspaceStoreRequiredForArtifactsOnly,
     #[error("{0}")]
     TraceArchivalConfigPath(String),
     #[error(transparent)]
@@ -352,6 +357,12 @@ impl ServerConfig {
         } else {
             env_truthy(MLFLOW_ENABLE_WORKSPACES_ENV_VAR)
         };
+        if cli.artifacts_only
+            && enable_workspaces
+            && cli.workspace_store_uri.as_deref().is_none_or(str::is_empty)
+        {
+            return Err(ConfigError::WorkspaceStoreRequiredForArtifactsOnly);
+        }
         let job_execution_enabled = env_bool(MLFLOW_SERVER_ENABLE_JOB_EXECUTION_ENV_VAR, true)?;
 
         let trace_archival_config_path = cli
@@ -583,6 +594,53 @@ mod tests {
         clear_env();
         let config = ServerConfig::from_cli(parse(&["--artifacts-only"])).unwrap();
         assert!(config.artifacts_only);
+    }
+
+    #[test]
+    fn artifacts_only_workspaces_requires_explicit_workspace_store() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let error = ServerConfig::from_cli(parse(&["--artifacts-only", "--enable-workspaces"]))
+            .unwrap_err();
+        assert_eq!(error, ConfigError::WorkspaceStoreRequiredForArtifactsOnly);
+        assert_eq!(
+            error.to_string(),
+            "--workspace-store-uri is required when combining --enable-workspaces with \
+             --artifacts-only so artifact requests can be validated against a workspace provider."
+        );
+    }
+
+    #[test]
+    fn artifacts_only_workspaces_accepts_cli_and_environment_workspace_store() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_env();
+        let cli_config = ServerConfig::from_cli(parse(&[
+            "--artifacts-only",
+            "--enable-workspaces",
+            "--workspace-store-uri",
+            "sqlite:///workspace.db",
+        ]))
+        .unwrap();
+        assert!(cli_config.enable_workspaces);
+        assert_eq!(
+            cli_config.workspace_store_uri.as_deref(),
+            Some("sqlite:///workspace.db")
+        );
+
+        unsafe {
+            std::env::set_var(MLFLOW_ENABLE_WORKSPACES_ENV_VAR, "true");
+            std::env::set_var(
+                MLFLOW_WORKSPACE_STORE_URI_ENV_VAR,
+                "sqlite:///workspace-env.db",
+            );
+        }
+        let env_config = ServerConfig::from_cli(parse(&["--artifacts-only"])).unwrap();
+        assert!(env_config.enable_workspaces);
+        assert_eq!(
+            env_config.workspace_store_uri.as_deref(),
+            Some("sqlite:///workspace-env.db")
+        );
+        clear_env();
     }
 
     #[test]

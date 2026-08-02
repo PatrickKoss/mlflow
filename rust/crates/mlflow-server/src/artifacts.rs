@@ -35,7 +35,7 @@
 use std::collections::HashMap;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{MatchedPath, OriginalUri, Path, State};
+use axum::extract::{MatchedPath, Path, State};
 use axum::http::header::{self, HeaderValue};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
@@ -491,21 +491,114 @@ pub async fn create_presigned_download_url(
     )
 }
 
-/// `_disable_if_artifacts_only` response for the presigned-download tracking
-/// RPC. Other historical tracking routes remain absent in artifacts-only mode;
-/// this new contract is registered explicitly so it returns upstream's 503.
-pub async fn artifacts_only_disabled_presigned_download(OriginalUri(uri): OriginalUri) -> Response {
+/// `_disable_if_artifacts_only`: plain-text 503 with Flask's matched URL rule,
+/// including `<param>` placeholders rather than the concrete request path.
+pub async fn artifacts_only_disabled(parts: Parts) -> Response {
+    let matched = parts
+        .extensions
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or_else(|| parts.uri.path());
+    let rule = axum_rule_to_flask(matched);
     let body = format!(
-        "Endpoint: {} disabled due to the mlflow server running in `--artifacts-only` mode. \
+        "Endpoint: {rule} disabled due to the mlflow server running in `--artifacts-only` mode. \
          To enable tracking server functionality, run `mlflow server` without \
-         `--artifacts-only`",
-        uri.path()
+         `--artifacts-only`"
     );
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .body(Body::from(body))
         .expect("valid response")
+}
+
+fn axum_rule_to_flask(rule: &str) -> String {
+    let mut output = String::with_capacity(rule.len());
+    let mut rest = rule;
+    while let Some(start) = rest.find('{') {
+        output.push_str(&rest[..start]);
+        let Some(end) = rest[start + 1..].find('}') else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        let parameter = &rest[start + 1..start + 1 + end];
+        if let Some(wildcard) = parameter.strip_prefix('*') {
+            output.push_str("<path:");
+            output.push_str(wildcard);
+            output.push('>');
+        } else {
+            output.push('<');
+            output.push_str(parameter);
+            output.push('>');
+        }
+        rest = &rest[start + end + 2..];
+    }
+    output.push_str(rest);
+    output
+}
+
+/// `_get_workspace_scoped_repo_path_if_enabled`: isolate proxy-repository
+/// paths while preserving the legacy root layout for the default workspace.
+fn workspace_scoped_repo_path(
+    state: &AppState,
+    workspace: &Workspace,
+    artifact_path: Option<&str>,
+) -> Result<Option<String>, MlflowError> {
+    if state.workspace_store().is_none() {
+        return Ok(artifact_path.map(str::to_string));
+    }
+
+    let normalized = artifact_path.unwrap_or_default().trim_start_matches('/');
+    let workspace_name = workspace.name();
+    let base = format!("workspaces/{workspace_name}");
+    if normalized.is_empty() {
+        return Ok(
+            if workspace_name == crate::workspace::DEFAULT_WORKSPACE_NAME {
+                artifact_path.map(str::to_string)
+            } else {
+                Some(base)
+            },
+        );
+    }
+
+    if workspace_name == crate::workspace::DEFAULT_WORKSPACE_NAME
+        && !normalized.starts_with("workspaces/")
+    {
+        return Ok(artifact_path.map(str::to_string));
+    }
+
+    if normalized == "workspaces" || normalized.starts_with("workspaces/") {
+        let prefixed = normalized.strip_prefix("workspaces").unwrap();
+        let prefixed = prefixed.strip_prefix('/').unwrap_or_default();
+        let Some((requested_workspace, _)) = prefixed.split_once('/') else {
+            if prefixed.is_empty() {
+                return Err(MlflowError::invalid_parameter_value(
+                    "Artifact paths prefixed with 'workspaces/' must include a workspace name.",
+                ));
+            }
+            if prefixed != workspace_name {
+                return Err(MlflowError::invalid_parameter_value(format!(
+                    "Artifact path targets workspace '{prefixed}' but the workspace specified in \
+                     the request is '{workspace_name}'."
+                )));
+            }
+            return Ok(Some(normalized.to_string()));
+        };
+        if requested_workspace.is_empty() {
+            return Err(MlflowError::invalid_parameter_value(
+                "Artifact paths prefixed with 'workspaces/' must include a workspace name.",
+            ));
+        }
+        if requested_workspace != workspace_name {
+            return Err(MlflowError::invalid_parameter_value(format!(
+                "Artifact path targets workspace '{requested_workspace}' but the workspace \
+                 specified in the request is '{workspace_name}'."
+            )));
+        }
+        return Ok(Some(normalized.to_string()));
+    }
+
+    Ok(Some(format!("{base}/{normalized}")))
 }
 
 // ===========================================================================
@@ -532,6 +625,7 @@ fn disabled_response(parts: &Parts) -> Response {
 /// (`handlers.py:3538`). Streams the file from the proxy repo.
 pub async fn proxy_download(
     State(state): State<AppState>,
+    workspace: Workspace,
     Path(artifact_path): Path<String>,
     parts: Parts,
 ) -> Response {
@@ -551,7 +645,10 @@ pub async fn proxy_download(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    let safe_path = match mlflow_artifacts::validate_path_is_safe(&artifact_path) {
+    let safe_path = match mlflow_artifacts::validate_path_is_safe(&artifact_path).and_then(|path| {
+        workspace_scoped_repo_path(&state, &workspace, Some(&path))
+            .map(|path| path.expect("non-empty artifact path remains present"))
+    }) {
         Ok(path) => path,
         Err(error) => return error.into_response(),
     };
@@ -566,7 +663,7 @@ pub async fn proxy_download(
         )
         .await;
     }
-    mlflow_artifacts::send_artifact_response(repo.as_ref(), &artifact_path).await
+    mlflow_artifacts::send_artifact_response(repo.as_ref(), &safe_path).await
 }
 
 /// PUT `/mlflow-artifacts/artifacts/{*artifact_path}` — `_upload_artifact`
@@ -574,6 +671,7 @@ pub async fn proxy_download(
 /// buffering).
 pub async fn proxy_upload(
     State(state): State<AppState>,
+    workspace: Workspace,
     Path(artifact_path): Path<String>,
     _parts: Parts,
     body: Body,
@@ -593,6 +691,8 @@ pub async fn proxy_upload(
     let result = async {
         let repo = state.proxied_artifacts_repo()?;
         let safe = mlflow_artifacts::validate_path_is_safe(&artifact_path)?;
+        let safe = workspace_scoped_repo_path(&state, &workspace, Some(&safe))?
+            .expect("non-empty artifact path remains present");
         if safe.ends_with('/') {
             return Ok::<_, MlflowError>(Some(fastapi_detail(
                 StatusCode::BAD_REQUEST,
@@ -623,6 +723,7 @@ pub async fn proxy_upload(
 /// `_delete_artifact_mlflow_artifacts` (`handlers.py:3621`).
 pub async fn proxy_delete(
     State(state): State<AppState>,
+    workspace: Workspace,
     Path(artifact_path): Path<String>,
     parts: Parts,
 ) -> Response {
@@ -632,6 +733,8 @@ pub async fn proxy_delete(
     let result = async {
         let repo = state.proxied_artifacts_repo()?;
         let safe = mlflow_artifacts::validate_path_is_safe(&artifact_path)?;
+        let safe = workspace_scoped_repo_path(&state, &workspace, Some(&safe))?
+            .expect("non-empty artifact path remains present");
         repo.delete(&safe).await?;
         Ok::<_, MlflowError>(())
     }
@@ -648,7 +751,11 @@ pub async fn proxy_delete(
 /// GET `/mlflow-artifacts/artifacts?path=` — `_list_artifacts_mlflow_artifacts`
 /// (`handlers.py:3598`). Each returned `FileInfo` path is reduced to its
 /// basename (`posixpath.basename`).
-pub async fn proxy_list(State(state): State<AppState>, parts: Parts) -> Response {
+pub async fn proxy_list(
+    State(state): State<AppState>,
+    workspace: Workspace,
+    parts: Parts,
+) -> Response {
     if !state.serve_artifacts() {
         return disabled_response(&parts);
     }
@@ -660,7 +767,8 @@ pub async fn proxy_list(State(state): State<AppState>, parts: Parts) -> Response
             Some(p) => Some(mlflow_artifacts::validate_path_is_safe(&p)?),
             None => None,
         };
-        let files = repo.list(validated.as_deref()).await?;
+        let scoped = workspace_scoped_repo_path(&state, &workspace, validated.as_deref())?;
+        let files = repo.list(scoped.as_deref()).await?;
         let proto_files = files
             .into_iter()
             .map(|f| pb::FileInfo {
@@ -687,6 +795,7 @@ pub async fn proxy_list(State(state): State<AppState>, parts: Parts) -> Response
 /// `MultipartUploadMixin`, so this returns `NOT_IMPLEMENTED`.
 pub async fn proxy_create_multipart(
     State(state): State<AppState>,
+    workspace: Workspace,
     Path(artifact_path): Path<String>,
     parts: Parts,
     body: Bytes,
@@ -697,6 +806,8 @@ pub async fn proxy_create_multipart(
     let result = async {
         let repo = state.proxied_artifacts_repo()?;
         let artifact_path = mlflow_artifacts::validate_path_is_safe(&artifact_path)?;
+        let artifact_path = workspace_scoped_repo_path(&state, &workspace, Some(&artifact_path))?
+            .expect("non-empty artifact path remains present");
         let req: art_pb::CreateMultipartUpload =
             parse_control_body(&body, "mlflow.artifacts.CreateMultipartUpload")?;
         let path =
@@ -727,6 +838,7 @@ pub async fn proxy_create_multipart(
 /// `_complete_multipart_upload_artifact` (`handlers.py:3783`).
 pub async fn proxy_complete_multipart(
     State(state): State<AppState>,
+    workspace: Workspace,
     Path(artifact_path): Path<String>,
     parts: Parts,
     body: Bytes,
@@ -737,6 +849,8 @@ pub async fn proxy_complete_multipart(
     let result = async {
         let repo = state.proxied_artifacts_repo()?;
         let artifact_path = mlflow_artifacts::validate_path_is_safe(&artifact_path)?;
+        let artifact_path = workspace_scoped_repo_path(&state, &workspace, Some(&artifact_path))?
+            .expect("non-empty artifact path remains present");
         let req: art_pb::CompleteMultipartUpload =
             parse_control_body(&body, "mlflow.artifacts.CompleteMultipartUpload")?;
         let path =
@@ -769,6 +883,7 @@ pub async fn proxy_complete_multipart(
 /// `_abort_multipart_upload_artifact` (`handlers.py:3817`).
 pub async fn proxy_abort_multipart(
     State(state): State<AppState>,
+    workspace: Workspace,
     Path(artifact_path): Path<String>,
     parts: Parts,
     body: Bytes,
@@ -779,6 +894,8 @@ pub async fn proxy_abort_multipart(
     let result = async {
         let repo = state.proxied_artifacts_repo()?;
         let artifact_path = mlflow_artifacts::validate_path_is_safe(&artifact_path)?;
+        let artifact_path = workspace_scoped_repo_path(&state, &workspace, Some(&artifact_path))?
+            .expect("non-empty artifact path remains present");
         let req: art_pb::AbortMultipartUpload =
             parse_control_body(&body, "mlflow.artifacts.AbortMultipartUpload")?;
         let path =
@@ -802,6 +919,7 @@ pub async fn proxy_abort_multipart(
 /// URLs (`_validate_support_multipart_download` → NOT_IMPLEMENTED).
 pub async fn proxy_presigned_download(
     State(state): State<AppState>,
+    workspace: Workspace,
     Path(artifact_path): Path<String>,
     parts: Parts,
 ) -> Response {
@@ -811,6 +929,8 @@ pub async fn proxy_presigned_download(
     let result = async {
         let repo = state.proxied_artifacts_repo()?;
         let path = mlflow_artifacts::validate_path_is_safe(&artifact_path)?;
+        let path = workspace_scoped_repo_path(&state, &workspace, Some(&path))?
+            .expect("non-empty artifact path remains present");
         if !repo.supports_multipart_download() {
             return Err(MlflowError::not_implemented(
                 "Multipart download is not supported for the current artifact repository",

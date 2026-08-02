@@ -50,7 +50,7 @@ pub struct AppState {
 }
 
 struct AppStateInner {
-    tracking_store: TrackingStore,
+    tracking_store: Option<TrackingStore>,
     /// Process-local policy cache / spend tracker, or the Redis-backed shared
     /// tracker selected at startup by `MLFLOW_GATEWAY_BUDGET_REDIS_URL`.
     budget_tracker: BudgetTracker,
@@ -109,7 +109,7 @@ impl AppState {
     /// use [`AppState::with_artifacts`] (+ [`AppState::with_registry`] for the
     /// registry-store handle).
     pub fn new(tracking_store: TrackingStore) -> Self {
-        Self::build(tracking_store, None, None, false, None, None)
+        Self::build(Some(tracking_store), None, None, false, None, None)
     }
 
     /// Attach a [`WebhookStore`] plus its async delivery [`WebhookDispatcher`]
@@ -203,7 +203,7 @@ impl AppState {
         artifacts_destination: Option<String>,
     ) -> Self {
         Self::build(
-            tracking_store,
+            Some(tracking_store),
             None,
             None,
             serve_artifacts,
@@ -223,7 +223,7 @@ impl AppState {
         artifacts_destination: Option<String>,
     ) -> Self {
         Self::build(
-            tracking_store,
+            Some(tracking_store),
             Some(registry_store),
             None,
             serve_artifacts,
@@ -233,7 +233,7 @@ impl AppState {
     }
 
     fn build(
-        tracking_store: TrackingStore,
+        tracking_store: Option<TrackingStore>,
         registry_store: Option<RegistryStore>,
         webhook_store: Option<WebhookStore>,
         serve_artifacts: bool,
@@ -256,6 +256,25 @@ impl AppState {
                 assistant_runtime: AssistantRuntime::from_env(),
             }),
         }
+    }
+
+    /// Build the artifact-plane state used by `--artifacts-only`. It carries no
+    /// tracking or registry store, so startup cannot accidentally connect to or
+    /// initialize the tracking backend. A workspace and/or auth store may be
+    /// attached with the regular additive builders.
+    pub fn artifacts_only(
+        serve_artifacts: bool,
+        proxied_artifacts_repo: Option<Arc<dyn ArtifactRepo>>,
+        artifacts_destination: Option<String>,
+    ) -> Self {
+        Self::build(
+            None,
+            None,
+            None,
+            serve_artifacts,
+            proxied_artifacts_repo,
+            artifacts_destination,
+        )
     }
 
     /// Replace the assistant runtime without changing any tracking-plane
@@ -310,7 +329,17 @@ impl AppState {
 
     /// The tracking store (experiments, runs, metrics, traces, …).
     pub fn tracking_store(&self) -> &TrackingStore {
-        &self.inner.tracking_store
+        self.inner
+            .tracking_store
+            .as_ref()
+            .expect("tracking store is unavailable in artifacts-only mode")
+    }
+
+    /// The tracking store when this is a full tracking-server state. Auth
+    /// validators use the optional form because artifact-proxy permission
+    /// checks remain meaningful on an artifacts-only server.
+    pub fn tracking_store_optional(&self) -> Option<&TrackingStore> {
+        self.inner.tracking_store.as_ref()
     }
 
     /// Gateway budget tracker selected once when this application state is
@@ -323,7 +352,7 @@ impl AppState {
     /// store surface, matching Python's `_get_job_store`, while cloning only
     /// the underlying pool handles.
     pub fn job_store(&self) -> JobStore {
-        JobStore::new(self.inner.tracking_store.db().clone())
+        JobStore::new(self.tracking_store().db().clone())
     }
 
     pub fn assistant_runtime(&self) -> &AssistantRuntime {

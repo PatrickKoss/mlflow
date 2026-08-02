@@ -1,0 +1,12 @@
+cases:
+  - name: artifacts_only_default_workspace_experiment_grant_honored
+    method: GET
+    path: /api/2.0/mlflow-artifacts/artifacts/987654321/run-id/artifacts/granted.txt
+    auth: granted
+    expect_status: 200
+
+  - name: artifacts_only_default_workspace_no_grant_denied
+    method: GET
+    path: /api/2.0/mlflow-artifacts/artifacts/987654321/run-id/artifacts/missing.bin
+    auth: stranger
+    expect_status: 403

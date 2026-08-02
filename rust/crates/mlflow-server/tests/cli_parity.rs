@@ -8,7 +8,9 @@
 //! logic is unit-tested in `src/config.rs`; this file covers the process-level
 //! contract that deploy scripts see.
 
+use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 /// Path to the `mlflow-server` binary under test (Cargo sets `CARGO_BIN_EXE_*`
 /// for integration tests of a binary crate).
@@ -88,10 +90,58 @@ fn mismatched_registry_store_uri_fails_loudly() {
         "--registry-store-uri",
         "postgresql://other/db",
     ]);
-    assert_ne!(code, 0);
+    assert_eq!(code, 1);
     assert!(
         stderr.contains("--registry-store-uri"),
         "stderr did not name --registry-store-uri: {stderr}"
+    );
+}
+
+#[test]
+fn artifacts_only_workspaces_initializes_workspace_store_but_not_tracking_backend() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let workspace_db = temp.path().join("workspace.db");
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("tracking.db"),
+        &workspace_db,
+    )
+    .unwrap();
+    let default_tracking = temp.path().join("mlflow.db");
+    let artifact_dir = temp.path().join("artifacts");
+    std::fs::create_dir(&artifact_dir).unwrap();
+
+    let mut child = Command::new(bin())
+        .args([
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--artifacts-only",
+            "--enable-workspaces",
+            "--workspace-store-uri",
+            &format!("sqlite:///{}", workspace_db.display()),
+            "--artifacts-destination",
+            &format!("file://{}", artifact_dir.display()),
+        ])
+        .current_dir(temp.path())
+        .env_clear()
+        .spawn()
+        .expect("spawn artifacts-only server");
+
+    for _ in 0..20 {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("artifacts-only server exited during startup: {status}");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        !default_tracking.exists(),
+        "artifacts-only startup initialized the tracking backend"
     );
 }
 
@@ -103,5 +153,29 @@ fn invalid_static_prefix_fails_loudly() {
     assert!(
         stderr.contains("--static-prefix"),
         "stderr did not name --static-prefix: {stderr}"
+    );
+}
+
+#[test]
+fn artifacts_only_workspace_matrix_requires_workspace_store_uri() {
+    let (code, _stdout, stderr) = run(&["--artifacts-only", "--enable-workspaces"]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains(
+        "--workspace-store-uri is required when combining --enable-workspaces with \
+         --artifacts-only so artifact requests can be validated against a workspace provider."
+    ));
+
+    // Supplying the required URI passes CLI validation and proceeds to store
+    // initialization, where this deliberately missing database fails.
+    let (code, _stdout, stderr) = run(&[
+        "--artifacts-only",
+        "--enable-workspaces",
+        "--workspace-store-uri",
+        "sqlite:///definitely-missing-workspace.db",
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        !stderr.contains("--workspace-store-uri is required"),
+        "valid combination was rejected by CLI validation: {stderr}"
     );
 }

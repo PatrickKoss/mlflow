@@ -1,46 +1,40 @@
 cases:
-  - name: presigned_download_artifacts_only_503
-    method: POST
-    path: /api/2.0/mlflow/artifacts/presigned-download-url
-    body: {run_id: ignored, path: ignored}
-    expect_status: 503
-
-  - name: get_artifact_artifacts_only_503
+  - name: artifacts_only_workspaces_get_artifact_503
     method: GET
     path: /get-artifact
     query: {run_id: ignored, path: ignored}
     expect_status: 503
 
-  - name: upload_artifact_artifacts_only_503
+  - name: artifacts_only_workspaces_upload_artifact_503
     method: POST
     path: /ajax-api/2.0/mlflow/upload-artifact
     query: {run_uuid: ignored, path: ignored}
     raw_body: ignored
     expect_status: 503
 
-  - name: list_workspaces_artifacts_only_503
+  - name: artifacts_only_workspaces_list_503
     method: GET
     path: /api/3.0/mlflow/workspaces
     expect_status: 503
 
-  - name: create_workspace_artifacts_only_503
+  - name: artifacts_only_workspaces_create_503
     method: POST
     path: /api/3.0/mlflow/workspaces
     body: {name: ignored}
     expect_status: 503
 
-  - name: get_workspace_artifacts_only_503
+  - name: artifacts_only_workspaces_get_503
     method: GET
     path: /api/3.0/mlflow/workspaces/ignored
     expect_status: 503
 
-  - name: update_workspace_artifacts_only_503
+  - name: artifacts_only_workspaces_update_503
     method: PATCH
     path: /api/3.0/mlflow/workspaces/ignored
     body: {workspace: {name: ignored}, update_mask: description}
     expect_status: 503
 
-  - name: delete_workspace_artifacts_only_503
+  - name: artifacts_only_workspaces_delete_503
     method: DELETE
     path: /api/3.0/mlflow/workspaces/ignored
     expect_status: 503

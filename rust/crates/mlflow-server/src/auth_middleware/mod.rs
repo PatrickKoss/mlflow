@@ -307,7 +307,7 @@ pub async fn authorize(
             json_body: json_body.as_ref(),
             experiment_id_header: experiment_id_header.as_deref(),
             auth_store,
-            tracking_store: state.tracking_store(),
+            tracking_store: state.tracking_store_optional(),
         };
         if let Err(error) = validators::enforce_review_queue_name_integrity(&ctx, update).await {
             return error_response(&error);
@@ -325,7 +325,7 @@ pub async fn authorize(
             json_body: json_body.as_ref(),
             experiment_id_header: experiment_id_header.as_deref(),
             auth_store,
-            tracking_store: state.tracking_store(),
+            tracking_store: state.tracking_store_optional(),
         };
         match validator.check(&ctx).await {
             Ok(true) => {}
