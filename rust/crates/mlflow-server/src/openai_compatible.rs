@@ -365,6 +365,13 @@ struct ModelTurn {
     tool_calls: Vec<Value>,
 }
 
+struct StreamState {
+    turn: ModelTurn,
+    think_buffer: String,
+    in_think: bool,
+    had_signal: bool,
+}
+
 async fn model_turn(
     client: &reqwest::Client,
     chat_url: &str,
@@ -391,49 +398,32 @@ async fn model_turn(
     }
     let mut bytes = response.bytes_stream();
     let mut line_buffer = Vec::new();
-    let mut turn = ModelTurn {
-        visible_text: String::new(),
-        tool_calls: Vec::new(),
+    let mut state = StreamState {
+        turn: ModelTurn {
+            visible_text: String::new(),
+            tool_calls: Vec::new(),
+        },
+        think_buffer: String::new(),
+        in_think: false,
+        had_signal: false,
     };
-    let mut think_buffer = String::new();
-    let mut in_think = false;
-    let mut stream_had_signal = false;
     while let Some(chunk) = bytes.try_next().await.map_err(|error| error.to_string())? {
         line_buffer.extend_from_slice(&chunk);
         while let Some(index) = line_buffer.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = line_buffer.drain(..=index).collect();
-            process_line(
-                &line,
-                model,
-                sender,
-                &mut turn,
-                &mut think_buffer,
-                &mut in_think,
-                &mut stream_had_signal,
-                display_name,
-            )
-            .await?;
+            process_line(&line, model, sender, &mut state, display_name).await?;
         }
     }
     if !line_buffer.is_empty() {
-        process_line(
-            &line_buffer,
-            model,
-            sender,
-            &mut turn,
-            &mut think_buffer,
-            &mut in_think,
-            &mut stream_had_signal,
-            display_name,
-        )
-        .await?;
+        process_line(&line_buffer, model, sender, &mut state, display_name).await?;
     }
-    if !stream_had_signal {
+    if !state.had_signal {
         return Err(format!(
             "{display_name} returned an empty response and ended unexpectedly. The upstream provider likely failed before producing any output (e.g. an invalid API key or a rate limit)."
         ));
     }
-    turn.tool_calls = turn
+    state.turn.tool_calls = state
+        .turn
         .tool_calls
         .into_iter()
         .map(|call| {
@@ -450,17 +440,14 @@ async fn model_turn(
             })
         })
         .collect();
-    Ok(turn)
+    Ok(state.turn)
 }
 
 async fn process_line(
     raw: &[u8],
     model: &str,
     sender: &mpsc::Sender<AssistantEvent>,
-    turn: &mut ModelTurn,
-    think_buffer: &mut String,
-    in_think: &mut bool,
-    stream_had_signal: &mut bool,
+    state: &mut StreamState,
     display_name: &str,
 ) -> Result<(), String> {
     let mut line = std::str::from_utf8(raw)
@@ -470,7 +457,7 @@ async fn process_line(
         line = data.trim();
     }
     if line == "[DONE]" {
-        *stream_had_signal = true;
+        state.had_signal = true;
         return Ok(());
     }
     if line.is_empty() || line.starts_with(':') {
@@ -480,7 +467,7 @@ async fn process_line(
         return Ok(());
     };
     if let Some(error) = chunk.get("error").filter(|error| python_truthy(error)) {
-        *stream_had_signal = true;
+        state.had_signal = true;
         let message = match error.as_object() {
             Some(error) => error.get("message"),
             None => Some(error),
@@ -492,7 +479,7 @@ async fn process_line(
         });
     }
     if let Some(usage) = chunk.get("usage").filter(|usage| python_truthy(usage)) {
-        *stream_had_signal = true;
+        state.had_signal = true;
         send(sender, usage_event(usage, model)).await?;
     }
     let Some(choice) = chunk
@@ -503,7 +490,7 @@ async fn process_line(
         return Ok(());
     };
     if choice.get("finish_reason").is_some_and(python_truthy) {
-        *stream_had_signal = true;
+        state.had_signal = true;
     }
     let Some(delta) = choice.get("delta") else {
         return Ok(());
@@ -513,13 +500,14 @@ async fn process_line(
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
     {
-        *stream_had_signal = true;
-        think_buffer.push_str(text);
-        let (visible, remaining, state) = strip_think_blocks(think_buffer, *in_think);
-        *think_buffer = remaining;
-        *in_think = state;
+        state.had_signal = true;
+        state.think_buffer.push_str(text);
+        let (visible, remaining, in_think) =
+            strip_think_blocks(&state.think_buffer, state.in_think);
+        state.think_buffer = remaining;
+        state.in_think = in_think;
         if !visible.is_empty() {
-            turn.visible_text.push_str(&visible);
+            state.turn.visible_text.push_str(&visible);
             send(
                 sender,
                 AssistantEvent::new(
@@ -535,9 +523,9 @@ async fn process_line(
         .filter(|calls| python_truthy(calls))
         .and_then(Value::as_array)
     {
-        *stream_had_signal = true;
+        state.had_signal = true;
         for call in calls {
-            merge_tool_call(&mut turn.tool_calls, call);
+            merge_tool_call(&mut state.turn.tool_calls, call);
         }
     }
     Ok(())

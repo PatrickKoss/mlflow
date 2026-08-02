@@ -221,12 +221,12 @@ async fn delete_all(
 async fn seed_fixture_rows(db: Db) -> Result<(), mlflow_store::StoreError> {
     use mlflow_store::TrackingStore;
 
-    // `create_experiment` cannot fail here (fresh, truncated tables; valid
-    // names); `.expect()` turns anything unexpected into a hard test-setup
-    // failure rather than threading a mismatched error type through.
+    // The default experiment must retain its reserved ID 0 even after many
+    // live-dialect resets, whose auto-increment sequences are not reset by
+    // DELETE. Use the production bootstrap path that inserts ID 0 explicitly.
     let store = TrackingStore::new(db, "s3://bucket/mlruns");
     store
-        .create_experiment("default", "Default", None, &[])
+        .ensure_default_experiment()
         .await
         .expect("seed Default experiment");
     store

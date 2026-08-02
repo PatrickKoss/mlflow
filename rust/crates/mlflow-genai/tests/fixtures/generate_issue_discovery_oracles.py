@@ -59,6 +59,7 @@ def build() -> dict:
             example_indices=[0],
             severity="low",
             categories=["correctness"],
+            category_rationale="",
         ),
         _IdentifiedIssue(
             name="Issue: Timeout",
@@ -67,6 +68,7 @@ def build() -> dict:
             example_indices=[1],
             severity="medium",
             categories=["latency"],
+            category_rationale="",
         ),
         _IdentifiedIssue(
             name="Issue: Incorrect city",
@@ -75,6 +77,7 @@ def build() -> dict:
             example_indices=[2],
             severity="high",
             categories=["execution", "correctness"],
+            category_rationale="",
         ),
     ]
     dedup_inputs = [issue.model_dump(mode="json") for issue in issues]

@@ -249,7 +249,7 @@ def _validate_manifests(names: dict[str, list[str]]) -> None:
     assert len(names["semantic_scorer_execution"]) == 139
     assert len(third_party["manifest"]) == len(scorers["third_party_metrics"]) == 112
     assert third_party["live_provider_calls"] == 0
-    assert len(names["semantic_provider_manifest"]) == providers["coverage"]["providers"] == 191
+    assert len(names["semantic_provider_manifest"]) == providers["coverage"]["providers"] == 192
     assert providers["coverage"]["unsupported"] == 0
     assert len(names["semantic_prompt_optimization"]) == len(algorithms["algorithms"]) == 2
 

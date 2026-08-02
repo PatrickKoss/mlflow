@@ -456,6 +456,17 @@ def test_serving_artifacts_honors_workspace_override(workspace_tracking_store, m
         def resolve_artifact_root(self, _default_root, workspace_name):
             return f"s3://{workspace_name}-bucket/root", False
 
+        def resolve_trace_archival_config(
+            self, default_root: str, default_retention: str, _workspace_name: str
+        ) -> ResolvedTraceArchivalConfig:
+            return ResolvedTraceArchivalConfig(
+                config=TraceArchivalConfig(
+                    location=default_root,
+                    retention=default_retention,
+                ),
+                append_workspace_prefix=True,
+            )
+
     provider = OverrideProvider()
     monkeypatch.setattr(
         WorkspaceAwareSqlAlchemyStore,

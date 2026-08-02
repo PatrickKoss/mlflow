@@ -1,7 +1,7 @@
 # T22.1 Semantic Differential Corpus - Last Run
 
 - Profile: **required**
-- Cases run: **374**
+- Cases run: **375**
 - Non-allowlisted diffs: **0**
 - Allowlisted diffs: **0**
 - Live provider calls: **0**
@@ -15,7 +15,7 @@
 | semantic_issue_discovery | 7 | 0 |
 | semantic_online_scoring | 1 | 0 |
 | semantic_prompt_optimization | 2 | 0 |
-| semantic_provider_manifest | 191 | 0 |
+| semantic_provider_manifest | 192 | 0 |
 | semantic_scorer_execution | 139 | 0 |
 
 ## Commands

@@ -1,10 +1,10 @@
 {
   "coverage": {
-    "explicit_native": 8,
+    "explicit_native": 9,
     "models": 2908,
     "openai_compatible": 6,
     "pinned_litellm_transform": 177,
-    "providers": 191,
+    "providers": 192,
     "unsupported": 0
   },
   "providers": [
@@ -2159,9 +2159,9 @@
         "chat": true,
         "cost": false,
         "embeddings": false,
-        "stream": false
+        "stream": true
       },
-      "chat_transform": "mlflow.gateway.providers.sap_ai_core.SapAiCoreAdapter",
+      "chat_transform": null,
       "embedding_transform": null,
       "model_entry_count": 0,
       "name": "sap-ai-core",

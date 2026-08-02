@@ -43,7 +43,7 @@ These cases are generated from the checked-in manifests/fixtures by
 | Semantic category / manifest | Semantic section | Cases | Status |
 |---|---|---:|---|
 | Scorer deserialization/execution: 24 builtins, 2 serialized judges, 112 third-party rows, 1 rejected-payload inventory row | `semantic_scorer_execution` | 139 | Complete; pinned scorer manifest fully covered |
-| Pinned LiteLLM provider adapters/accounting/retry inventory | `semantic_provider_manifest` | 191 | Complete; 191/191, zero unsupported/Python fallback |
+| Pinned LiteLLM provider adapters/accounting/retry inventory | `semantic_provider_manifest` | 192 | Complete; 192/192, zero unsupported/Python fallback |
 | Evaluation harness: rate parsing, result standardization, aggregate values/metrics | `semantic_evaluation_harness` | 26 | Complete |
 | Issue discovery: sampling, latency, clustering, dedup, end-to-end persistence | `semantic_issue_discovery` | 7 | Complete |
 | Online trace/session scoring submission with identical seed/shared DB | `semantic_online_scoring` | 1 | Complete |

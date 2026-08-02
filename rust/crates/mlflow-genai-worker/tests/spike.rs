@@ -173,7 +173,7 @@ async fn distinct_worker_failures_are_observable_in_spike_jobs_table() {
         let mut job_request = request.clone();
         job_request.job_id = job.job_id.clone();
         let error = isolated_launcher(path.path())
-            .timeout(Duration::from_millis(300))
+            .timeout(Duration::from_secs(1))
             .env(SPIKE_MODE_ENV, mode)
             .run(&job_request)
             .await

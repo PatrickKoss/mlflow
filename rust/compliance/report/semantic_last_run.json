@@ -1,7 +1,7 @@
 {
   "summary": {
     "profile": "required",
-    "cases_run": 374,
+    "cases_run": 375,
     "non_allowlisted_diffs": 0,
     "allowlisted_diffs": 0,
     "live_provider_calls": 0
@@ -12,7 +12,7 @@
       "diffs": 0
     },
     "semantic_provider_manifest": {
-      "cases": 191,
+      "cases": 192,
       "diffs": 0
     },
     "semantic_evaluation_harness": {
@@ -50,7 +50,7 @@
       ],
       "returncode": 0,
       "stdout": "{\"accepted_natively\": 26, \"rejected_correctly\": 11, \"roundtrips\": 26}\n",
-      "stderr": "Installed 69 packages in 257ms\n"
+      "stderr": ""
     },
     {
       "name": "judge-python-rust-oracle",
@@ -62,7 +62,7 @@
         "rust/tools/judge_oracle.py"
       ],
       "returncode": 0,
-      "stdout": "\nrunning 7 tests\n.......\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s\n\n{\"instructions_transcripts\": 1, \"live_provider_calls\": 0, \"rust_scripted_suites\": 7, \"trace_tool_schemas\": 6}\n",
+      "stdout": "\nrunning 8 tests\n........\ntest result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s\n\n{\"instructions_transcripts\": 1, \"live_provider_calls\": 0, \"rust_scripted_suites\": 7, \"trace_tool_schemas\": 7}\n",
       "stderr": ""
     },
     {
@@ -92,7 +92,7 @@
         "third_party"
       ],
       "returncode": 0,
-      "stdout": "\nrunning 6 tests\n......\ntest result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s\n\n",
+      "stdout": "\nrunning 6 tests\n......\ntest result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s\n\n",
       "stderr": ""
     },
     {
@@ -121,7 +121,7 @@
         "manifest_has_full_pinned_coverage_and_no_unsupported_entries"
       ],
       "returncode": 0,
-      "stdout": "\nrunning 1 test\n.\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 214 filtered out; finished in 0.03s\n\n",
+      "stdout": "\nrunning 1 test\n.\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 225 filtered out; finished in 0.02s\n\n",
       "stderr": ""
     },
     {
@@ -147,8 +147,8 @@
         "rust/tools/issue_discovery_oracle.py"
       ],
       "returncode": 0,
-      "stdout": "\nrunning 4 tests\ntest discovery::tests::summary_is_python_compatible ... ok\ntest discovery::tests::assessment_dict_parsing_and_filtering_match_python ... ok\ntest discovery::tests::latency_clustering_and_dedup_match_python_goldens ... ok\ntest discovery::tests::python_random_matches_reference ... ok\n\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s\n\n\nrunning 1 test\ntest scripted_issue_discovery_persists_python_contract ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s\n\n{\"cluster_cases\": 1, \"dedup_cases\": 1, \"e2e_cases\": 1, \"latency_cases\": 1, \"live_provider_calls\": 0, \"persisted_artifact_diffs\": 0, \"phase_diffs\": 0, \"sampling_cases\": 3}\n",
-      "stderr": "   Compiling mlflow-genai v0.1.0 (/home/patrick/projects/mlflow-patrick/rust/crates/mlflow-genai)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.19s\n     Running unittests src/lib.rs (target/debug/deps/mlflow_genai-c894a14b0b590e12)\n     Running tests/discovery.rs (target/debug/deps/discovery-89a01348f803090d)\n     Running tests/execution.rs (target/debug/deps/execution-d214803511a362a4)\n     Running tests/payload.rs (target/debug/deps/payload-7d03497e83c181c3)\n     Running tests/phase19_contract.rs (target/debug/deps/phase19_contract-0d9ee48254bdbf43)\n     Running tests/protocol.rs (target/debug/deps/protocol-e3b2db3128bc385c)\n     Running tests/third_party.rs (target/debug/deps/third_party-e234df182f375de3)\n"
+      "stdout": "\nrunning 7 tests\ntest discovery::tests::summary_is_python_compatible ... ok\ntest discovery::tests::identified_issue_requires_structured_output_fields ... ok\ntest discovery::tests::strict_schema_removes_every_ref_sibling_without_recursing ... ok\ntest discovery::tests::assessment_dict_parsing_and_filtering_match_python ... ok\ntest discovery::tests::identified_issue_schema_matches_python_response_format ... ok\ntest discovery::tests::python_random_matches_reference ... ok\ntest discovery::tests::latency_clustering_and_dedup_match_python_goldens ... ok\n\ntest result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s\n\n\nrunning 1 test\ntest scripted_issue_discovery_persists_python_contract ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s\n\n\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s\n\n{\"cluster_cases\": 1, \"dedup_cases\": 1, \"e2e_cases\": 1, \"latency_cases\": 1, \"live_provider_calls\": 0, \"persisted_artifact_diffs\": 0, \"phase_diffs\": 0, \"sampling_cases\": 3}\n",
+      "stderr": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s\n     Running unittests src/lib.rs (target/debug/deps/mlflow_genai-e029ae27441646f4)\n     Running tests/discovery.rs (target/debug/deps/discovery-3e559a1c20a6c3ab)\n     Running tests/execution.rs (target/debug/deps/execution-e211001ec55d3a40)\n     Running tests/payload.rs (target/debug/deps/payload-155ed320a04f108c)\n     Running tests/phase19_contract.rs (target/debug/deps/phase19_contract-34c396dc7d70e5a3)\n     Running tests/protocol.rs (target/debug/deps/protocol-de168fdf66e1d479)\n     Running tests/third_party.rs (target/debug/deps/third_party-338ec576bfac43be)\n"
     },
     {
       "name": "online-scoring-shared-db-differential",
@@ -162,7 +162,7 @@
         "online_scoring_scheduler_cross_server"
       ],
       "returncode": 0,
-      "stdout": "\nrunning 1 test\n.\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.33s\n\n",
+      "stdout": "\nrunning 1 test\n.\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.22s\n\n",
       "stderr": ""
     },
     {
@@ -193,7 +193,7 @@
         "guardrail_matrix_is_byte_identical_to_python"
       ],
       "returncode": 0,
-      "stdout": "\nrunning 1 test\n.\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 7.24s\n\n",
+      "stdout": "\nrunning 1 test\n.\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 6.76s\n\n",
       "stderr": ""
     }
   ],
@@ -2168,6 +2168,13 @@
     {
       "section": "semantic_provider_manifest",
       "name": "provider:sap",
+      "status": "passed",
+      "oracle": "provider-manifest-generation-check,provider-hermetic-matrix",
+      "diff_count": 0
+    },
+    {
+      "section": "semantic_provider_manifest",
+      "name": "provider:sap-ai-core",
       "status": "passed",
       "oracle": "provider-manifest-generation-check,provider-hermetic-matrix",
       "diff_count": 0

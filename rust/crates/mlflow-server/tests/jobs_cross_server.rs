@@ -419,6 +419,7 @@ async fn invoke_jobs_and_precreated_runs_are_byte_readable_by_either_server() {
                 "categories": ["correctness", "safety"],
                 "provider": "openai",
                 "model": "gpt-5",
+                "endpoint_name": "fixture-endpoint",
             }),
         )
         .await;

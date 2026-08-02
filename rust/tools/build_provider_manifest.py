@@ -17,7 +17,15 @@ RUST_ROOT = Path(__file__).resolve().parents[1]
 SOURCE = RUST_ROOT / "genai-inventory" / "providers.json"
 DESTINATION = RUST_ROOT / "genai-inventory" / "provider_manifest.json"
 
-EXPLICIT_ADAPTERS = {"openai", "azure", "anthropic", "gemini", "bedrock", "databricks"}
+EXPLICIT_ADAPTERS = {
+    "openai",
+    "azure",
+    "anthropic",
+    "gemini",
+    "bedrock",
+    "databricks",
+    "sap-ai-core",
+}
 # Aliases the Rust runtime folds onto explicit adapters (normalize_provider in
 # gateway_provider_matrix.rs); classify them the same so the manifest and
 # adapter_for() never disagree.

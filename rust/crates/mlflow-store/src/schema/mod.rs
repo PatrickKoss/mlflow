@@ -77,6 +77,15 @@ pub const TRACKING_TABLES: &[&str] = &[
     mcp::MCP_SERVER_VERSION_TAGS,
     mcp::MCP_SERVER_ALIASES,
     mcp::MCP_ACCESS_ENDPOINTS,
+    "secrets",
+    "endpoints",
+    "model_definitions",
+    "endpoint_model_mappings",
+    "endpoint_bindings",
+    "endpoint_tags",
+    "budget_policies",
+    "guardrails",
+    "guardrail_configs",
 ];
 
 #[cfg(test)]
@@ -85,7 +94,7 @@ mod tests {
 
     #[test]
     fn tracking_table_count() {
-        assert_eq!(TRACKING_TABLES.len(), 42);
+        assert_eq!(TRACKING_TABLES.len(), 51);
     }
 
     #[test]

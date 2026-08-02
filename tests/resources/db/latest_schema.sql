@@ -22,6 +22,7 @@ CREATE TABLE budget_policies (
 	CONSTRAINT budget_policies_pk PRIMARY KEY (budget_policy_id)
 )
 
+CREATE INDEX idx_budget_policies_target_value ON budget_policies (target_value)
 CREATE INDEX idx_budget_policies_workspace ON budget_policies (workspace)
 
 CREATE TABLE entity_associations (
@@ -771,8 +772,8 @@ CREATE TABLE spans (
 	CONSTRAINT fk_spans_experiment_id FOREIGN KEY(experiment_id) REFERENCES experiments (experiment_id)
 )
 
-CREATE INDEX index_spans_experiment_id ON spans (experiment_id)
 CREATE INDEX index_spans_experiment_id_duration ON spans (experiment_id, duration_ns)
+CREATE INDEX index_spans_experiment_id_start_time ON spans (experiment_id, start_time_unix_nano)
 CREATE INDEX index_spans_experiment_id_status_type ON spans (experiment_id, status, type)
 CREATE INDEX index_spans_experiment_id_type_status ON spans (experiment_id, type, status)
 
