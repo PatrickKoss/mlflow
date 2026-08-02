@@ -754,6 +754,7 @@ fn dispatch_mcp_after_request(
         ("DELETE", [_, _]) => Some((DeleteGrantsMcpServer, params)),
         ("GET", []) => Some((FilterSearchMcpServers, params)),
         ("GET", ["endpoints"]) => Some((FilterSearchMcpEndpoints, params)),
+        ("GET", [_, _]) => Some((FilterGetMcpServer, params)),
         _ => None,
     }
 }

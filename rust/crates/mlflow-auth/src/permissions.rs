@@ -110,6 +110,26 @@ pub fn get_permission(name: &str) -> &'static Permission {
         .unwrap_or_else(|| panic!("unknown permission {name:?}"))
 }
 
+/// `_permission_to_allowed_actions` (`auth/__init__.py`): response-facing MCP
+/// action names in their API-defined order. READ is represented by visibility,
+/// not by an `allowed_actions` entry.
+pub fn allowed_actions(permission: &Permission) -> Vec<&'static str> {
+    let mut actions = Vec::new();
+    if permission.can_use {
+        actions.push("USE");
+    }
+    if permission.can_update {
+        actions.push("UPDATE");
+    }
+    if permission.can_delete {
+        actions.push("DELETE");
+    }
+    if permission.can_manage {
+        actions.push("MANAGE");
+    }
+    actions
+}
+
 /// `PERMISSION_PRIORITY` (`permissions.py:75`). Unknown names sort to 0,
 /// matching `PERMISSION_PRIORITY.get(a, 0)`.
 pub fn permission_priority(name: &str) -> u8 {
@@ -205,6 +225,17 @@ fn py_tuple<'a>(items: impl Iterator<Item = &'a str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_allowed_actions_follow_response_order() {
+        assert_eq!(allowed_actions(&READ), Vec::<&str>::new());
+        assert_eq!(allowed_actions(&USE), vec!["USE"]);
+        assert_eq!(allowed_actions(&EDIT), vec!["USE", "UPDATE"]);
+        assert_eq!(
+            allowed_actions(&MANAGE),
+            vec!["USE", "UPDATE", "DELETE", "MANAGE"]
+        );
+    }
 
     #[test]
     fn invalid_permission_message_matches_python() {

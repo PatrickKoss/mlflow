@@ -34,9 +34,9 @@ async fn crud_semver_tags_aliases_endpoints_and_cleanup() {
                     "future": {"explicit_null": null}
                 }),
                 None,
-                None,
                 status,
                 Some(vec![json!({"name": "tool", "future": true})]),
+                None,
                 Some("alice"),
             )
             .await
@@ -123,8 +123,8 @@ async fn workspace_scoping_pagination_and_status_transitions() {
             WS,
             json!({"name": name, "version": "1.0.0"}),
             None,
-            None,
             McpStatus::Draft,
+            None,
             None,
             None,
         )
@@ -135,8 +135,8 @@ async fn workspace_scoping_pagination_and_status_transitions() {
             WS,
             name,
             "1.0.0",
-            McpPatch::Unset,
             McpPatch::Set(McpStatus::Active),
+            McpPatch::Unset,
             McpPatch::Unset,
             None,
         )

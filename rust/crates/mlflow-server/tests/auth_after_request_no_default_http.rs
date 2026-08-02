@@ -504,8 +504,8 @@ async fn mcp_search_filters_and_refills_servers_and_endpoints() {
                 WS,
                 json!({"name": name, "version": "1.0.0"}),
                 None,
-                None,
                 McpStatus::Active,
+                None,
                 None,
                 None,
             )
@@ -525,7 +525,7 @@ async fn mcp_search_filters_and_refills_servers_and_endpoints() {
             .unwrap();
     }
     let (user, password) = srv.create_user("mcp_search_reader").await;
-    srv.grant(&user, "mcp_server", names[2], "READ").await;
+    srv.grant(&user, "mcp_server", names[2], "MANAGE").await;
 
     let servers = send(
         &srv.base,
@@ -537,7 +537,36 @@ async fn mcp_search_filters_and_refills_servers_and_endpoints() {
     .await;
     assert_eq!(servers.status, StatusCode::OK, "{}", servers.body);
     assert_eq!(servers.json()["mcp_servers"][0]["name"], names[2]);
+    assert_eq!(
+        servers.json()["mcp_servers"][0]["allowed_actions"],
+        json!(["USE", "UPDATE", "DELETE", "MANAGE"])
+    );
     assert!(servers.json()["next_page_token"].is_null());
+
+    let server = send(
+        &srv.base,
+        Method::GET,
+        &format!("/api/3.0/mlflow/mcp-servers/{}", names[2]),
+        Some((&user, &password)),
+        None,
+    )
+    .await;
+    assert_eq!(server.status, StatusCode::OK, "{}", server.body);
+    assert_eq!(
+        server.json()["allowed_actions"],
+        json!(["USE", "UPDATE", "DELETE", "MANAGE"])
+    );
+
+    let admin_server = send(
+        &srv.base,
+        Method::GET,
+        &format!("/api/3.0/mlflow/mcp-servers/{}", names[2]),
+        Some(ALICE),
+        None,
+    )
+    .await;
+    assert_eq!(admin_server.status, StatusCode::OK, "{}", admin_server.body);
+    assert!(admin_server.json().get("allowed_actions").is_none());
 
     let endpoints = send(
         &srv.base,

@@ -800,6 +800,11 @@ def _run_auth_section(
         # and ignores this.
         "MLFLOW_FLASK_SERVER_SECRET_KEY": "t124-compliance-secret",
         "MLFLOW_SERVER_ENABLE_JOB_EXECUTION": "false",
+        # The production basic-auth launcher uses uvicorn and the auth factory
+        # consequently wraps Flask in the native FastAPI app. MCP registry
+        # routes live in that ASGI layer, so the auth differential must do the
+        # same instead of launching the Flask-only return branch.
+        "_MLFLOW_SGI_NAME": "uvicorn",
     }
     results: list[CaseResult] = []
     try:
@@ -810,7 +815,7 @@ def _run_auth_section(
             extra_env=extra_env,
             # The auth endpoints exist only in the auth app factory; the base
             # `mlflow.server:app` 404s them all.
-            python_app="mlflow.server.auth:create_app",
+            python_asgi_app="mlflow.server.auth:create_app",
         ) as servers:
             # Create the non-admin user on both servers via the admin account.
             for h in (servers.python, servers.rust):

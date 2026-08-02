@@ -51,7 +51,7 @@
 use axum::body::{Body, Bytes};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
-use mlflow_auth::permissions::get_permission;
+use mlflow_auth::permissions::{allowed_actions, get_permission, Permission};
 use mlflow_auth::AuthStore;
 use mlflow_error::MlflowError;
 use mlflow_proto::mlflow as pb;
@@ -110,6 +110,7 @@ pub enum AfterRequestHandler {
     /// ListWorkspaces response (T10.4). Admins skip.
     FilterListWorkspaces,
     FilterSearchMcpServers,
+    FilterGetMcpServer,
     FilterSearchMcpEndpoints,
     /// `_seed_default_workspace_roles` — seed the `admin`/`user` roles into a new
     /// workspace after CreateWorkspace (T10.4), gated on
@@ -350,6 +351,7 @@ async fn run_inner(
         FilterListReviewQueues => filter_list_review_queues(ctx, body_json(resp_body)?).await,
         FilterListWorkspaces => filter_list_workspaces(ctx, body_json(resp_body)?).await,
         FilterSearchMcpServers => filter_search_mcp_servers(ctx, body_json(resp_body)?).await,
+        FilterGetMcpServer => filter_get_mcp_server(ctx, body_json(resp_body)?).await,
         FilterSearchMcpEndpoints => filter_search_mcp_endpoints(ctx, body_json(resp_body)?).await,
         SeedDefaultWorkspaceRoles => {
             seed_default_workspace_roles(ctx, body_json(resp_body)?).await?;
@@ -518,7 +520,7 @@ async fn filter_search_mcp_servers(
     if ctx.is_admin {
         return Ok(None);
     }
-    let readable = readable_set(ctx, "mcp_server").await?;
+    let mut permission_cache = std::collections::HashMap::new();
     let query = mcp_query(ctx);
     let max_results = mcp_max_results(&query)?;
     let filter = mcp_query_one(&query, "filter_string");
@@ -531,11 +533,21 @@ async fn filter_search_mcp_servers(
         .get_mut("mcp_servers")
         .and_then(serde_json::Value::as_array_mut)
         .expect("MCP search response has mcp_servers");
-    items.retain(|item| {
-        item.get("name")
+    let initial_items = std::mem::take(items);
+    for mut item in initial_items {
+        let Some(name) = item
+            .get("name")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|name| readable.allows(name))
-    });
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let permission = mcp_permission(ctx, &mut permission_cache, &name).await?;
+        if permission.can_read {
+            stamp_allowed_actions(&mut item, permission);
+            items.push(item);
+        }
+    }
     while items.len() < max_results as usize && next_token.as_deref().is_some_and(|v| !v.is_empty())
     {
         let token = next_token.take().unwrap_or_default();
@@ -555,8 +567,11 @@ async fn filter_search_mcp_servers(
                 break;
             }
             consumed += 1;
-            if readable.allows(&server.name) {
-                items.push(crate::mcp_registry::server_json(server));
+            let permission = mcp_permission(ctx, &mut permission_cache, &server.name).await?;
+            if permission.can_read {
+                let mut item = crate::mcp_registry::server_json(server);
+                stamp_allowed_actions(&mut item, permission);
+                items.push(item);
             }
         }
         next_token = if consumed < page_len as i64 {
@@ -570,6 +585,57 @@ async fn filter_search_mcp_servers(
     serde_json::to_vec(&response)
         .map(Some)
         .map_err(|error| MlflowError::internal_error(error.to_string()))
+}
+
+async fn filter_get_mcp_server(
+    ctx: &AfterCtx<'_>,
+    mut response: serde_json::Value,
+) -> Result<Option<Vec<u8>>, MlflowError> {
+    if ctx.is_admin {
+        return Ok(None);
+    }
+    let name = response
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let permission = super::validators::resolve_role_permission(
+        ctx.state.auth_store().expect("auth enabled"),
+        ctx.username,
+        ctx.workspace,
+        ctx.workspaces_enabled,
+        "mcp_server",
+        name,
+    )
+    .await?;
+    stamp_allowed_actions(&mut response, permission);
+    serde_json::to_vec(&response)
+        .map(Some)
+        .map_err(|error| MlflowError::internal_error(error.to_string()))
+}
+
+async fn mcp_permission(
+    ctx: &AfterCtx<'_>,
+    cache: &mut std::collections::HashMap<String, &'static Permission>,
+    name: &str,
+) -> Result<&'static Permission, MlflowError> {
+    if let Some(permission) = cache.get(name) {
+        return Ok(*permission);
+    }
+    let permission = super::validators::resolve_role_permission(
+        ctx.state.auth_store().expect("auth enabled"),
+        ctx.username,
+        ctx.workspace,
+        ctx.workspaces_enabled,
+        "mcp_server",
+        name,
+    )
+    .await?;
+    cache.insert(name.to_string(), permission);
+    Ok(permission)
+}
+
+fn stamp_allowed_actions(value: &mut serde_json::Value, permission: &Permission) {
+    value["allowed_actions"] = serde_json::json!(allowed_actions(permission));
 }
 
 async fn filter_search_mcp_endpoints(

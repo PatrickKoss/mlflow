@@ -64,3 +64,36 @@ cases:
     auth: user
     compare_body: false
     expect_status: 403
+
+  - name: auth_admin_create_mcp_server
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers
+    body: {name: com.example/auth-actions}
+    auth: admin
+    expect_status: 200
+
+  - name: auth_admin_get_mcp_server_has_no_allowed_actions
+    method: GET
+    path: /api/3.0/mlflow/mcp-servers/com.example/auth-actions
+    auth: admin
+    expect_status: 200
+
+  - name: auth_user_get_mcp_server_has_allowed_actions
+    method: GET
+    path: /api/3.0/mlflow/mcp-servers/com.example/auth-actions
+    auth: user
+    expect_status: 200
+
+  - name: auth_user_search_mcp_servers_has_allowed_actions
+    method: GET
+    path: /api/3.0/mlflow/mcp-servers
+    query: {filter_string: "name = 'com.example/auth-actions'"}
+    auth: user
+    expect_status: 200
+
+  - name: auth_admin_search_mcp_servers_has_no_allowed_actions
+    method: GET
+    path: /api/3.0/mlflow/mcp-servers
+    query: {filter_string: "name = 'com.example/auth-actions'"}
+    auth: admin
+    expect_status: 200

@@ -80,13 +80,13 @@ pub struct McpServerVersion {
     pub name: String,
     pub version: String,
     pub server_json: Value,
-    pub display_name: Option<String>,
     pub workspace: String,
     pub status: McpStatus,
     pub tools: Option<Vec<Value>>,
     pub aliases: Vec<String>,
     pub tags: BTreeMap<String, String>,
     pub source: Option<String>,
+    pub connect_options: BTreeMap<String, Value>,
     pub created_by: Option<String>,
     pub last_updated_by: Option<String>,
     pub creation_timestamp: i64,
@@ -361,10 +361,10 @@ impl TrackingStore {
         &self,
         workspace: &str,
         server_json: Value,
-        display_name: Option<&str>,
         source: Option<&str>,
         status: McpStatus,
         tools: Option<Vec<Value>>,
+        connect_options: Option<BTreeMap<String, Value>>,
         created_by: Option<&str>,
     ) -> Result<McpServerVersion, MlflowError> {
         let object = server_json
@@ -416,7 +416,7 @@ impl TrackingStore {
                 &format!(
                     "INSERT INTO mcp_server_versions (workspace, name, version, version_major, \
                      version_minor, version_patch, version_prerelease_sort_key, server_json, \
-                     display_name, status, tools, source, created_by, last_updated_by, created_at, \
+                     status, tools, source, connect_options, created_by, last_updated_by, created_at, \
                      last_updated_at) VALUES ({})",
                     (1..=16)
                         .map(|index| d.placeholder(index))
@@ -432,10 +432,12 @@ impl TrackingStore {
                     Val::Int(i64::from(semver.patch)),
                     Val::Text(semver.prerelease_key.clone()),
                     Val::OptJson(Some(server_json)),
-                    Val::OptText(display_name.map(str::to_string)),
                     Val::Text(status.as_str().into()),
                     Val::OptJson(tools.map(Value::Array)),
                     Val::OptText(source.map(str::to_string)),
+                    Val::OptJson(connect_options.map(|value| {
+                        serde_json::to_value(value).expect("connect options serialize")
+                    })),
                     Val::OptText(created_by.map(str::to_string)),
                     Val::OptText(created_by.map(str::to_string)),
                     Val::Int(now),
@@ -530,9 +532,9 @@ impl TrackingStore {
         workspace: &str,
         name: &str,
         version: &str,
-        display_name: McpPatch<Option<String>>,
         status: McpPatch<McpStatus>,
         tools: McpPatch<Option<Vec<Value>>>,
+        connect_options: McpPatch<Option<BTreeMap<String, Value>>>,
         last_updated_by: Option<&str>,
     ) -> Result<McpServerVersion, MlflowError> {
         let current = self
@@ -547,10 +549,6 @@ impl TrackingStore {
         let d = self.db().dialect();
         let mut values = Vec::new();
         let mut assignments = Vec::new();
-        if let McpPatch::Set(value) = display_name {
-            values.push(Val::OptText(value));
-            assignments.push(format!("display_name = {}", d.placeholder(values.len())));
-        }
         if let McpPatch::Set(value) = status {
             values.push(Val::Text(value.as_str().into()));
             assignments.push(format!("status = {}", d.placeholder(values.len())));
@@ -558,6 +556,12 @@ impl TrackingStore {
         if let McpPatch::Set(value) = tools {
             values.push(Val::OptJson(value.map(Value::Array)));
             assignments.push(format!("tools = {}", d.placeholder(values.len())));
+        }
+        if let McpPatch::Set(value) = connect_options {
+            values.push(Val::OptJson(value.map(|value| {
+                serde_json::to_value(value).expect("connect options serialize")
+            })));
+            assignments.push(format!("connect_options = {}", d.placeholder(values.len())));
         }
         values.push(Val::OptText(last_updated_by.map(str::to_string)));
         assignments.push(format!("last_updated_by = {}", d.placeholder(values.len())));
@@ -1061,6 +1065,16 @@ impl TrackingStore {
                     .and_then(Value::as_str)
                     .map(str::to_string);
             }
+            server.icons = resolve_server_icons(
+                server.icons,
+                latest
+                    .server_json
+                    .get("icons")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice),
+            );
+        } else {
+            server.icons = resolve_server_icons(server.icons, None);
         }
         let mut endpoints = Vec::new();
         for endpoint in self.all_endpoint_bases(&server.workspace).await? {
@@ -1150,7 +1164,7 @@ impl TrackingStore {
         let mut values = vec![Val::Text(workspace.into())];
         let mut sql = format!(
             "SELECT workspace, name, version, version_major, version_minor, version_patch, \
-             version_prerelease_sort_key, server_json, display_name, status, tools, source, \
+             version_prerelease_sort_key, server_json, status, tools, source, connect_options, \
              created_by, last_updated_by, created_at, last_updated_at FROM mcp_server_versions \
              WHERE workspace = {}",
             d.placeholder(1)
@@ -1516,13 +1530,13 @@ fn map_version_base(row: &dyn RowLike) -> Result<McpServerVersion, sqlx::Error> 
         name: row.get_string("name")?,
         version,
         server_json,
-        display_name: row.get_opt_string("display_name")?,
         workspace: row.get_string("workspace")?,
         status,
         tools: json_array(row.get_opt_json("tools")?),
         aliases: Vec::new(),
         tags: BTreeMap::new(),
         source: row.get_opt_string("source")?,
+        connect_options: json_object(row.get_opt_json("connect_options")?),
         created_by: row.get_opt_string("created_by")?,
         last_updated_by: row.get_opt_string("last_updated_by")?,
         creation_timestamp: row.get_i64("created_at")?,
@@ -1572,6 +1586,46 @@ fn map_endpoint_base(row: &dyn RowLike) -> Result<EndpointBase, sqlx::Error> {
 
 fn json_array(value: Option<Value>) -> Option<Vec<Value>> {
     value.and_then(|value| value.as_array().cloned())
+}
+
+fn json_object(value: Option<Value>) -> BTreeMap<String, Value> {
+    value
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
+fn resolve_server_icons(
+    server_icons: Option<Vec<Value>>,
+    version_icons: Option<&[Value]>,
+) -> Option<Vec<Value>> {
+    if server_icons.as_ref().is_some_and(Vec::is_empty) {
+        return Some(Vec::new());
+    }
+
+    let mut resolved = Vec::new();
+    let mut server_themes = Vec::new();
+    for icon in server_icons.unwrap_or_default() {
+        let Some(mut icon) = icon.as_object().cloned() else {
+            continue;
+        };
+        server_themes.push(icon.get("theme").cloned().unwrap_or(Value::Null));
+        icon.insert("source".into(), Value::String("server".into()));
+        resolved.push(Value::Object(icon));
+    }
+    for icon in version_icons.unwrap_or_default() {
+        let Some(mut icon) = icon.as_object().cloned() else {
+            continue;
+        };
+        let theme = icon.get("theme").cloned().unwrap_or(Value::Null);
+        if server_themes.contains(&theme) {
+            continue;
+        }
+        icon.insert("source".into(), Value::String("version".into()));
+        resolved.push(Value::Object(icon));
+    }
+    (!resolved.is_empty()).then_some(resolved)
 }
 
 fn validate_name(name: &str) -> Result<(), MlflowError> {

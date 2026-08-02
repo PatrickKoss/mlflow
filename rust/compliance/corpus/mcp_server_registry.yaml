@@ -143,6 +143,183 @@ cases:
     normalize:
       drop_paths: ["$.mcp_servers[0].access_endpoints"]
 
+  # ---- 2026-08-02 net-state parity ----
+  - name: mcp_create_version_enveloped
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/enveloped/versions
+    body:
+      server_json:
+        server:
+          name: com.example/enveloped
+          version: 1.0.0
+          description: copied registry envelope
+        _meta: {registry: ignored}
+      status: active
+
+  - name: mcp_create_version_raw_precedence
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/raw-wins/versions
+    body:
+      server_json:
+        name: com.example/raw-wins
+        version: 1.0.0
+        server: {name: com.example/nested-loses, version: 9.9.9}
+      status: active
+
+  - name: mcp_create_tools_omitted
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/tools-omitted/versions
+    body:
+      server_json: {name: com.example/tools-omitted, version: 1.0.0}
+      status: active
+
+  - name: mcp_endpoint_tools_omitted_is_null
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/tools-omitted/endpoints
+    body:
+      url: https://mcp.example.com/tools-omitted
+      server_version: 1.0.0
+
+  - name: mcp_create_tools_null
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/tools-null/versions
+    body:
+      server_json: {name: com.example/tools-null, version: 1.0.0}
+      status: active
+      tools: null
+
+  - name: mcp_endpoint_tools_null_is_null
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/tools-null/endpoints
+    body:
+      url: https://mcp.example.com/tools-null
+      server_version: 1.0.0
+
+  - name: mcp_create_tools_empty
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/tools-empty/versions
+    body:
+      server_json: {name: com.example/tools-empty, version: 1.0.0}
+      status: active
+      tools: []
+
+  - name: mcp_endpoint_tools_empty_is_empty
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/tools-empty/endpoints
+    body:
+      url: https://mcp.example.com/tools-empty
+      server_version: 1.0.0
+
+  - name: mcp_create_server_icons_server_only
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers
+    body:
+      name: com.example/icons-server-only
+      icons: [{src: https://example.com/server-only.svg, theme: dark}]
+
+  - name: mcp_create_version_icons_version_only
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/icons-version-only/versions
+    body:
+      server_json:
+        name: com.example/icons-version-only
+        version: 1.0.0
+        icons: [{src: https://example.com/version-only.svg}]
+      status: active
+
+  - name: mcp_get_server_icons_version_only
+    method: GET
+    path: /api/3.0/mlflow/mcp-servers/com.example/icons-version-only
+
+  - name: mcp_create_server_icons_backfill
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers
+    body:
+      name: com.example/icons-backfill
+      icons:
+        - {src: https://example.com/server-dark.svg, theme: dark}
+        - {src: https://example.com/server-default.svg}
+
+  - name: mcp_create_version_icons_backfill
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/icons-backfill/versions
+    body:
+      server_json:
+        name: com.example/icons-backfill
+        version: 1.0.0
+        icons:
+          - {src: https://example.com/version-dark.svg, theme: dark}
+          - {src: https://example.com/version-light.svg, theme: light}
+          - {src: https://example.com/version-default.svg}
+      status: active
+
+  - name: mcp_get_server_icons_backfill_theme_dedupe
+    method: GET
+    path: /api/3.0/mlflow/mcp-servers/com.example/icons-backfill
+
+  - name: mcp_update_server_icons_preserves_resolution
+    method: PATCH
+    path: /api/3.0/mlflow/mcp-servers/com.example/icons-backfill
+    body: {description: updated without changing icons}
+
+  - name: mcp_search_server_icons_preserves_resolution
+    method: GET
+    path: /api/3.0/mlflow/mcp-servers
+    query: {filter_string: "name = 'com.example/icons-backfill'"}
+
+  - name: mcp_create_server_icons_empty_override
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers
+    body: {name: com.example/icons-empty, icons: []}
+
+  - name: mcp_create_version_icons_empty_override
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/icons-empty/versions
+    body:
+      server_json:
+        name: com.example/icons-empty
+        version: 1.0.0
+        icons: [{src: https://example.com/version-fallback.svg}]
+      status: active
+
+  - name: mcp_get_server_icons_empty_override
+    method: GET
+    path: /api/3.0/mlflow/mcp-servers/com.example/icons-empty
+
+  - name: mcp_create_version_connect_options_and_ignore_display_name
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/connect-options/versions
+    body:
+      server_json: {name: com.example/connect-options, version: 1.0.0}
+      display_name: ignored version display name
+      status: active
+      connect_options:
+        packages: {hidden: true}
+
+  - name: mcp_update_version_connect_options_omitted
+    method: PATCH
+    path: /api/3.0/mlflow/mcp-servers/com.example/connect-options/versions/1.0.0
+    body: {display_name: still ignored}
+
+  - name: mcp_update_version_connect_options_null
+    method: PATCH
+    path: /api/3.0/mlflow/mcp-servers/com.example/connect-options/versions/1.0.0
+    body: {connect_options: null}
+
+  - name: mcp_update_version_connect_options_replace
+    method: PATCH
+    path: /api/3.0/mlflow/mcp-servers/com.example/connect-options/versions/1.0.0
+    body:
+      connect_options:
+        remotes: {hidden: false}
+
+  - name: mcp_create_endpoint_resolved_version_has_no_display_name
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/connect-options/endpoints
+    body:
+      url: https://mcp.example.com/connect-options
+      server_version: 1.0.0
+
   - name: mcp_delete_endpoint
     method: DELETE
     path: /api/3.0/mlflow/mcp-servers/com.example/compliance/endpoints/${mcp_endpoint_alias}
@@ -199,3 +376,68 @@ cases:
     method: GET
     path: /api/3.0/mlflow/mcp-servers/com.example/missing
     expect_status: 404
+
+  - name: mcp_envelope_non_dict_server
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/bad-envelope/versions
+    body:
+      server_json: {server: not-an-object}
+    expect_status: 400
+
+  - name: mcp_envelope_missing_inner_name_passthrough
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/missing-envelope-name/versions
+    body:
+      server_json:
+        server: {version: 1.0.0}
+    expect_status: 400
+
+  - name: mcp_server_json_non_dict
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/non-dict/versions
+    body: {server_json: not-an-object}
+    expect_status: 400
+
+  - name: mcp_reject_version_source_server_icon
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers
+    body:
+      name: com.example/reject-server-icon
+      icons: [{src: https://example.com/rejected.svg, source: version}]
+    expect_status: 400
+
+  - name: mcp_reject_version_source_server_json_icon
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/reject-version-icon/versions
+    body:
+      server_json:
+        name: com.example/reject-version-icon
+        version: 1.0.0
+        icons: [{src: https://example.com/rejected.svg, source: version}]
+    expect_status: 400
+
+  - name: mcp_reject_version_source_tool_icon
+    method: POST
+    path: /api/3.0/mlflow/mcp-servers/com.example/reject-tool-icon/versions
+    body:
+      server_json: {name: com.example/reject-tool-icon, version: 1.0.0}
+      tools:
+        - name: rejected
+          icons: [{src: https://example.com/rejected.svg, source: version}]
+    expect_status: 400
+
+  - name: mcp_update_reject_version_source_server_icon
+    method: PATCH
+    path: /api/3.0/mlflow/mcp-servers/com.example/icons-backfill
+    body:
+      icons: [{src: https://example.com/rejected-update.svg, source: version}]
+    expect_status: 400
+
+  - name: mcp_update_reject_version_source_tool_icon
+    method: PATCH
+    path: /api/3.0/mlflow/mcp-servers/com.example/connect-options/versions/1.0.0
+    body:
+      tools:
+        - name: rejected-update
+          icons: [{src: https://example.com/rejected-update.svg, source: version}]
+    expect_status: 400

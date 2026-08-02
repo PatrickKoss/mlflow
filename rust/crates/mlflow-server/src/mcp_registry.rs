@@ -342,9 +342,10 @@ pub async fn create_version(
         .ok_or_else(|| missing("server_json"))?;
     if !server_json_value.is_object() {
         return Err(invalid_request(
-            "server_json: Input should be a valid dictionary",
+            "server_json: Input should be a valid dictionary or object to extract fields from",
         ));
     }
+    unwrap_registry_server_json_envelope(&mut server_json_value)?;
     normalize_server_json(&mut server_json_value)?;
     let name = server_name(&path.0, &path.1);
     let embedded_name = server_json_value
@@ -363,10 +364,10 @@ pub async fn create_version(
         .create_mcp_server_version(
             workspace.name(),
             server_json_value,
-            optional_string(object, "display_name")?,
             optional_string(object, "source")?,
             status,
             normalize_tools(optional_array(object, "tools")?)?,
+            optional_connect_options(object)?,
             username(auth.as_ref()),
         )
         .await?;
@@ -437,9 +438,9 @@ pub async fn update_version(
             workspace.name(),
             &name,
             &path.2,
-            patch_string(object, "display_name")?,
             status,
             patch_tools(object, "tools")?,
+            patch_connect_options(object)?,
             username(auth.as_ref()),
         )
         .await?;
@@ -732,13 +733,13 @@ fn version_json(version: McpServerVersion) -> Value {
         "name": version.name,
         "version": version.version,
         "server_json": version.server_json,
-        "display_name": version.display_name,
         "workspace": version.workspace,
         "status": version.status.as_str(),
         "tools": version.tools.unwrap_or_default().into_iter().map(tool_json).collect::<Vec<_>>(),
         "aliases": version.aliases,
         "tags": version.tags,
         "source": version.source,
+        "connect_options": version.connect_options,
         "created_by": version.created_by,
         "last_updated_by": version.last_updated_by,
         "creation_timestamp": version.creation_timestamp,
@@ -929,10 +930,92 @@ fn patch_tools(
     }
 }
 
+fn optional_connect_options(
+    object: &Map<String, Value>,
+) -> Result<Option<BTreeMap<String, Value>>, MlflowError> {
+    match object.get("connect_options") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(value)) => normalize_connect_options(value).map(Some),
+        Some(_) => Err(invalid_request(
+            "connect_options: Input should be a valid dictionary",
+        )),
+    }
+}
+
+fn patch_connect_options(
+    object: &Map<String, Value>,
+) -> Result<McpPatch<Option<BTreeMap<String, Value>>>, MlflowError> {
+    match object.get("connect_options") {
+        None => Ok(McpPatch::Unset),
+        Some(Value::Null) => Ok(McpPatch::Set(None)),
+        Some(Value::Object(value)) => {
+            normalize_connect_options(value).map(|value| McpPatch::Set(Some(value)))
+        }
+        Some(_) => Err(invalid_request(
+            "connect_options: Input should be a valid dictionary",
+        )),
+    }
+}
+
+fn normalize_connect_options(
+    options: &Map<String, Value>,
+) -> Result<BTreeMap<String, Value>, MlflowError> {
+    options
+        .iter()
+        .map(|(name, settings)| {
+            let settings = settings.as_object().ok_or_else(|| {
+                invalid_request(&format!(
+                    "connect_options.{name}: Input should be a valid dictionary"
+                ))
+            })?;
+            let hidden = match settings.get("hidden") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err(invalid_request(&format!(
+                        "connect_options.{name}.hidden: Input should be a valid boolean"
+                    )))
+                }
+            };
+            Ok((name.clone(), json!({"hidden": hidden})))
+        })
+        .collect()
+}
+
+fn unwrap_registry_server_json_envelope(value: &mut Value) -> Result<(), MlflowError> {
+    let object = value.as_object().expect("checked by caller");
+    if object.contains_key("name") && object.contains_key("version") {
+        return Ok(());
+    }
+    let Some(envelope_server) = object.get("server") else {
+        return Ok(());
+    };
+    let Some(envelope_server) = envelope_server.as_object() else {
+        return Err(invalid_request(
+            "Value error, server_json.server: Input should be a valid dictionary",
+        ));
+    };
+    if !envelope_server.contains_key("name") || !envelope_server.contains_key("version") {
+        return Ok(());
+    }
+    *value = Value::Object(envelope_server.clone());
+    Ok(())
+}
+
 fn normalize_server_json(value: &mut Value) -> Result<(), MlflowError> {
     let object = value.as_object_mut().expect("checked by caller");
-    required_string(object, "name")?;
-    required_string(object, "version")?;
+    match (object.contains_key("name"), object.contains_key("version")) {
+        (false, false) => {
+            return Err(invalid_request(
+                "server_json.name: Field required; server_json.version: Field required",
+            ))
+        }
+        (false, true) => return Err(missing("server_json.name")),
+        (true, false) => return Err(missing("server_json.version")),
+        (true, true) => {}
+    }
+    required_string_at(object, "name", "server_json.name")?;
+    required_string_at(object, "version", "server_json.version")?;
     for field in ["title", "description", "websiteUrl"] {
         validate_optional_string(object, field, &format!("server_json.{field}"))?;
     }
@@ -1086,6 +1169,14 @@ fn normalize_icons(
         } else {
             validate_optional_string(object, "theme", &format!("{path}.theme"))?;
         }
+        if object.get("source").and_then(Value::as_str) == Some("version") {
+            return Err(MlflowError::invalid_parameter_value(format!(
+                "Invalid {field}[{index}].source: 'version' is response-only and cannot be \
+                 written. Writing it would persist a version-resolved icon as a server \
+                 override. Omit source, or send source='server' when echoing a server icon."
+            )));
+        }
+        object.remove("source");
     }
     Ok(Some(icons))
 }
@@ -1119,10 +1210,10 @@ fn normalize_tools(tools: Option<Vec<Value>>) -> Result<Option<Vec<Value>>, Mlfl
             }
         }
         if object.contains_key("icons") {
-            if let Some(icons) = normalize_icons(
-                optional_array_at(object, "icons", &format!("{path}.icons"))?,
-                &format!("{path}.icons"),
-            )? {
+            let icon_path = format!("tools[{index}].icons");
+            if let Some(icons) =
+                normalize_icons(optional_array_at(object, "icons", &icon_path)?, &icon_path)?
+            {
                 result.insert("icons".into(), Value::Array(icons));
             }
         }

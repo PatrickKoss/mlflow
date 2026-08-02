@@ -612,6 +612,7 @@ pub fn exceeded_payload(window: &PolicyWindow, workspace: Option<&str>) -> Value
         "duration_unit": window.policy.duration_unit,
         "duration_value": window.policy.duration_value,
         "target_scope": window.policy.target_scope,
+        "target_value": Value::Null,
         "workspace": workspace.unwrap_or(&window.policy.workspace),
         "window_start": window.window_start.timestamp_millis(),
     })
@@ -910,7 +911,7 @@ mod tests {
         assert_eq!(
             value.to_string(),
             format!(
-                "{{\"budget_policy_id\":\"bp-test\",\"budget_unit\":\"USD\",\"budget_amount\":50.0,\"current_spend\":60.0,\"duration_unit\":\"DAYS\",\"duration_value\":1,\"target_scope\":\"GLOBAL\",\"workspace\":\"default\",\"window_start\":{}}}",
+                "{{\"budget_policy_id\":\"bp-test\",\"budget_unit\":\"USD\",\"budget_amount\":50.0,\"current_spend\":60.0,\"duration_unit\":\"DAYS\",\"duration_value\":1,\"target_scope\":\"GLOBAL\",\"target_value\":null,\"workspace\":\"default\",\"window_start\":{}}}",
                 start.timestamp_millis()
             )
         );
