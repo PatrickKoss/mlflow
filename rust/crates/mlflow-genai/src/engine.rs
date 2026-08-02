@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::store::TrackingClient;
 use crate::{JobKind, ScorerPayloadError, SerializedScorer};
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -106,6 +107,7 @@ pub enum EngineError {
 #[derive(Clone)]
 pub struct ScorerExecutor {
     client: reqwest::Client,
+    tracking_client: Option<TrackingClient>,
 }
 
 impl ScorerExecutor {
@@ -115,7 +117,26 @@ impl ScorerExecutor {
                 .no_proxy()
                 .build()
                 .expect("reqwest client configuration is static"),
+            tracking_client: None,
         }
+    }
+
+    pub(crate) fn with_tracking_client(mut self, client: TrackingClient) -> Self {
+        self.tracking_client = Some(client);
+        self
+    }
+
+    pub(crate) async fn download_trace_attachment(
+        &self,
+        trace_id: &str,
+        attachment_id: &str,
+    ) -> Result<Vec<u8>, EngineError> {
+        let client = self.tracking_client.as_ref().ok_or_else(|| {
+            EngineError::Store("tracking client is unavailable for attachment download".into())
+        })?;
+        client
+            .download_trace_attachment(trace_id, attachment_id)
+            .await
     }
 
     pub async fn execute(

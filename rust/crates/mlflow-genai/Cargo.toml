@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 async-trait = "0.1"
+base64 = { workspace = true }
 chrono = { workspace = true }
 fancy-regex = "0.14.0"
 futures = { workspace = true }

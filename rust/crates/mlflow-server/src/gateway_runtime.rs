@@ -243,6 +243,17 @@ pub trait GatewayProviderAdapter: Send + Sync + std::fmt::Debug {
         headers: &mut HeaderMap,
     ) -> Result<(), GatewayRuntimeError>;
 
+    fn transform_request_with_headers(
+        &self,
+        model: &ResolvedGatewayModelConfig,
+        kind: InvocationKind,
+        payload: Value,
+        stream: bool,
+        _client_headers: &HeaderMap,
+    ) -> Result<ProviderRequest, GatewayRuntimeError> {
+        self.transform_request(model, kind, payload, stream)
+    }
+
     fn passthrough_request(
         &self,
         model: &ResolvedGatewayModelConfig,
@@ -308,6 +319,12 @@ pub struct GeminiAdapter;
 pub struct OpenAiCompatibleAdapter {
     provider: String,
 }
+
+#[derive(Debug)]
+pub struct PortkeyAdapter;
+
+#[derive(Debug)]
+pub struct SapAiCoreAdapter;
 
 #[derive(Debug)]
 pub struct BedrockAdapter;
@@ -687,6 +704,169 @@ impl GatewayProviderAdapter for OpenAiCompatibleAdapter {
                 &format!("Bearer {}", secret_string(model, "api_key")?),
             ),
         }
+    }
+}
+
+impl GatewayProviderAdapter for PortkeyAdapter {
+    fn provider_name(&self) -> &'static str {
+        "openai"
+    }
+
+    fn transform_request(
+        &self,
+        model: &ResolvedGatewayModelConfig,
+        kind: InvocationKind,
+        payload: Value,
+        stream: bool,
+    ) -> Result<ProviderRequest, GatewayRuntimeError> {
+        let mut request = OpenAiCompatibleAdapter {
+            provider: "portkey".to_string(),
+        }
+        .transform_request(model, kind, payload, stream)?;
+        self.inject_auth(model, &mut request.headers)?;
+        Ok(request)
+    }
+
+    fn transform_response(
+        &self,
+        model: &ResolvedGatewayModelConfig,
+        kind: InvocationKind,
+        response: Value,
+        now: i64,
+    ) -> Result<Value, GatewayRuntimeError> {
+        OpenAiCompatibleAdapter {
+            provider: "portkey".to_string(),
+        }
+        .transform_response(model, kind, response, now)
+    }
+
+    fn transform_stream_frame(
+        &self,
+        model: &ResolvedGatewayModelConfig,
+        frame: Value,
+        state: &mut StreamTransformState,
+        now: i64,
+    ) -> Result<Vec<Value>, GatewayRuntimeError> {
+        OpenAiCompatibleAdapter {
+            provider: "portkey".to_string(),
+        }
+        .transform_stream_frame(model, frame, state, now)
+    }
+
+    fn inject_auth(
+        &self,
+        model: &ResolvedGatewayModelConfig,
+        headers: &mut HeaderMap,
+    ) -> Result<(), GatewayRuntimeError> {
+        let api_key = resolve_gateway_api_key(secret_string(model, "api_key")?)?;
+        insert_header(headers, "x-portkey-api-key", &api_key)?;
+        if let Some(provider) = model.auth_config.get("portkey_provider") {
+            insert_header(headers, "x-portkey-provider", provider)?;
+        }
+        if let Some(config) = secret_string_optional(model, "portkey_config") {
+            insert_header(headers, "x-portkey-config", config)?;
+        }
+        if let Some(key) = secret_string_optional(model, "provider_api_key") {
+            let key = resolve_gateway_api_key(key)?;
+            headers.remove(header::AUTHORIZATION);
+            insert_header(headers, "authorization", &format!("Bearer {key}"))?;
+        }
+        Ok(())
+    }
+
+    fn passthrough_request(
+        &self,
+        model: &ResolvedGatewayModelConfig,
+        action: PassthroughAction,
+        mut payload: Value,
+        client_headers: &HeaderMap,
+    ) -> Result<ProviderRequest, GatewayRuntimeError> {
+        object_mut(&mut payload)?
+            .insert("model".to_string(), Value::String(model.model_name.clone()));
+        let mut headers = merged_passthrough_headers(model, client_headers)?;
+        self.inject_auth(model, &mut headers)?;
+        Ok(ProviderRequest {
+            url: append_provider_path(
+                &provider_api_base(model)?,
+                &action.provider_path(&model.model_name),
+            )?,
+            headers,
+            body: payload,
+        })
+    }
+}
+
+impl GatewayProviderAdapter for SapAiCoreAdapter {
+    fn provider_name(&self) -> &'static str {
+        "openai"
+    }
+
+    fn transform_request(
+        &self,
+        model: &ResolvedGatewayModelConfig,
+        kind: InvocationKind,
+        payload: Value,
+        _stream: bool,
+    ) -> Result<ProviderRequest, GatewayRuntimeError> {
+        if kind == InvocationKind::Embeddings {
+            return Err(GatewayRuntimeError::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "The embeddings route is not implemented for SAP AI Core models.",
+            ));
+        }
+        let body = sap_ai_core_chat_request(&payload, &model.model_name)?;
+        Ok(ProviderRequest {
+            url: sap_ai_core_base_url()?,
+            headers: HeaderMap::new(),
+            body,
+        })
+    }
+
+    fn transform_request_with_headers(
+        &self,
+        model: &ResolvedGatewayModelConfig,
+        kind: InvocationKind,
+        payload: Value,
+        stream: bool,
+        client_headers: &HeaderMap,
+    ) -> Result<ProviderRequest, GatewayRuntimeError> {
+        let mut request = self.transform_request(model, kind, payload, stream)?;
+        request.headers = merged_passthrough_headers(model, client_headers)?;
+        request.headers.remove(header::AUTHORIZATION);
+        Ok(request)
+    }
+
+    fn transform_response(
+        &self,
+        _model: &ResolvedGatewayModelConfig,
+        kind: InvocationKind,
+        response: Value,
+        _now: i64,
+    ) -> Result<Value, GatewayRuntimeError> {
+        let final_result = response.get("final_result").cloned().unwrap_or(response);
+        match kind {
+            InvocationKind::Chat => openai_chat_response(final_result, "sap-ai-core"),
+            InvocationKind::Embeddings => unreachable!("SAP AI Core embeddings are rejected"),
+        }
+    }
+
+    fn transform_stream_frame(
+        &self,
+        _model: &ResolvedGatewayModelConfig,
+        frame: Value,
+        _state: &mut StreamTransformState,
+        _now: i64,
+    ) -> Result<Vec<Value>, GatewayRuntimeError> {
+        let final_result = frame.get("final_result").cloned().unwrap_or(frame);
+        Ok(vec![openai_chat_stream_frame(final_result, "sap-ai-core")?])
+    }
+
+    fn inject_auth(
+        &self,
+        _model: &ResolvedGatewayModelConfig,
+        _headers: &mut HeaderMap,
+    ) -> Result<(), GatewayRuntimeError> {
+        Ok(())
     }
 }
 
@@ -2093,7 +2273,16 @@ async fn invoke_value(
         LoadedGuardrails::empty()
     };
     if stream {
-        stream_response(plan, kind, payload, guardrails, trace, start).await
+        stream_response(
+            plan,
+            kind,
+            payload,
+            client_headers,
+            guardrails,
+            trace,
+            start,
+        )
+        .await
     } else {
         let payload = match guardrails
             .before(payload, Some(GuardrailPayloadSchema::ChatRequest))
@@ -2102,7 +2291,16 @@ async fn invoke_value(
             Ok(payload) => payload,
             Err(error) => return guardrail_error_response(error, start),
         };
-        non_stream_response(plan, kind, payload, guardrails, trace, start).await
+        non_stream_response(
+            plan,
+            kind,
+            payload,
+            &client_headers,
+            guardrails,
+            trace,
+            start,
+        )
+        .await
     }
 }
 
@@ -2110,6 +2308,7 @@ async fn non_stream_response(
     plan: RoutingPlan,
     kind: InvocationKind,
     payload: Value,
+    client_headers: &HeaderMap,
     guardrails: LoadedGuardrails,
     trace: Option<GatewayTraceContext>,
     start: Instant,
@@ -2124,7 +2323,8 @@ async fn non_stream_response(
                 continue;
             }
         };
-        let result = execute_non_stream_attempt(model.clone(), kind, payload.clone()).await;
+        let result =
+            execute_non_stream_attempt(model.clone(), kind, payload.clone(), client_headers).await;
         provider_elapsed += result.1;
         match result.0 {
             Ok(value) => {
@@ -2173,6 +2373,7 @@ async fn execute_non_stream_attempt(
     model: ResolvedGatewayModelConfig,
     kind: InvocationKind,
     mut payload: Value,
+    client_headers: &HeaderMap,
 ) -> (Result<Value, GatewayRuntimeError>, Duration) {
     let adapter = match adapter_for(&model.provider) {
         Ok(adapter) => adapter,
@@ -2181,7 +2382,13 @@ async fn execute_non_stream_attempt(
     if kind == InvocationKind::Chat {
         compact_chat_payload(&mut payload);
     }
-    let request = match adapter.transform_request(&model, kind, payload, false) {
+    let request = match adapter.transform_request_with_headers(
+        &model,
+        kind,
+        payload,
+        false,
+        client_headers,
+    ) {
         Ok(request) => request,
         Err(error) => return (Err(error), Duration::ZERO),
     };
@@ -2679,6 +2886,7 @@ struct ProviderStream {
     plan: RoutingPlan,
     kind: InvocationKind,
     payload: Value,
+    client_headers: HeaderMap,
     guardrails: LoadedGuardrails,
     pre_guardrails_complete: bool,
     trace: Option<GatewayTraceContext>,
@@ -2703,6 +2911,7 @@ async fn stream_response(
     plan: RoutingPlan,
     kind: InvocationKind,
     payload: Value,
+    client_headers: HeaderMap,
     guardrails: LoadedGuardrails,
     trace: Option<GatewayTraceContext>,
     start: Instant,
@@ -2711,6 +2920,7 @@ async fn stream_response(
         plan,
         kind,
         payload,
+        client_headers,
         guardrails,
         pre_guardrails_complete: false,
         trace,
@@ -2881,7 +3091,13 @@ fn start_stream_attempt(state: &mut ProviderStream) {
     if state.kind == InvocationKind::Chat {
         compact_chat_payload(&mut payload);
     }
-    let request = match adapter.transform_request(&model, state.kind, payload, true) {
+    let request = match adapter.transform_request_with_headers(
+        &model,
+        state.kind,
+        payload,
+        true,
+        &state.client_headers,
+    ) {
         Ok(request) => request,
         Err(error) => {
             fail_stream_attempt(state, error);
@@ -3319,6 +3535,8 @@ fn adapter_for(provider: &str) -> Result<Box<dyn GatewayProviderAdapter>, Gatewa
         "openai" | "azure" | "azure-openai" => Ok(Box::new(OpenAiAdapter)),
         "anthropic" => Ok(Box::new(AnthropicAdapter)),
         "gemini" => Ok(Box::new(GeminiAdapter)),
+        "portkey" => Ok(Box::new(PortkeyAdapter)),
+        "sap-ai-core" => Ok(Box::new(SapAiCoreAdapter)),
         "bedrock" => Ok(Box::new(BedrockAdapter)),
         "databricks" => Ok(Box::new(DatabricksAdapter)),
         provider if is_supported_provider(provider) => Ok(Box::new(OpenAiCompatibleAdapter {
@@ -3374,7 +3592,7 @@ fn supports_passthrough(provider: &str, action: PassthroughAction) -> bool {
             action,
             PassthroughAction::OpenAiChat | PassthroughAction::OpenAiEmbeddings
         ),
-        "bedrock" => false,
+        "bedrock" | "sap-ai-core" => false,
         provider => is_supported_provider(provider),
     }
 }
@@ -3955,6 +4173,106 @@ fn openai_embeddings_response(response: Value) -> Result<Value, GatewayRuntimeEr
     }))
 }
 
+fn sap_ai_core_base_url() -> Result<Url, GatewayRuntimeError> {
+    const NAME: &str = "MLFLOW_GENAI_JUDGE_BASE_URL";
+    let url = std::env::var(NAME).ok().filter(|value| !value.is_empty());
+    let Some(url) = url else {
+        return Err(GatewayRuntimeError::http(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "error_code":"INVALID_PARAMETER_VALUE",
+                "message":"MLFLOW_GENAI_JUDGE_BASE_URL environment variable must be set when using the sap-ai-core:/ provider."
+            }),
+        ));
+    };
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(GatewayRuntimeError::http(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "error_code":"INVALID_PARAMETER_VALUE",
+                "message":format!(
+                    "MLFLOW_GENAI_JUDGE_BASE_URL must use http:// or https:// scheme, got: {url:?}"
+                )
+            }),
+        ));
+    }
+    parse_url(url.trim_end_matches('/'))
+}
+
+fn sap_ai_core_chat_request(
+    payload: &Value,
+    model_name: &str,
+) -> Result<Value, GatewayRuntimeError> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| GatewayRuntimeError::internal("Gateway payload must be an object"))?;
+    let template = object
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .map(|message| {
+                    let content = message
+                        .get("content")
+                        .filter(|value| python_value_truthy(value))
+                        .cloned()
+                        .unwrap_or_else(|| Value::String(String::new()));
+                    json!({
+                        "role":message.get("role").cloned().unwrap_or(Value::Null),
+                        "content":content,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut params = Map::new();
+    for key in [
+        "max_tokens",
+        "temperature",
+        "top_p",
+        "frequency_penalty",
+        "presence_penalty",
+        "stop",
+        "n",
+        "seed",
+        "response_format",
+        "tools",
+        "tool_choice",
+    ] {
+        if let Some(value) = object.get(key) {
+            params.insert(key.to_string(), value.clone());
+        }
+    }
+    let mut model = Map::new();
+    model.insert("name".to_string(), Value::String(model_name.to_string()));
+    if !params.is_empty() {
+        model.insert("params".to_string(), Value::Object(params));
+    }
+    Ok(json!({
+        "config": {
+            "modules": {
+                "prompt_templating": {
+                    "prompt": {"template": template},
+                    "model": Value::Object(model),
+                }
+            }
+        },
+        "placeholder_values": object.get("placeholder_values").cloned().unwrap_or_else(|| json!({})),
+    }))
+}
+
+fn python_value_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
+}
+
 fn anthropic_chat_request(payload: &mut Value, model: &str) -> Result<(), GatewayRuntimeError> {
     let object = object_mut(payload)?;
     if object.contains_key("temperature") && object.contains_key("top_p") {
@@ -4010,7 +4328,15 @@ fn anthropic_chat_request(payload: &mut Value, model: &str) -> Result<(), Gatewa
     for mut message in messages {
         match message.get("role").and_then(Value::as_str) {
             Some("system") => {}
-            Some("user") => converted_messages.push(message),
+            Some("user") => {
+                if let Some(content) = message.get("content").and_then(Value::as_array) {
+                    let content = anthropic_content_parts(content);
+                    if let Some(message) = message.as_object_mut() {
+                        message.insert("content".to_string(), Value::Array(content));
+                    }
+                }
+                converted_messages.push(message);
+            }
             Some("assistant") => {
                 if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
                     let content = tool_calls
@@ -4117,6 +4443,37 @@ fn anthropic_chat_request(payload: &mut Value, model: &str) -> Result<(), Gatewa
         }
     }
     Ok(())
+}
+
+fn parse_base64_data_url(url: &str) -> Option<(&str, &str)> {
+    let value = url.strip_prefix("data:")?;
+    let (mime, data) = value.split_once(";base64,")?;
+    (!mime.is_empty() && !mime.contains(';')).then_some((mime, data))
+}
+
+fn anthropic_content_parts(content: &[Value]) -> Vec<Value> {
+    content
+        .iter()
+        .map(|part| {
+            if part.get("type").and_then(Value::as_str) != Some("image_url") {
+                return part.clone();
+            }
+            let url = part
+                .pointer("/image_url/url")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match parse_base64_data_url(url) {
+                Some((mime, data)) => json!({
+                    "type":"image",
+                    "source":{"type":"base64","media_type":mime,"data":data},
+                }),
+                None => json!({
+                    "type":"text",
+                    "text":format!("[unsupported image reference: {url}]"),
+                }),
+            }
+        })
+        .collect()
 }
 
 fn enforce_anthropic_strict_schema(value: &mut Value) -> bool {
@@ -4323,7 +4680,10 @@ fn gemini_chat_request(payload: &mut Value) -> Result<Value, GatewayRuntimeError
         let content = message.get("content").cloned().unwrap_or(Value::Null);
         match role {
             "system" => system_parts.push(json!({"text":content})),
-            "user" => contents.push(json!({"role":"user","parts":[{"text":content}]})),
+            "user" => contents.push(json!({
+                "role":"user",
+                "parts":gemini_content_parts(&content),
+            })),
             "assistant" => {
                 if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
                     let mut parts = Vec::new();
@@ -4355,7 +4715,10 @@ fn gemini_chat_request(payload: &mut Value) -> Result<Value, GatewayRuntimeError
                     }
                     contents.push(json!({"role":"model","parts":parts}));
                 } else {
-                    contents.push(json!({"role":"model","parts":[{"text":content}]}));
+                    contents.push(json!({
+                        "role":"model",
+                        "parts":gemini_content_parts(&content),
+                    }));
                 }
             }
             "tool" => {
@@ -4470,6 +4833,33 @@ fn gemini_chat_request(payload: &mut Value) -> Result<Value, GatewayRuntimeError
         );
     }
     Ok(Value::Object(result))
+}
+
+fn gemini_content_parts(content: &Value) -> Vec<Value> {
+    let Some(parts) = content.as_array() else {
+        return vec![json!({"text":content})];
+    };
+    parts
+        .iter()
+        .map(|part| match part.get("type").and_then(Value::as_str) {
+            Some("text") => json!({
+                "text":part.get("text").cloned().unwrap_or_else(|| Value::String(String::new())),
+            }),
+            Some("image_url") => {
+                let url = part
+                    .pointer("/image_url/url")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                match parse_base64_data_url(url) {
+                    Some((mime, data)) => json!({
+                        "inlineData":{"mimeType":mime,"data":data},
+                    }),
+                    None => json!({"text":format!("[unsupported image reference: {url}]")}),
+                }
+            }
+            _ => part.clone(),
+        })
+        .collect()
 }
 
 fn gemini_chat_response(
@@ -4804,6 +5194,34 @@ fn secret_string_optional<'a>(model: &'a ResolvedGatewayModelConfig, key: &str) 
     model.secret_value.get(key).and_then(Value::as_str)
 }
 
+fn resolve_gateway_api_key(value: &str) -> Result<String, GatewayRuntimeError> {
+    let resolve_from_env = std::env::var("MLFLOW_GATEWAY_RESOLVE_API_KEY_FROM_ENV")
+        .ok()
+        .is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        });
+    if resolve_from_env {
+        if let Some(name) = value.strip_prefix('$') {
+            return std::env::var(name)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    GatewayRuntimeError::http(
+                        StatusCode::BAD_REQUEST,
+                        json!({
+                            "error_code":"INVALID_PARAMETER_VALUE",
+                            "message":format!("Environment variable {name:?} is not set"),
+                        }),
+                    )
+                });
+        }
+    }
+    Ok(value.to_string())
+}
+
 fn parse_url(value: &str) -> Result<Url, GatewayRuntimeError> {
     Url::parse(value).map_err(|error| GatewayRuntimeError::internal(error.to_string()))
 }
@@ -4885,6 +5303,9 @@ mod tests {
     use super::*;
     use rand::{rngs::StdRng, SeedableRng};
     use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn typed_trace_payload_omits_none_fields_recursively() {
@@ -5123,6 +5544,261 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_and_gemini_translate_mixed_multimodal_content() {
+        let content = json!([
+            {"type":"text","text":"inspect"},
+            {"type":"image_url","image_url":{"url":"data:image/png;base64,AA\nBB"}},
+            {"type":"image_url","image_url":{"url":"https://example.test/image.png"}},
+            {"type":"input_audio","input_audio":{"data":"audio","format":"wav"}},
+        ]);
+        let anthropic = AnthropicAdapter
+            .transform_request(
+                &fixture_model("anthropic"),
+                InvocationKind::Chat,
+                json!({"messages":[{"role":"user","content":content.clone()}]}),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            anthropic.body["messages"][0]["content"],
+            json!([
+                {"type":"text","text":"inspect"},
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA\nBB"}},
+                {"type":"text","text":"[unsupported image reference: https://example.test/image.png]"},
+                {"type":"input_audio","input_audio":{"data":"audio","format":"wav"}},
+            ])
+        );
+
+        let gemini = GeminiAdapter
+            .transform_request(
+                &fixture_model("gemini"),
+                InvocationKind::Chat,
+                json!({"messages":[{"role":"user","content":content}]}),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            gemini.body["contents"][0]["parts"],
+            json!([
+                {"text":"inspect"},
+                {"inlineData":{"mimeType":"image/png","data":"AA\nBB"}},
+                {"text":"[unsupported image reference: https://example.test/image.png]"},
+                {"type":"input_audio","input_audio":{"data":"audio","format":"wav"}},
+            ])
+        );
+    }
+
+    #[test]
+    fn portkey_headers_and_passthrough_authorization_precedence_are_exact() {
+        let mut model = fixture_model("portkey");
+        model.auth_config.remove("api_base");
+        model
+            .auth_config
+            .insert("portkey_provider".to_string(), "openai".to_string());
+        model.secret_value = json!({
+            "api_key":"portkey-key",
+            "portkey_config":"pc-routing",
+            "provider_api_key":"provider-key",
+        });
+        let request = PortkeyAdapter
+            .transform_request(
+                &model,
+                InvocationKind::Chat,
+                json!({"messages":[{"role":"user","content":"hi"}]}),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            request.url.as_str(),
+            "https://api.portkey.ai/v1/chat/completions"
+        );
+        assert_eq!(request.headers["x-portkey-api-key"], "portkey-key");
+        assert_eq!(request.headers["x-portkey-provider"], "openai");
+        assert_eq!(request.headers["x-portkey-config"], "pc-routing");
+        assert_eq!(request.headers["authorization"], "Bearer provider-key");
+
+        let client = HeaderMap::from_iter([
+            (header::USER_AGENT, HeaderValue::from_static("codex-cli")),
+            (
+                header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer client-key"),
+            ),
+        ]);
+        let passthrough = PortkeyAdapter
+            .passthrough_request(
+                &model,
+                PassthroughAction::OpenAiChat,
+                json!({"messages":[]}),
+                &client,
+            )
+            .unwrap();
+        assert_eq!(passthrough.headers["authorization"], "Bearer provider-key");
+
+        model
+            .secret_value
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_api_key");
+        let passthrough = PortkeyAdapter
+            .passthrough_request(
+                &model,
+                PassthroughAction::OpenAiChat,
+                json!({"messages":[]}),
+                &client,
+            )
+            .unwrap();
+        assert_eq!(passthrough.headers["authorization"], "Bearer client-key");
+        assert_eq!(passthrough.headers["x-portkey-api-key"], "portkey-key");
+    }
+
+    #[test]
+    fn portkey_provider_key_supports_legacy_environment_indirection() {
+        let _env = ENV_LOCK.lock().unwrap();
+        std::env::set_var("MLFLOW_GATEWAY_RESOLVE_API_KEY_FROM_ENV", "true");
+        std::env::set_var("PORTKEY_FIXTURE_KEY", "resolved-portkey");
+        std::env::set_var("PROVIDER_FIXTURE_KEY", "resolved-provider");
+        let mut model = fixture_model("portkey");
+        model.secret_value = json!({
+            "api_key":"$PORTKEY_FIXTURE_KEY",
+            "provider_api_key":"$PROVIDER_FIXTURE_KEY",
+        });
+        let mut headers = HeaderMap::new();
+        PortkeyAdapter.inject_auth(&model, &mut headers).unwrap();
+        assert_eq!(headers["x-portkey-api-key"], "resolved-portkey");
+        assert_eq!(headers["authorization"], "Bearer resolved-provider");
+
+        model.secret_value["provider_api_key"] = json!("$MISSING_PROVIDER_FIXTURE_KEY");
+        let error = PortkeyAdapter
+            .inject_auth(&model, &mut HeaderMap::new())
+            .unwrap_err();
+        assert_eq!(
+            error.detail["message"],
+            "Environment variable \"MISSING_PROVIDER_FIXTURE_KEY\" is not set"
+        );
+        std::env::remove_var("MLFLOW_GATEWAY_RESOLVE_API_KEY_FROM_ENV");
+        std::env::remove_var("PORTKEY_FIXTURE_KEY");
+        std::env::remove_var("PROVIDER_FIXTURE_KEY");
+    }
+
+    #[test]
+    fn sap_ai_core_translates_chat_and_validates_runtime_url() {
+        let _env = ENV_LOCK.lock().unwrap();
+        let model = fixture_model("sap-ai-core");
+        std::env::remove_var("MLFLOW_GENAI_JUDGE_BASE_URL");
+        let error = SapAiCoreAdapter
+            .transform_request(&model, InvocationKind::Chat, json!({"messages":[]}), false)
+            .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.detail["error_code"], "INVALID_PARAMETER_VALUE");
+        assert_eq!(
+            error.detail["message"],
+            "MLFLOW_GENAI_JUDGE_BASE_URL environment variable must be set when using the sap-ai-core:/ provider."
+        );
+
+        std::env::set_var("MLFLOW_GENAI_JUDGE_BASE_URL", "ftp://sap.invalid/");
+        let error = SapAiCoreAdapter
+            .transform_request(&model, InvocationKind::Chat, json!({"messages":[]}), false)
+            .unwrap_err();
+        assert_eq!(error.detail["error_code"], "INVALID_PARAMETER_VALUE");
+        assert_eq!(
+            error.detail["message"],
+            "MLFLOW_GENAI_JUDGE_BASE_URL must use http:// or https:// scheme, got: \"ftp://sap.invalid/\""
+        );
+
+        std::env::set_var(
+            "MLFLOW_GENAI_JUDGE_BASE_URL",
+            "http://sap-egress.test/orchestration/v2/completion/",
+        );
+        let headers = HeaderMap::from_iter([
+            (
+                HeaderName::from_static("ai-resource-group"),
+                HeaderValue::from_static("default"),
+            ),
+            (
+                header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer client-must-not-pass"),
+            ),
+        ]);
+        let request = SapAiCoreAdapter
+            .transform_request_with_headers(
+                &model,
+                InvocationKind::Chat,
+                json!({
+                    "messages":[
+                        {"role":"system","content":"judge"},
+                        {"role":"user","content":null},
+                    ],
+                    "max_tokens":64,
+                    "temperature":0.2,
+                    "seed":7,
+                    "response_format":{"type":"json_object"},
+                    "tools":[{"type":"function","function":{"name":"inspect"}}],
+                    "tool_choice":"auto",
+                    "placeholder_values":{"tenant":"demo"},
+                    "stream":false,
+                    "ignored":"value",
+                }),
+                false,
+                &headers,
+            )
+            .unwrap();
+        assert_eq!(
+            request.url.as_str(),
+            "http://sap-egress.test/orchestration/v2/completion"
+        );
+        assert_eq!(request.headers["ai-resource-group"], "default");
+        assert!(request.headers.get(header::AUTHORIZATION).is_none());
+        assert_eq!(
+            request.body,
+            json!({
+                "config":{"modules":{"prompt_templating":{
+                    "prompt":{"template":[
+                        {"role":"system","content":"judge"},
+                        {"role":"user","content":""},
+                    ]},
+                    "model":{"name":"fixture-model","params":{
+                        "max_tokens":64,
+                        "temperature":0.2,
+                        "seed":7,
+                        "response_format":{"type":"json_object"},
+                        "tools":[{"type":"function","function":{"name":"inspect"}}],
+                        "tool_choice":"auto",
+                    }},
+                }}},
+                "placeholder_values":{"tenant":"demo"},
+            })
+        );
+        let response = SapAiCoreAdapter
+            .transform_response(
+                &model,
+                InvocationKind::Chat,
+                json!({"request_id":"r","final_result":{
+                    "id":"c","object":"chat.completion","created":7,"model":"fixture-model",
+                    "choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+                    "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
+                }}),
+                0,
+            )
+            .unwrap();
+        assert_eq!(response["choices"][0]["message"]["content"], "ok");
+        assert_eq!(response["provider"], "sap-ai-core");
+        let embeddings = SapAiCoreAdapter
+            .transform_request(
+                &model,
+                InvocationKind::Embeddings,
+                json!({"input":"x"}),
+                false,
+            )
+            .unwrap_err();
+        assert_eq!(embeddings.status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(
+            embeddings.detail,
+            "The embeddings route is not implemented for SAP AI Core models."
+        );
+        std::env::remove_var("MLFLOW_GENAI_JUDGE_BASE_URL");
+    }
+
+    #[test]
     fn sse_framing_is_exact_and_done_is_not_emitted() {
         assert_eq!(
             sse_json(&json!({"delta":"hi"})),
@@ -5150,7 +5826,7 @@ mod tests {
     #[test]
     fn every_pinned_provider_resolves_without_python_fallback() {
         let providers = crate::gateway_provider_matrix::supported_provider_names();
-        assert_eq!(providers.len(), 191);
+        assert_eq!(providers.len(), 192);
         for provider in providers {
             let adapter =
                 adapter_for(provider).unwrap_or_else(|error| panic!("{provider}: {error:?}"));

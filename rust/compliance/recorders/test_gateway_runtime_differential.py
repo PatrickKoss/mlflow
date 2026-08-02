@@ -64,6 +64,7 @@ class MockProviderHandler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(size))
         assert self.headers.get("accept-encoding") == "gzip, deflate, identity"
         assert self.headers.get("x-mlflow-authorization") is None
+        _assert_multimodal_translation(self.path, body)
 
         text = _find_text(body)
         # Keep provider duration above both implementations' integer-millisecond
@@ -136,6 +137,47 @@ class MockProviderHandler(BaseHTTPRequestHandler):
         self.send_header("content-length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+
+def _assert_multimodal_translation(path: str, body: dict) -> None:
+    if path.endswith("/messages"):
+        parts = body["messages"][0]["content"]
+        if not isinstance(parts, list) or not any(
+            part.get("text") == "multimodal-marker" for part in parts
+        ):
+            return
+        assert parts == [
+            {"type": "text", "text": "multimodal-marker"},
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "aGVs\nbG8=",
+                },
+            },
+            {
+                "type": "text",
+                "text": "[unsupported image reference: https://example.test/image.png]",
+            },
+            {
+                "type": "input_audio",
+                "input_audio": {"data": "obvious-fake-audio", "format": "wav"},
+            },
+        ]
+    elif "generateContent" in path:
+        parts = body["contents"][0]["parts"]
+        if not any(part.get("text") == "multimodal-marker" for part in parts):
+            return
+        assert parts == [
+            {"text": "multimodal-marker"},
+            {"inlineData": {"mimeType": "image/png", "data": "aGVs\nbG8="}},
+            {"text": "[unsupported image reference: https://example.test/image.png]"},
+            {
+                "type": "input_audio",
+                "input_audio": {"data": "obvious-fake-audio", "format": "wav"},
+            },
+        ]
 
 
 def _find_text(body: dict) -> str:
@@ -408,6 +450,31 @@ def test_python_rust_gateway_runtime_mock_differential(tmp_path: Path, monkeypat
                         if "x-mlflow-gateway-overhead-duration-ms" in py_headers:
                             assert int(py_headers["x-mlflow-gateway-overhead-duration-ms"]) >= 0
                             assert int(rs_headers["x-mlflow-gateway-overhead-duration-ms"]) >= 0
+
+                multimodal_content = [
+                    {"type": "text", "text": "multimodal-marker"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,aGVs\nbG8="},
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.test/image.png"},
+                    },
+                    {
+                        "type": "input_audio",
+                        "input_audio": {"data": "obvious-fake-audio", "format": "wav"},
+                    },
+                ]
+                for provider in ("anthropic", "gemini"):
+                    path = f"/gateway/{provider}-differential-endpoint/mlflow/invocations"
+                    body = {"messages": [{"role": "user", "content": multimodal_content}]}
+                    py_response = python.post(f"{python_base}{path}", json=body, timeout=10)
+                    rs_response = rust.post(f"{rust_base}{path}", json=body, timeout=10)
+                    assert py_response.status_code == rs_response.status_code, (provider, body)
+                    assert py_response.content == rs_response.content, (
+                        f"{provider} {body}\nPY={py_response.content!r}\nRS={rs_response.content!r}"
+                    )
 
                 for streaming in (False, True):
                     path = "/gateway/mlflow/v1/chat/completions"

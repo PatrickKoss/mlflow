@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::{Json, Router};
 use mlflow_genai::{
@@ -13,17 +14,24 @@ use serde_json::{json, Value};
 #[derive(Clone)]
 struct Script {
     requests: Arc<Mutex<Vec<Value>>>,
+    headers: Arc<Mutex<Vec<HeaderMap>>>,
     responses: Arc<Mutex<VecDeque<Value>>>,
 }
 
-async fn scripted(State(script): State<Script>, Json(request): Json<Value>) -> Json<Value> {
+async fn scripted(
+    State(script): State<Script>,
+    headers: HeaderMap,
+    Json(request): Json<Value>,
+) -> Json<Value> {
     script.requests.lock().unwrap().push(request);
+    script.headers.lock().unwrap().push(headers);
     Json(script.responses.lock().unwrap().pop_front().unwrap())
 }
 
 async fn server(responses: Vec<Value>) -> (String, Script) {
     let script = Script {
         requests: Arc::new(Mutex::new(Vec::new())),
+        headers: Arc::new(Mutex::new(Vec::new())),
         responses: Arc::new(Mutex::new(responses.into())),
     };
     let app = Router::new()
@@ -179,7 +187,8 @@ async fn instructions_request_and_feedback_match_python_gateway_shape() {
             "instructions": "Return yes when {{ inputs }} is answered by {{ outputs }}",
             "model": "openai:/fake-chat",
             "feedback_value_type": {"enum": ["yes", "no"], "title": "Result", "type": "string"},
-            "inference_params": {"temperature": 0.0, "max_tokens": 50}
+            "inference_params": {"temperature": 0.0, "max_tokens": 50},
+            "extra_headers": {"AI-Resource-Group": "judge-group"}
         }
     }));
     let feedback = ScorerExecutor::new()
@@ -217,6 +226,39 @@ async fn instructions_request_and_feedback_match_python_gateway_shape() {
         requests[0]["response_format"]["json_schema"]["name"],
         "ResponseFormat"
     );
+    assert_eq!(
+        script.headers.lock().unwrap()[0]["ai-resource-group"],
+        "judge-group"
+    );
+}
+
+#[tokio::test]
+async fn builtin_extra_headers_are_forwarded_to_the_gateway() {
+    let (url, script) = server(vec![completion(json!("yes"), "safe")]).await;
+    let scorer = builtin(
+        "Safety",
+        json!({
+            "model":"sap-ai-core:/fake-chat",
+            "extra_headers":{
+                "AI-Resource-Group":"builtin-group",
+                "x-tenant-id":"tenant-1",
+            },
+        }),
+    );
+    ScorerExecutor::new()
+        .execute(
+            &scorer,
+            &EvalItem {
+                outputs: Some(json!("safe output")),
+                ..EvalItem::default()
+            },
+            Some(&url),
+        )
+        .await
+        .unwrap();
+    let headers = script.headers.lock().unwrap();
+    assert_eq!(headers[0]["ai-resource-group"], "builtin-group");
+    assert_eq!(headers[0]["x-tenant-id"], "tenant-1");
 }
 
 #[tokio::test]
@@ -306,7 +348,7 @@ async fn trace_judge_runs_native_tool_loop() {
     assert_eq!(feedback.value, json!(true));
     let requests = script.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 7);
     assert_eq!(requests[0]["tool_choice"], "auto");
     assert_eq!(requests[1]["messages"][2]["tool_calls"][0]["id"], "call-1");
     assert_eq!(requests[1]["messages"][3]["role"], "tool");

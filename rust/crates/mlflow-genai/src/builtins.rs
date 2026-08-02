@@ -983,6 +983,10 @@ async fn custom_prompt(
             .pydantic_data
             .get("inference_params")
             .and_then(Value::as_object),
+        payload
+            .pydantic_data
+            .get("extra_headers")
+            .and_then(Value::as_object),
         gateway_url,
     )
     .await?;

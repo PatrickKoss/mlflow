@@ -418,9 +418,16 @@ pub struct EvaluationEngine {
 
 impl EvaluationEngine {
     pub fn new(config: EvaluationConfig) -> Result<Self, EngineError> {
+        Self::with_executor(config, ScorerExecutor::new())
+    }
+
+    pub(crate) fn with_executor(
+        config: EvaluationConfig,
+        executor: ScorerExecutor,
+    ) -> Result<Self, EngineError> {
         let limiter = RateLimiter::new(config.scorer_rate)?;
         Ok(Self {
-            executor: ScorerExecutor::new(),
+            executor,
             config,
             limiter,
         })

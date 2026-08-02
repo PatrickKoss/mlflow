@@ -79,6 +79,22 @@
   {
     "type": "function",
     "function": {
+      "name": "get_span_image",
+      "description": "Fetch the actual image content of an attachment referenced in a span (an mlflow-attachment:// URL) so you can view it. Use this whenever a span input/output contains an image reference and you need to see the image to answer. After calling this, the image is delivered to you as a viewable image in the following user message. If a span contains multiple image attachments, use attachment_index to select which one to fetch.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "span_id": {"type": "string", "description": "The ID of the span whose image attachment to fetch"},
+          "attachment_index": {"type": "integer", "description": "Zero-based index selecting which attachment reference to fetch when the span contains more than one. If omitted, the first image attachment is used (non-image references are skipped)."}
+        },
+        "required": ["span_id"]
+      },
+      "strict": false
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "get_span_performance_and_timing_report",
       "description": "Generate a comprehensive span timing report for the trace, showing latencies, execution order, hierarchy, duration statistics, longest spans, and concurrent operations. Useful for analyzing system performance and identifying bottlenecks.",
       "parameters": {"type": "object", "properties": {}, "required": []},

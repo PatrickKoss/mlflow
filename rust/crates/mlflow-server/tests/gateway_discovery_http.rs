@@ -342,6 +342,52 @@ async fn discovery_empty_and_validation_quirks_match_python() {
 }
 
 #[tokio::test]
+async fn portkey_and_sap_provider_metadata_preserve_secret_storage_boundaries() {
+    let _env = ENV_LOCK.lock().await;
+    set_env("MLFLOW_MODEL_CATALOG_URI", Some(""));
+    let server = TestServer::start("provider_auth_metadata", false).await;
+
+    let portkey = get(
+        &server,
+        "/ajax-api/3.0/mlflow/gateway/provider-config?provider=portkey",
+    )
+    .await;
+    assert_eq!(portkey.status, StatusCode::OK);
+    let portkey: serde_json::Value = serde_json::from_str(&portkey.body).unwrap();
+    let mode = &portkey["auth_modes"][0];
+    assert_eq!(
+        mode["secret_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| field["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["api_key", "portkey_config", "provider_api_key"]
+    );
+    assert_eq!(
+        mode["config_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| field["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["portkey_provider", "api_base"]
+    );
+
+    let sap = get(
+        &server,
+        "/ajax-api/3.0/mlflow/gateway/provider-config?provider=sap-ai-core",
+    )
+    .await;
+    assert_eq!(sap.status, StatusCode::OK);
+    let sap: serde_json::Value = serde_json::from_str(&sap.body).unwrap();
+    assert_eq!(sap["default_mode"], "default_chain");
+    assert_eq!(sap["auth_modes"][0]["secret_fields"], serde_json::json!([]));
+    assert_eq!(sap["auth_modes"][0]["config_fields"], serde_json::json!([]));
+    set_env("MLFLOW_MODEL_CATALOG_URI", None);
+}
+
+#[tokio::test]
 async fn discovery_routes_are_authenticated_only_and_workspace_resolved() {
     let _env = ENV_LOCK.lock().await;
     set_env("MLFLOW_MODEL_CATALOG_URI", Some(""));

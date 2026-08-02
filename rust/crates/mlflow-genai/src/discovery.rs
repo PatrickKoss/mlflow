@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value};
 use crate::store::{TraceRecord, TrackingClient};
 use crate::{
     CanonicalAssessment, EngineError, EvaluationConfig, EvaluationEngine, NamedScorer, RateConfig,
-    SerializedScorer, WorkerRequest,
+    ScorerExecutor, SerializedScorer, WorkerRequest,
 };
 
 const DEFAULT_MODEL: &str = "openai:/gpt-5-mini";
@@ -308,7 +308,10 @@ async fn execute_inner(
         },
         enable_scorer_tracing: false,
     };
-    let engine = EvaluationEngine::new(config)?;
+    let engine = EvaluationEngine::with_executor(
+        config,
+        ScorerExecutor::new().with_tracking_client(client.clone()),
+    )?;
     let groups = group_trace_indices(&traces);
 
     progress(stage, "Verifying configuration...");

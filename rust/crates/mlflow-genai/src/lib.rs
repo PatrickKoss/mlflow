@@ -188,7 +188,11 @@ async fn execute_invoke_scorer(request: &WorkerRequest) -> Result<serde_json::Va
             .ok()
             .map(|base| worker_gateway_url(&base, "/gateway/openai/v1/embeddings"))
     });
-    let feedback = ScorerExecutor::new()
+    let executor = match store::TrackingClient::from_request(request) {
+        Ok(client) => ScorerExecutor::new().with_tracking_client(client),
+        Err(_) => ScorerExecutor::new(),
+    };
+    let feedback = executor
         .execute_all(
             &scorer,
             &EvalItem {

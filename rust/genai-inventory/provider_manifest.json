@@ -2154,6 +2154,21 @@
       "verification": "hermetic_matrix"
     },
     {
+      "adapter": "explicit_native",
+      "capabilities": {
+        "chat": true,
+        "cost": false,
+        "embeddings": false,
+        "stream": false
+      },
+      "chat_transform": "mlflow.gateway.providers.sap_ai_core.SapAiCoreAdapter",
+      "embedding_transform": null,
+      "model_entry_count": 0,
+      "name": "sap-ai-core",
+      "unsupported": false,
+      "verification": "hermetic_matrix"
+    },
+    {
       "adapter": "pinned_litellm_transform",
       "capabilities": {
         "chat": true,

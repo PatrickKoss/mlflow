@@ -132,7 +132,7 @@ impl Fixture {
         );
         let webhook_store = WebhookStore::new(db).unwrap();
         let mut secret_ids = HashMap::new();
-        for provider in ["openai", "azure", "anthropic", "gemini"] {
+        for provider in ["openai", "azure", "anthropic", "gemini", "portkey"] {
             secret_ids.insert(
                 provider.to_string(),
                 seed_endpoint(&store, provider, &mock_base).await,
@@ -230,14 +230,29 @@ impl Fixture {
 }
 
 async fn seed_endpoint(store: &TrackingStore, provider: &str, base: &str) -> String {
+    let secret_value = if provider == "portkey" {
+        HashMap::from([
+            (
+                "api_key".to_string(),
+                "obvious-fake-portkey-key".to_string(),
+            ),
+            ("portkey_config".to_string(), "pc-fixture".to_string()),
+            (
+                "provider_api_key".to_string(),
+                "obvious-fake-provider-key".to_string(),
+            ),
+        ])
+    } else {
+        HashMap::from([(
+            "api_key".to_string(),
+            format!("obvious-fake-{provider}-key"),
+        )])
+    };
     let secret = store
         .create_gateway_secret(
             WORKSPACE_DEFAULT_NAME,
             &format!("obvious-fake-{provider}-secret"),
-            &HashMap::from([(
-                "api_key".to_string(),
-                format!("obvious-fake-{provider}-key"),
-            )]),
+            &secret_value,
             Some(provider),
             &auth_config(provider, base),
             Some("runtime-test"),
@@ -440,6 +455,10 @@ fn auth_config(provider: &str, base: &str) -> HashMap<String, String> {
         ]),
         "anthropic" => HashMap::from([("api_base".to_string(), format!("{base}/v1"))]),
         "gemini" => HashMap::from([("api_base".to_string(), format!("{base}/v1beta/models"))]),
+        "portkey" => HashMap::from([
+            ("api_base".to_string(), format!("{base}/v1")),
+            ("portkey_provider".to_string(), "openai".to_string()),
+        ]),
         _ => unreachable!(),
     }
 }
@@ -461,7 +480,19 @@ async fn mock_provider(State(state): State<MockState>, request: Request) -> Resp
         Some(&HeaderValue::from_static("gzip, deflate, identity"))
     );
     assert!(headers.get("x-mlflow-authorization").is_none());
-    if path.contains("anthropic") || path.ends_with("/messages") {
+    if body
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(|model| model.starts_with("portkey-"))
+    {
+        assert_eq!(headers["x-portkey-api-key"], "obvious-fake-portkey-key");
+        assert_eq!(headers["x-portkey-provider"], "openai");
+        assert_eq!(headers["x-portkey-config"], "pc-fixture");
+        assert_eq!(
+            headers[header::AUTHORIZATION],
+            "Bearer obvious-fake-provider-key"
+        );
+    } else if path.contains("anthropic") || path.ends_with("/messages") {
         assert_eq!(headers["x-api-key"], "obvious-fake-anthropic-key");
     } else if path.contains("gemini") {
         assert_eq!(headers["x-goog-api-key"], "obvious-fake-gemini-key");
@@ -1021,7 +1052,7 @@ async fn alert_policy_dispatches_python_shaped_budget_webhook_once() {
 async fn all_native_providers_match_unified_non_stream_and_error_contracts() {
     let fixture = Fixture::new().await;
     assert!(fixture.mock_base.starts_with("http://127.0.0.1:"));
-    for provider in ["openai", "azure", "anthropic", "gemini"] {
+    for provider in ["openai", "azure", "anthropic", "gemini", "portkey"] {
         let response = fixture
             .post(&format!("{provider}-endpoint"), chat("hello", false))
             .await;
@@ -1061,6 +1092,32 @@ async fn all_native_providers_match_unified_non_stream_and_error_contracts() {
                 .unwrap();
         assert_eq!(body, json!({"detail":"fixture provider failure"}));
     }
+}
+
+#[tokio::test]
+async fn portkey_secret_and_auth_config_storage_split_survives_store_round_trip() {
+    let fixture = Fixture::new().await;
+    let endpoint = fixture
+        .store
+        .get_resolved_gateway_endpoint_config(WORKSPACE_DEFAULT_NAME, "portkey-endpoint")
+        .await
+        .unwrap();
+    let model = &endpoint.models[0];
+    assert_eq!(
+        model.secret_value,
+        json!({
+            "api_key":"obvious-fake-portkey-key",
+            "portkey_config":"pc-fixture",
+            "provider_api_key":"obvious-fake-provider-key",
+        })
+    );
+    assert_eq!(
+        model.auth_config,
+        HashMap::from([
+            ("api_base".to_string(), format!("{}/v1", fixture.mock_base)),
+            ("portkey_provider".to_string(), "openai".to_string()),
+        ])
+    );
 }
 
 #[tokio::test]
@@ -1212,6 +1269,29 @@ async fn passthrough_and_raw_proxy_routes_share_the_hermetic_transport() {
                 .unwrap();
         assert!(value.is_object(), "{path}: {value}");
     }
+
+    let portkey = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/gateway/openai/v1/chat/completions")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::USER_AGENT, "codex-cli")
+                .header(header::AUTHORIZATION, "Bearer client-key-must-not-win")
+                .body(Body::from(
+                    json!({
+                        "model":"portkey-endpoint",
+                        "messages":[{"role":"user","content":"hello"}],
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(portkey.status(), StatusCode::OK);
 
     let response = fixture
         .app

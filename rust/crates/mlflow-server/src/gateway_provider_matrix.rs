@@ -125,6 +125,7 @@ pub fn default_api_base(provider: &str) -> Option<&'static str> {
         "deepseek" => Some("https://api.deepseek.com/v1"),
         "xai" => Some("https://api.x.ai/v1"),
         "openrouter" => Some("https://openrouter.ai/api/v1"),
+        "portkey" => Some("https://api.portkey.ai/v1"),
         "ollama" => Some("http://localhost:11434/v1"),
         _ => None,
     }
@@ -229,7 +230,7 @@ mod tests {
     #[test]
     fn manifest_has_full_pinned_coverage_and_no_unsupported_entries() {
         let runtime = runtime_manifest();
-        assert_eq!(runtime.providers.len(), 191);
+        assert_eq!(runtime.providers.len(), 192);
         assert!(runtime
             .providers
             .iter()

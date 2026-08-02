@@ -42,6 +42,12 @@ cases:
     query: {provider: openai}
     expect_status: 200
 
+  - name: gateway_provider_config_portkey
+    method: GET
+    path: /ajax-api/3.0/mlflow/gateway/provider-config
+    query: {provider: portkey}
+    expect_status: 200
+
   - name: gateway_provider_config_missing_provider
     method: GET
     path: /ajax-api/3.0/mlflow/gateway/provider-config
@@ -343,6 +349,82 @@ cases:
     method: DELETE
     path: /api/3.0/mlflow/gateway/secrets/delete
     body: {secret_id: "${gateway_secret_id}"}
+    expect_status: 200
+
+  - name: gateway_create_portkey_secret_masked
+    method: POST
+    path: /api/3.0/mlflow/gateway/secrets/create
+    body:
+      secret_name: corpus-obvious-fake-portkey-secret
+      secret_value:
+        api_key: obvious-fake-portkey-value-1234
+        portkey_config: pc-obvious-fake-corpus
+        provider_api_key: obvious-fake-upstream-value-5678
+      provider: portkey
+      auth_config:
+        api_base: https://api.portkey.ai/v1
+        portkey_provider: openai
+      created_by: corpus-user
+    bind:
+      - {bind: gateway_portkey_secret_id, from: "$.secret.secret_id"}
+    expect_status: 200
+
+  - name: gateway_get_portkey_secret_masked
+    method: GET
+    path: /ajax-api/3.0/mlflow/gateway/secrets/get
+    query: {secret_id: "${gateway_portkey_secret_id}"}
+    expect_status: 200
+
+  - name: gateway_create_portkey_model_definition
+    method: POST
+    path: /api/3.0/mlflow/gateway/model-definitions/create
+    body:
+      name: corpus-fake-portkey-model-definition
+      secret_id: "${gateway_portkey_secret_id}"
+      provider: portkey
+      model_name: corpus-fake-portkey-model
+      created_by: corpus-user
+    bind:
+      - {bind: gateway_portkey_model_definition_id, from: "$.model_definition.model_definition_id"}
+    expect_status: 200
+
+  - name: gateway_create_portkey_endpoint
+    method: POST
+    path: /api/3.0/mlflow/gateway/endpoints/create
+    body:
+      name: corpus-fake-portkey-endpoint
+      model_configs:
+        - model_definition_id: "${gateway_portkey_model_definition_id}"
+          linkage_type: PRIMARY
+          weight: 1.0
+      usage_tracking: false
+      created_by: corpus-user
+    bind:
+      - {bind: gateway_portkey_endpoint_id, from: "$.endpoint.endpoint_id"}
+    expect_status: 200
+
+  - name: gateway_get_portkey_endpoint
+    method: GET
+    path: /ajax-api/3.0/mlflow/gateway/endpoints/get
+    query: {endpoint_id: "${gateway_portkey_endpoint_id}"}
+    expect_status: 200
+
+  - name: gateway_delete_portkey_endpoint
+    method: DELETE
+    path: /api/3.0/mlflow/gateway/endpoints/delete
+    body: {endpoint_id: "${gateway_portkey_endpoint_id}"}
+    expect_status: 200
+
+  - name: gateway_delete_portkey_model_definition
+    method: DELETE
+    path: /ajax-api/3.0/mlflow/gateway/model-definitions/delete
+    body: {model_definition_id: "${gateway_portkey_model_definition_id}"}
+    expect_status: 200
+
+  - name: gateway_delete_portkey_secret
+    method: DELETE
+    path: /api/3.0/mlflow/gateway/secrets/delete
+    body: {secret_id: "${gateway_portkey_secret_id}"}
     expect_status: 200
 
   - name: gateway_create_budget_policy

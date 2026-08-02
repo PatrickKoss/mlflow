@@ -8,7 +8,7 @@ use crate::online::{run_online_session_job, run_online_trace_job, OnlineJobParam
 use crate::store::{assessment_dictionary, set_scorer_trace_metadata, TraceRecord, TrackingClient};
 use crate::{
     compute_aggregated_metrics, EngineError, EvaluationConfig, EvaluationEngine, NamedScorer,
-    RateConfig, SerializedScorer, WorkerRequest,
+    RateConfig, ScorerExecutor, SerializedScorer, WorkerRequest,
 };
 
 const TRACE_SESSION: &str = "mlflow.trace.session";
@@ -63,7 +63,10 @@ pub(crate) async fn execute_evaluate(request: &WorkerRequest) -> Result<Value, E
         .cloned()
         .partition::<Vec<_>, _>(|scorer| !scorer.scorer.common().is_session_level_scorer);
     let config = EvaluationConfig::from_env(scorers.len())?;
-    let engine = EvaluationEngine::new(config.clone())?;
+    let engine = EvaluationEngine::with_executor(
+        config.clone(),
+        ScorerExecutor::new().with_tracking_client(client.clone()),
+    )?;
     let items = traces
         .iter()
         .map(|trace| trace.eval_item.clone())
@@ -178,7 +181,10 @@ async fn execute_single_invoke(
         },
         enable_scorer_tracing: scorer_tracing(),
     };
-    let engine = EvaluationEngine::new(config.clone())?;
+    let engine = EvaluationEngine::with_executor(
+        config.clone(),
+        ScorerExecutor::new().with_tracking_client(client.clone()),
+    )?;
     let scorer = vec![scorer];
     let results = stream::iter(traces.into_iter())
         .map(|trace| {
@@ -284,7 +290,10 @@ async fn execute_session_invoke(
         },
         enable_scorer_tracing: scorer_tracing(),
     };
-    let engine = EvaluationEngine::new(config)?;
+    let engine = EvaluationEngine::with_executor(
+        config,
+        ScorerExecutor::new().with_tracking_client(client.clone()),
+    )?;
     let mut result = engine.score_item(&item, std::slice::from_ref(scorer)).await;
     for assessment in &mut result.assessments {
         assessment.metadata.insert(

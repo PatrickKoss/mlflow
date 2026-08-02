@@ -18,6 +18,29 @@ fn parses_python_builtin_payload() {
 }
 
 #[test]
+fn builtin_extra_headers_round_trip_without_loss() {
+    let value = serde_json::json!({
+        "name": "safety",
+        "builtin_scorer_class": "Safety",
+        "builtin_scorer_pydantic_data": {
+            "model": "sap-ai-core:/gpt-4.1",
+            "extra_headers": {"AI-Resource-Group": "default"}
+        },
+        "mlflow_version": "3.14.1.dev0",
+        "serialization_version": 1
+    });
+    let scorer = SerializedScorer::from_value(value.clone()).unwrap();
+    assert_eq!(scorer.to_json_value(), value);
+    let SerializedScorer::Builtin(payload) = scorer else {
+        panic!("expected builtin scorer")
+    };
+    assert_eq!(
+        payload.pydantic_data["extra_headers"]["AI-Resource-Group"],
+        "default"
+    );
+}
+
+#[test]
 fn parses_python_instructions_payload() {
     let scorer = SerializedScorer::from_json(INSTRUCTIONS).expect("Python fixture parses");
     let SerializedScorer::Instructions(payload) = scorer else {

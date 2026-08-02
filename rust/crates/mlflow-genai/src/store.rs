@@ -112,6 +112,37 @@ impl TrackingClient {
         serde_json::from_slice(&bytes).map_err(|error| EngineError::Store(error.to_string()))
     }
 
+    pub(crate) async fn download_trace_attachment(
+        &self,
+        trace_id: &str,
+        attachment_id: &str,
+    ) -> Result<Vec<u8>, EngineError> {
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("request_id", trace_id)
+            .append_pair("path", attachment_id)
+            .finish();
+        let response = self
+            .request(
+                Method::GET,
+                &format!("/ajax-api/3.0/mlflow/get-trace-artifact?{query}"),
+            )
+            .send()
+            .await
+            .map_err(|error| EngineError::Store(error.to_string()))?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| EngineError::Store(error.to_string()))?;
+        if !status.is_success() {
+            return Err(EngineError::Store(format!(
+                "HTTP {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            )));
+        }
+        Ok(bytes.to_vec())
+    }
+
     pub async fn fetch_traces(
         &self,
         trace_ids: &[String],

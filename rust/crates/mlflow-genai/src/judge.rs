@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
+use base64::Engine;
+use regex::Regex;
 use serde_json::{json, Map, Value};
+use url::Url;
 
 use crate::trace::{conversation, TraceView};
 use crate::{
@@ -11,6 +15,19 @@ const JUDGE_BASE_PROMPT: &str = "You are an expert judge tasked with evaluating 
 const RESULT_DESCRIPTION: &str = "The evaluation rating/result";
 const RATIONALE_DESCRIPTION: &str = "Detailed explanation for the evaluation";
 const EMPTY_TRACE_USER_MESSAGE: &str = "Use the tools to inspect the trace and return the JSON rating per the system message. This message and your tool calls in this chat are not the input or response being judged. The trace lives only behind the tools.";
+const IMAGE_TURN_TOOL_CALL_ID: &str = "_mlflow_image_turn_tool_call_id";
+const DEFAULT_MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+#[derive(Debug)]
+struct SpanImageResult {
+    span_id: String,
+    data_url: String,
+}
+
+enum JudgeToolResult {
+    Text(String),
+    Image(SpanImageResult),
+}
 
 const TRACE_PROMPT: &str = " Your job is to analyze a trace of the agent's execution on the
 query and provide an evaluation rating in accordance with the instructions.
@@ -119,9 +136,12 @@ pub(crate) async fn execute_instructions(
         model_uri,
         messages,
         schema,
-        inference,
-        if is_trace { item.trace.as_ref() } else { None },
-        gateway_url,
+        InvokeOptions {
+            inference,
+            extra_headers: extra_headers(&payload.pydantic_data),
+            trace: if is_trace { item.trace.as_ref() } else { None },
+            gateway_url,
+        },
     )
     .await?;
     let mut feedback = completion.feedback(&payload.common.name, model_uri)?;
@@ -138,6 +158,7 @@ pub(crate) async fn invoke_prompt(
     name: &str,
     prompt: String,
     inference: Option<&Map<String, Value>>,
+    extra_headers: Option<&Map<String, Value>>,
     gateway_url: Option<&str>,
 ) -> Result<Feedback, EngineError> {
     let completion = invoke(
@@ -145,9 +166,12 @@ pub(crate) async fn invoke_prompt(
         model_uri,
         vec![json!({"role": "user", "content": prompt})],
         default_response_format(),
-        inference,
-        None,
-        gateway_url,
+        InvokeOptions {
+            inference,
+            extra_headers,
+            trace: None,
+            gateway_url,
+        },
     )
     .await?;
     completion.feedback(name, model_uri)
@@ -210,15 +234,26 @@ impl JudgeCompletion {
     }
 }
 
+struct InvokeOptions<'a> {
+    inference: Option<&'a Map<String, Value>>,
+    extra_headers: Option<&'a Map<String, Value>>,
+    trace: Option<&'a Value>,
+    gateway_url: Option<&'a str>,
+}
+
 async fn invoke(
     executor: &ScorerExecutor,
     model_uri: &str,
     mut messages: Vec<Value>,
     response_format: Value,
-    inference: Option<&Map<String, Value>>,
-    trace: Option<&Value>,
-    gateway_url: Option<&str>,
+    options: InvokeOptions<'_>,
 ) -> Result<JudgeCompletion, EngineError> {
+    let InvokeOptions {
+        inference,
+        extra_headers,
+        trace,
+        gateway_url,
+    } = options;
     let model = model_uri
         .split_once(":/")
         .map(|(_, model)| model)
@@ -236,7 +271,10 @@ async fn invoke(
     for _ in 0..max_iterations {
         let mut request = Map::new();
         request.insert("model".to_string(), Value::String(model.to_string()));
-        request.insert("messages".to_string(), Value::Array(messages.clone()));
+        request.insert(
+            "messages".to_string(),
+            Value::Array(provider_messages(&messages)),
+        );
         if trace.is_some() {
             request.insert("tools".to_string(), tools.clone());
             request.insert("tool_choice".to_string(), Value::String("auto".to_string()));
@@ -245,10 +283,19 @@ async fn invoke(
         if let Some(inference) = inference {
             request.extend(inference.clone());
         }
-        let response = executor
+        let mut http_request = executor
             .client()
             .post(gateway_url.ok_or(EngineError::MissingGatewayUrl)?)
-            .json(&Value::Object(request))
+            .json(&Value::Object(request));
+        if let Some(extra_headers) = extra_headers {
+            for (name, value) in extra_headers {
+                let value = value.as_str().ok_or_else(|| {
+                    EngineError::Gateway(format!("extra header {name:?} must have a string value"))
+                })?;
+                http_request = http_request.header(name, value);
+            }
+        }
+        let response = http_request
             .send()
             .await
             .map_err(|error| EngineError::Gateway(error.to_string()))?;
@@ -258,6 +305,12 @@ async fn invoke(
             .await
             .map_err(|error| EngineError::Gateway(error.to_string()))?;
         if !status.is_success() {
+            if is_context_window_error(status.as_u16(), &body) {
+                if let Some(trimmed) = remove_oldest_tool_call_pair(&messages) {
+                    messages = trimmed;
+                    continue;
+                }
+            }
             return Err(EngineError::Gateway(format!("HTTP {status}: {body}")));
         }
         prompt_tokens += body
@@ -283,6 +336,8 @@ async fn invoke(
                 EngineError::MalformedGatewayResponse("tool call without trace".to_string())
             })?;
             messages.push(Value::Object(message.clone()));
+            let mut tool_responses = Vec::new();
+            let mut image_turns = Vec::new();
             for call in tool_calls {
                 let name = call
                     .pointer("/function/name")
@@ -294,14 +349,37 @@ async fn invoke(
                     .unwrap_or("{}");
                 let arguments: Value = serde_json::from_str(arguments)
                     .map_err(|error| EngineError::Tool(error.to_string()))?;
-                let content = TraceView::new(trace).invoke_tool(name, &arguments)?;
-                messages.push(json!({
-                    "role": "tool",
-                    "content": content,
-                    "tool_call_id": call.get("id").cloned().unwrap_or(Value::Null),
-                    "name": name,
-                }));
+                let call_id = call.get("id").cloned().unwrap_or(Value::Null);
+                match invoke_judge_tool(executor, trace, name, &arguments).await {
+                    JudgeToolResult::Text(content) => tool_responses.push(json!({
+                        "role": "tool",
+                        "content": content,
+                        "tool_call_id": call_id,
+                        "name": name,
+                    })),
+                    JudgeToolResult::Image(image) => {
+                        tool_responses.push(json!({
+                            "role": "tool",
+                            "content":format!(
+                                "Image for span {} fetched; it is shown in the following user message. Inspect it to answer.",
+                                image.span_id
+                            ),
+                            "tool_call_id":call_id,
+                            "name":name,
+                        }));
+                        image_turns.push(json!({
+                            "role":"user",
+                            "content":[
+                                {"type":"text","text":format!("Fetched image for span {}:", image.span_id)},
+                                {"type":"image_url","image_url":{"url":image.data_url}},
+                            ],
+                            (IMAGE_TURN_TOOL_CALL_ID):call_id,
+                        }));
+                    }
+                }
             }
+            messages.extend(tool_responses);
+            messages.extend(image_turns);
             continue;
         }
         let content = message
@@ -320,6 +398,232 @@ async fn invoke(
     Err(EngineError::Gateway(format!(
         "Judge model exceeded maximum number of iterations ({max_iterations})"
     )))
+}
+
+fn extra_headers(data: &Map<String, Value>) -> Option<&Map<String, Value>> {
+    data.get("extra_headers").and_then(Value::as_object)
+}
+
+fn provider_messages(messages: &[Value]) -> Vec<Value> {
+    messages
+        .iter()
+        .cloned()
+        .map(|mut message| {
+            if let Some(message) = message.as_object_mut() {
+                message.remove(IMAGE_TURN_TOOL_CALL_ID);
+            }
+            message
+        })
+        .collect()
+}
+
+async fn invoke_judge_tool(
+    executor: &ScorerExecutor,
+    trace: &Value,
+    name: &str,
+    arguments: &Value,
+) -> JudgeToolResult {
+    if name == "get_span_image" {
+        return get_span_image(executor, trace, arguments).await;
+    }
+    match TraceView::new(trace).invoke_tool(name, arguments) {
+        Ok(content) => JudgeToolResult::Text(content),
+        Err(error) => JudgeToolResult::Text(format!("Error: {error}")),
+    }
+}
+
+#[derive(Debug)]
+struct AttachmentRef {
+    attachment_id: String,
+    content_type: String,
+    size: Option<usize>,
+}
+
+async fn get_span_image(
+    executor: &ScorerExecutor,
+    trace: &Value,
+    arguments: &Value,
+) -> JudgeToolResult {
+    let trace_id = trace
+        .pointer("/info/trace_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let span_id = arguments
+        .get("span_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let spans = trace
+        .pointer("/data/spans")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if spans.is_empty() {
+        return tool_text(format!("Error: trace '{trace_id}' has no spans"));
+    }
+    let Some(span) = spans
+        .iter()
+        .find(|span| span.get("span_id").and_then(Value::as_str) == Some(span_id))
+    else {
+        return tool_text(format!(
+            "Error: span '{span_id}' not found in trace '{trace_id}'"
+        ));
+    };
+    let serialized = serde_json::to_string(span).unwrap_or_default();
+    let refs = attachment_ref_regex()
+        .find_iter(&serialized)
+        .map(|found| found.as_str())
+        .collect::<Vec<_>>();
+    if refs.is_empty() {
+        return tool_text(format!(
+            "Error: no mlflow-attachment:// image reference found in span '{span_id}' of trace '{trace_id}'"
+        ));
+    }
+    let parsed = match arguments.get("attachment_index") {
+        None | Some(Value::Null) => refs.iter().find_map(|value| {
+            parse_attachment_ref(value).filter(|item| item.content_type.starts_with("image/"))
+        }),
+        Some(index) => {
+            let index = index.as_i64().unwrap_or(-1);
+            if index < 0 || usize::try_from(index).map_or(true, |index| index >= refs.len()) {
+                return tool_text(format!(
+                    "Error: attachment_index {index} is out of range for span '{span_id}' of trace '{trace_id}', which has {} attachment reference(s)",
+                    refs.len()
+                ));
+            }
+            let Some(parsed) = parse_attachment_ref(refs[index as usize]) else {
+                return tool_text(format!(
+                    "Error: could not parse attachment reference in span '{span_id}' of trace '{trace_id}'"
+                ));
+            };
+            if !parsed.content_type.starts_with("image/") {
+                return tool_text(format!(
+                    "Error: attachment in span '{span_id}' of trace '{trace_id}' is not an image (content_type='{}')",
+                    parsed.content_type
+                ));
+            }
+            Some(parsed)
+        }
+    };
+    let Some(parsed) = parsed else {
+        return tool_text(format!(
+            "Error: no image attachment found in span '{span_id}' of trace '{trace_id}'"
+        ));
+    };
+    let limit = attachment_size_limit();
+    if parsed.size.is_some_and(|size| size > limit) {
+        return oversized_image(span_id, trace_id, parsed.size.unwrap(), limit);
+    }
+    let bytes = match executor
+        .download_trace_attachment(trace_id, &parsed.attachment_id)
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return tool_text(format!(
+                "Error: failed to download image attachment in span '{span_id}' of trace '{trace_id}': {error}"
+            ))
+        }
+    };
+    if bytes.len() > limit {
+        return oversized_image(span_id, trace_id, bytes.len(), limit);
+    }
+    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    JudgeToolResult::Image(SpanImageResult {
+        span_id: span_id.to_string(),
+        data_url: format!("data:{};base64,{data}", parsed.content_type),
+    })
+}
+
+fn tool_text(value: String) -> JudgeToolResult {
+    JudgeToolResult::Text(value)
+}
+
+fn oversized_image(span_id: &str, trace_id: &str, size: usize, limit: usize) -> JudgeToolResult {
+    tool_text(format!(
+        "Error: image attachment in span '{span_id}' of trace '{trace_id}' is {size} bytes, exceeding the {limit} byte limit"
+    ))
+}
+
+fn attachment_ref_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| Regex::new(r#"mlflow-attachment://[^\s\"'\\]+"#).unwrap())
+}
+
+fn parse_attachment_ref(reference: &str) -> Option<AttachmentRef> {
+    let url = Url::parse(reference).ok()?;
+    if url.scheme() != "mlflow-attachment" {
+        return None;
+    }
+    let attachment_id = url.host_str()?.to_string();
+    let params = url
+        .query_pairs()
+        .collect::<std::collections::HashMap<_, _>>();
+    let content_type = params.get("content_type")?.to_string();
+    let _trace_id = params.get("trace_id")?;
+    let size = params
+        .get("size")
+        .and_then(|value| value.parse::<i64>().ok())
+        .and_then(|value| (value > 0).then(|| usize::try_from(value).ok()).flatten());
+    Some(AttachmentRef {
+        attachment_id,
+        content_type,
+        size,
+    })
+}
+
+fn attachment_size_limit() -> usize {
+    std::env::var("MLFLOW_TRACE_MAX_ATTACHMENT_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .and_then(|value| (value > 0).then(|| usize::try_from(value).ok()).flatten())
+        .unwrap_or(DEFAULT_MAX_IMAGE_BYTES)
+}
+
+fn remove_oldest_tool_call_pair(messages: &[Value]) -> Option<Vec<Value>> {
+    let assistant_index = messages.iter().position(|message| {
+        message.get("role").and_then(Value::as_str) == Some("assistant")
+            && message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty())
+    })?;
+    let ids = messages[assistant_index]
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|call| call.get("id"))
+        .cloned()
+        .collect::<Vec<_>>();
+    Some(
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(index, message)| {
+                if *index == assistant_index {
+                    return false;
+                }
+                let tool_response = message.get("role").and_then(Value::as_str) == Some("tool")
+                    && message
+                        .get("tool_call_id")
+                        .is_some_and(|id| ids.contains(id));
+                let image_turn = message
+                    .get(IMAGE_TURN_TOOL_CALL_ID)
+                    .is_some_and(|id| ids.contains(id));
+                !tool_response && !image_turn
+            })
+            .map(|(_, message)| message.clone())
+            .collect(),
+    )
+}
+
+fn is_context_window_error(status: u16, body: &Value) -> bool {
+    if !matches!(status, 400 | 413 | 422) {
+        return false;
+    }
+    let detail = body.to_string().to_ascii_lowercase();
+    (detail.contains("context window") || detail.contains("context length"))
+        && (detail.contains("exceed") || detail.contains("maximum") || detail.contains("too long"))
 }
 
 fn build_user_message(
@@ -541,4 +845,226 @@ fn required_str<'a>(
     data.get(field)
         .and_then(Value::as_str)
         .ok_or(EngineError::InvalidScorerField(field))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::routing::get;
+    use axum::Router;
+
+    use super::*;
+    use crate::store::TrackingClient;
+    use crate::{JobKind, WorkerRequest, NATIVE_WORKER_PROTOCOL_VERSION};
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn attachment_executor(bytes: &'static [u8]) -> ScorerExecutor {
+        let app = Router::new().route(
+            "/ajax-api/3.0/mlflow/get-trace-artifact",
+            get(move || async move { bytes }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let request = WorkerRequest {
+            protocol_version: NATIVE_WORKER_PROTOCOL_VERSION,
+            job_id: "job-image".to_string(),
+            job_kind: JobKind::InvokeScorer,
+            params: json!({}),
+            workspace: Some("images".to_string()),
+            subject: json!({}),
+        };
+        let client =
+            TrackingClient::from_request_at(&request, Some(&format!("http://{address}"))).unwrap();
+        ScorerExecutor::new().with_tracking_client(client)
+    }
+
+    fn trace_with_refs(refs: &[&str]) -> Value {
+        json!({
+            "info":{"trace_id":"tr-image"},
+            "data":{"spans":[{
+                "span_id":"span-image",
+                "attributes":{"mlflow.spanOutputs":refs},
+            }]}
+        })
+    }
+
+    fn text(result: JudgeToolResult) -> String {
+        let JudgeToolResult::Text(value) = result else {
+            panic!("expected text tool result")
+        };
+        value
+    }
+
+    #[tokio::test]
+    async fn get_span_image_selects_images_and_returns_exact_errors() {
+        let _env = ENV_LOCK.lock().await;
+        std::env::remove_var("MLFLOW_TRACE_MAX_ATTACHMENT_SIZE");
+        let executor = attachment_executor(b"image-bytes").await;
+        let text_ref = "mlflow-attachment://00000000-0000-0000-0000-000000000001?content_type=text%2Fplain&trace_id=tr-image&size=2";
+        let image_ref = "mlflow-attachment://00000000-0000-0000-0000-000000000002?content_type=image%2Fpng&trace_id=tr-image&size=11";
+        let trace = trace_with_refs(&[text_ref, image_ref]);
+        let result = get_span_image(&executor, &trace, &json!({"span_id":"span-image"})).await;
+        let JudgeToolResult::Image(result) = result else {
+            panic!("expected image")
+        };
+        assert_eq!(result.span_id, "span-image");
+        assert_eq!(result.data_url, "data:image/png;base64,aW1hZ2UtYnl0ZXM=");
+
+        assert_eq!(
+            text(
+                get_span_image(
+                    &executor,
+                    &trace,
+                    &json!({"span_id":"span-image","attachment_index":0}),
+                )
+                .await,
+            ),
+            "Error: attachment in span 'span-image' of trace 'tr-image' is not an image (content_type='text/plain')"
+        );
+        assert_eq!(
+            text(
+                get_span_image(
+                    &executor,
+                    &trace,
+                    &json!({"span_id":"span-image","attachment_index":2}),
+                )
+                .await,
+            ),
+            "Error: attachment_index 2 is out of range for span 'span-image' of trace 'tr-image', which has 2 attachment reference(s)"
+        );
+        assert_eq!(
+            text(
+                get_span_image(
+                    &executor,
+                    &json!({"info":{"trace_id":"tr-image"},"data":{"spans":[]}}),
+                    &json!({"span_id":"span-image"}),
+                )
+                .await,
+            ),
+            "Error: trace 'tr-image' has no spans"
+        );
+        assert_eq!(
+            text(get_span_image(&executor, &trace, &json!({"span_id":"missing"})).await,),
+            "Error: span 'missing' not found in trace 'tr-image'"
+        );
+        assert_eq!(
+            text(
+                get_span_image(
+                    &executor,
+                    &trace_with_refs(&[]),
+                    &json!({"span_id":"span-image"}),
+                )
+                .await,
+            ),
+            "Error: no mlflow-attachment:// image reference found in span 'span-image' of trace 'tr-image'"
+        );
+        let malformed =
+            trace_with_refs(&["mlflow-attachment://attachment-without-required-query-fields"]);
+        assert_eq!(
+            text(
+                get_span_image(
+                    &executor,
+                    &malformed,
+                    &json!({"span_id":"span-image","attachment_index":0}),
+                )
+                .await,
+            ),
+            "Error: could not parse attachment reference in span 'span-image' of trace 'tr-image'"
+        );
+        assert_eq!(
+            text(
+                get_span_image(
+                    &executor,
+                    &trace_with_refs(&[text_ref]),
+                    &json!({"span_id":"span-image"}),
+                )
+                .await,
+            ),
+            "Error: no image attachment found in span 'span-image' of trace 'tr-image'"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_span_image_enforces_advertised_and_downloaded_size_caps() {
+        let _env = ENV_LOCK.lock().await;
+        std::env::set_var("MLFLOW_TRACE_MAX_ATTACHMENT_SIZE", "3");
+        let executor = attachment_executor(b"four").await;
+        let advertised = trace_with_refs(&[
+            "mlflow-attachment://00000000-0000-0000-0000-000000000002?content_type=image%2Fpng&trace_id=tr-image&size=4",
+        ]);
+        assert_eq!(
+            text(
+                get_span_image(
+                    &executor,
+                    &advertised,
+                    &json!({"span_id":"span-image"}),
+                )
+                .await,
+            ),
+            "Error: image attachment in span 'span-image' of trace 'tr-image' is 4 bytes, exceeding the 3 byte limit"
+        );
+        let unadvertised = trace_with_refs(&[
+            "mlflow-attachment://00000000-0000-0000-0000-000000000002?content_type=image%2Fpng&trace_id=tr-image",
+        ]);
+        assert_eq!(
+            text(
+                get_span_image(
+                    &executor,
+                    &unadvertised,
+                    &json!({"span_id":"span-image"}),
+                )
+                .await,
+            ),
+            "Error: image attachment in span 'span-image' of trace 'tr-image' is 4 bytes, exceeding the 3 byte limit"
+        );
+        std::env::remove_var("MLFLOW_TRACE_MAX_ATTACHMENT_SIZE");
+    }
+
+    #[tokio::test]
+    async fn image_size_limit_defaults_and_only_positive_env_values_override() {
+        let _env = ENV_LOCK.lock().await;
+        std::env::remove_var("MLFLOW_TRACE_MAX_ATTACHMENT_SIZE");
+        assert_eq!(attachment_size_limit(), DEFAULT_MAX_IMAGE_BYTES);
+        for ignored in ["0", "-1", "not-an-integer"] {
+            std::env::set_var("MLFLOW_TRACE_MAX_ATTACHMENT_SIZE", ignored);
+            assert_eq!(attachment_size_limit(), DEFAULT_MAX_IMAGE_BYTES);
+        }
+        std::env::set_var("MLFLOW_TRACE_MAX_ATTACHMENT_SIZE", "17");
+        assert_eq!(attachment_size_limit(), 17);
+        std::env::remove_var("MLFLOW_TRACE_MAX_ATTACHMENT_SIZE");
+    }
+
+    #[test]
+    fn image_turn_tags_are_not_serialized_and_prune_with_tool_pairs() {
+        let messages = vec![
+            json!({"role":"system","content":"judge"}),
+            json!({"role":"assistant","tool_calls":[
+                {"id":"call-image","function":{"name":"get_span_image","arguments":"{}"}},
+                {"id":"call-info","function":{"name":"get_trace_info","arguments":"{}"}},
+            ]}),
+            json!({"role":"tool","tool_call_id":"call-image","content":"image ack"}),
+            json!({"role":"tool","tool_call_id":"call-info","content":"trace info"}),
+            json!({
+                "role":"user",
+                "content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}],
+                (IMAGE_TURN_TOOL_CALL_ID):"call-image",
+            }),
+            json!({"role":"user","content":"keep"}),
+        ];
+        let wire = provider_messages(&messages);
+        assert!(wire[4].get(IMAGE_TURN_TOOL_CALL_ID).is_none());
+        assert_eq!(wire[2]["role"], "tool");
+        assert_eq!(wire[3]["role"], "tool");
+        assert_eq!(wire[4]["role"], "user");
+
+        let pruned = remove_oldest_tool_call_pair(&messages).unwrap();
+        assert_eq!(
+            pruned,
+            vec![
+                json!({"role":"system","content":"judge"}),
+                json!({"role":"user","content":"keep"}),
+            ]
+        );
+    }
 }

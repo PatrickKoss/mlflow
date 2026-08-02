@@ -8,8 +8,8 @@ use crate::store::{
     trace_info_id, trace_info_metadata, trace_info_timestamp, TraceRecord, TrackingClient,
 };
 use crate::{
-    EngineError, EvaluationConfig, EvaluationEngine, NamedScorer, RateConfig, SerializedScorer,
-    WorkerRequest,
+    EngineError, EvaluationConfig, EvaluationEngine, NamedScorer, RateConfig, ScorerExecutor,
+    SerializedScorer, WorkerRequest,
 };
 
 pub(crate) const TRACE_CHECKPOINT_TAG: &str = "mlflow.latestOnlineScoring.trace.checkpoint";
@@ -376,7 +376,10 @@ async fn score_and_log(
             && std::env::var("MLFLOW_GENAI_EVAL_ENABLE_SCORER_TRACING")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("true") || value == "1"),
     };
-    let engine = EvaluationEngine::new(config.clone())?;
+    let engine = EvaluationEngine::with_executor(
+        config.clone(),
+        ScorerExecutor::new().with_tracking_client(client.clone()),
+    )?;
     let mut result = engine.score_item(&trace.eval_item, &named).await;
     if let Some(session_id) = online_session_id {
         for assessment in &mut result.assessments {

@@ -1875,6 +1875,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "chrono",
  "fancy-regex",
  "futures",
