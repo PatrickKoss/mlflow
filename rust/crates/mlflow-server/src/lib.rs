@@ -268,6 +268,17 @@ fn register_proto_routes(state: AppState, artifacts_only: bool) -> Router {
     for spec in mlflow_proto::ROUTE_TABLE {
         // In artifacts-only mode, only the artifact proxy service is served.
         if artifacts_only && spec.service != "MlflowArtifactsService" {
+            if spec.service == "MlflowService"
+                && spec.method == "createPresignedDownloadUrl"
+                && spec.http_method == "POST"
+            {
+                for route in spec.expand("") {
+                    router = router.route(
+                        &to_axum_path(&route.path),
+                        axum::routing::post(artifacts::artifacts_only_disabled_presigned_download),
+                    );
+                }
+            }
             continue;
         }
         let Some(handler) = handler_for(spec.service, spec.method, spec.http_method) else {
@@ -645,6 +656,9 @@ fn handler_for(service: &str, method: &str, http_method: &str) -> Option<MethodR
     }
     if service == "MlflowService" {
         let prompt_optimization = match (method, http_method) {
+            ("createPresignedDownloadUrl", "POST") => {
+                Some(post(artifacts::create_presigned_download_url))
+            }
             ("createPromptOptimizationJob", "POST") => {
                 Some(post(prompt_optimization::create_prompt_optimization_job))
             }

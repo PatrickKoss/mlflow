@@ -14,6 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
+use futures::StreamExt as _;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Method, Request, StatusCode};
@@ -195,6 +196,7 @@ struct HttpResponse {
     body: Vec<u8>,
     content_type: Option<String>,
     content_disposition: Option<String>,
+    content_type_options: Option<String>,
 }
 
 impl HttpResponse {
@@ -240,12 +242,18 @@ async fn send_bytes(
                     .get("content-disposition")
                     .and_then(|v| v.to_str().ok())
                     .map(str::to_string);
+                let content_type_options = res
+                    .headers()
+                    .get("x-content-type-options")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
                 let bytes = res.into_body().collect().await.unwrap().to_bytes();
                 return HttpResponse {
                     status,
                     body: bytes.to_vec(),
                     content_type,
                     content_disposition,
+                    content_type_options,
                 };
             }
             Err(e) => {
@@ -427,7 +435,7 @@ async fn proxy_upload_list_download_delete_roundtrip() {
         )
         .await;
         assert_eq!(res.status, StatusCode::OK, "{}", res.text());
-        assert_eq!(res.text(), "{}");
+        assert_eq!(res.text(), "");
         assert!(server.dest_file(&art).exists());
 
         // List the parent dir (basenames).
@@ -449,6 +457,11 @@ async fn proxy_upload_list_download_delete_roundtrip() {
         assert_eq!(res.status, StatusCode::OK, "{}", res.text());
         assert_eq!(res.text(), "payload-bytes");
         assert_eq!(res.content_type.as_deref(), Some("text/plain"));
+        assert_eq!(
+            res.content_disposition.as_deref(),
+            Some(format!("attachment; filename={key}.txt").as_str())
+        );
+        assert_eq!(res.content_type_options.as_deref(), Some("nosniff"));
 
         // Delete.
         let res = send_bytes(
@@ -497,7 +510,8 @@ async fn s3_proxy_roundtrip_and_multipart_lifecycle() {
         uniq()
     );
     let server =
-        TestServer::start_with_destination("s3_proxy", true, false, Some(destination)).await;
+        TestServer::start_with_destination("s3_proxy", true, false, Some(destination.clone()))
+            .await;
 
     let artifact = "ordinary/nested.txt";
     let upload = send_bytes(
@@ -590,6 +604,57 @@ async fn s3_proxy_roundtrip_and_multipart_lifecycle() {
     .await;
     assert_eq!(joined.body.len(), 5 * 1024 * 1024 + 3);
 
+    // Tracking-service presigned download for a direct S3-backed run.
+    let experiment = post(
+        &server,
+        "/api/2.0/mlflow/experiments/create",
+        &serde_json::json!({
+            "name": format!("presigned-direct-{}", uniq()),
+            "artifact_location": format!("{destination}/direct")
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(experiment.status, StatusCode::OK, "{}", experiment.text());
+    let experiment_id = experiment.json()["experiment_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let run = post(
+        &server,
+        "/api/2.0/mlflow/runs/create",
+        &serde_json::json!({"experiment_id": experiment_id, "start_time": 1}).to_string(),
+    )
+    .await;
+    assert_eq!(run.status, StatusCode::OK, "{}", run.text());
+    let run_json = run.json();
+    let run_id = run_json["run"]["info"]["run_id"].as_str().unwrap();
+    let artifact_uri = run_json["run"]["info"]["artifact_uri"].as_str().unwrap();
+    let direct_repo = mlflow_artifacts::factory::repo_from_uri(artifact_uri).unwrap();
+    direct_repo
+        .put(
+            "model.bin",
+            futures::stream::once(async {
+                Ok::<_, mlflow_error::MlflowError>(Bytes::from_static(b"direct-presigned"))
+            })
+            .boxed(),
+        )
+        .await
+        .unwrap();
+    let presigned = post(
+        &server,
+        "/api/2.0/mlflow/artifacts/presigned-download-url",
+        &serde_json::json!({"run_id": run_id, "path": "model.bin", "expiration": 60}).to_string(),
+    )
+    .await;
+    assert_eq!(presigned.status, StatusCode::OK, "{}", presigned.text());
+    assert_eq!(presigned.json()["file_size"], 16);
+    assert!(presigned.json().get("headers").is_none());
+    let direct = reqwest::get(presigned.json()["presigned_url"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(direct.bytes().await.unwrap().as_ref(), b"direct-presigned");
+
     let aborted = post(
         &server,
         "/api/2.0/mlflow-artifacts/mpu/create/multipart",
@@ -664,6 +729,169 @@ async fn proxy_disabled_returns_503() {
         "{}",
         res.text()
     );
+    assert_eq!(
+        res.json(),
+        serde_json::json!({
+            "detail": "Artifact serving is disabled. Run `mlflow server` with `--serve-artifacts` to enable."
+        })
+    );
+}
+
+#[tokio::test]
+async fn native_proxy_download_directory_and_upload_trailing_slash_use_fastapi_errors() {
+    let server = TestServer::start("native_errors", true).await;
+    std::fs::create_dir_all(server.dest_file("directory")).unwrap();
+
+    let res = get(&server, "/api/2.0/mlflow-artifacts/artifacts/directory").await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "{}", res.text());
+    assert_eq!(
+        res.json(),
+        serde_json::json!({
+            "detail": "Artifact path refers to a directory, not a file: 'directory'"
+        })
+    );
+
+    let res = send_bytes(
+        &server,
+        Method::PUT,
+        "/ajax-api/2.0/mlflow-artifacts/artifacts/nested/",
+        Some(b"data".to_vec()),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "{}", res.text());
+    assert_eq!(
+        res.json(),
+        serde_json::json!({
+            "detail": "Artifact path must include a filename (cannot end with '/')."
+        })
+    );
+}
+
+#[tokio::test]
+async fn native_proxy_local_download_supports_byte_ranges() {
+    let server = TestServer::start("native_range", true).await;
+    let path = server.dest_file("range/data.txt");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"0123456789").unwrap();
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/api/2.0/mlflow-artifacts/artifacts/range/data.txt",
+            server.base
+        ))
+        .header(reqwest::header::RANGE, "bytes=2-5")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_RANGE],
+        "bytes 2-5/10"
+    );
+    assert_eq!(response.headers()[reqwest::header::ACCEPT_RANGES], "bytes");
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_TYPE],
+        "text/plain"
+    );
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_DISPOSITION],
+        "attachment; filename=data.txt"
+    );
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"2345");
+}
+
+#[tokio::test]
+async fn create_presigned_download_url_validates_before_repo_resolution() {
+    let server = TestServer::start("presigned_validation", true).await;
+    let endpoint = "/api/2.0/mlflow/artifacts/presigned-download-url";
+
+    for (body, expected) in [
+        (
+            r#"{"path":"model.pkl"}"#,
+            "Missing value for required parameter 'run_id'.",
+        ),
+        (
+            r#"{"run_id":"","path":"model.pkl"}"#,
+            "Missing value for required parameter 'run_id'.",
+        ),
+        (
+            r#"{"run_id":"missing","path":""}"#,
+            "Missing value for required parameter 'path'.",
+        ),
+        (r#"{"run_id":"missing","path":"../secret"}"#, "Invalid path"),
+        (
+            r#"{"run_id":"missing","path":"model.pkl","expiration":0}"#,
+            "expiration must be between 1 and 604800 seconds (got 0).",
+        ),
+        (
+            r#"{"run_id":"missing","path":"model.pkl","expiration":604801}"#,
+            "expiration must be between 1 and 604800 seconds (got 604801).",
+        ),
+    ] {
+        let res = post(&server, endpoint, body).await;
+        assert_eq!(res.status, StatusCode::BAD_REQUEST, "{}", res.text());
+        assert!(res.text().contains(expected), "{}", res.text());
+    }
+
+    for expiration in [1, 604_800] {
+        let res = post(
+            &server,
+            endpoint,
+            &format!(r#"{{"run_id":"missing","path":"model.pkl","expiration":{expiration}}}"#),
+        )
+        .await;
+        assert_eq!(res.status, StatusCode::NOT_FOUND, "{}", res.text());
+    }
+}
+
+#[tokio::test]
+async fn create_presigned_download_url_rejects_local_and_proxied_run_repositories() {
+    let server = TestServer::start("presigned_repos", true).await;
+    let (local_run, _) = create_run(&server).await;
+    let endpoint = "/ajax-api/2.0/mlflow/artifacts/presigned-download-url";
+    let res = post(
+        &server,
+        endpoint,
+        &format!(r#"{{"run_id":"{local_run}","path":"model.pkl"}}"#),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::NOT_IMPLEMENTED, "{}", res.text());
+    assert!(res
+        .text()
+        .contains("Presigned download is not supported for the current artifact repository"));
+
+    let exp = post(
+        &server,
+        "/api/2.0/mlflow/experiments/create",
+        &format!(
+            r#"{{"name":"proxied_{}","artifact_location":"mlflow-artifacts:/proxy-root"}}"#,
+            uniq()
+        ),
+    )
+    .await;
+    assert_eq!(exp.status, StatusCode::OK, "{}", exp.text());
+    let exp_id = exp.json()["experiment_id"].as_str().unwrap().to_string();
+    let run = post(
+        &server,
+        "/api/2.0/mlflow/runs/create",
+        &format!(r#"{{"experiment_id":"{exp_id}","start_time":1}}"#),
+    )
+    .await;
+    let run_id = run.json()["run"]["info"]["run_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let res = post(
+        &server,
+        endpoint,
+        &format!(r#"{{"run_id":"{run_id}","path":"model.pkl"}}"#),
+    )
+    .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST, "{}", res.text());
+    assert!(res.text().contains(
+        "Presigned download is not supported for runs with proxied artifact storage (artifact URI scheme: mlflow-artifacts)."
+    ));
 }
 
 // ===========================================================================
@@ -847,9 +1075,9 @@ async fn proxy_download_large_file_is_memory_bounded() {
 
 // ===========================================================================
 // --artifacts-only mode (plan T11.1): only the artifact proxy surface + the
-// root /get-artifact and /upload-artifact endpoints are registered; tracking
-// RPCs are omitted (Python returns 503 via _disable_if_artifacts_only, the Rust
-// server does not register the route at all -> 404).
+// root /get-artifact and /upload-artifact endpoints are registered. The
+// presigned-download tracking RPC is explicitly retained to reproduce Python's
+// `_disable_if_artifacts_only` 503 response; unrelated tracking RPCs stay 404.
 // ===========================================================================
 
 #[tokio::test]
@@ -873,4 +1101,23 @@ async fn artifacts_only_serves_proxy_but_not_tracking() {
     // mode, so it 404s (route absent) rather than executing.
     let res = get(&server, "/api/2.0/mlflow/experiments/search").await;
     assert_eq!(res.status, StatusCode::NOT_FOUND, "{}", res.text());
+
+    for prefix in ["/api/2.0", "/ajax-api/2.0"] {
+        let path = format!("{prefix}/mlflow/artifacts/presigned-download-url");
+        let res = post(&server, &path, r#"{"run_id":"x","path":"x"}"#).await;
+        assert_eq!(
+            res.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{}",
+            res.text()
+        );
+        assert_eq!(
+            res.text(),
+            format!(
+                "Endpoint: {path} disabled due to the mlflow server running in \
+                 `--artifacts-only` mode. To enable tracking server functionality, run \
+                 `mlflow server` without `--artifacts-only`"
+            )
+        );
+    }
 }

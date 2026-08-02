@@ -1,0 +1,5 @@
+cases:
+  - name: server_info_artifact_serving_disabled
+    method: GET
+    path: /api/3.0/mlflow/server-info
+    expect_status: 200

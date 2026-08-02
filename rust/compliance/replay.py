@@ -138,6 +138,9 @@ class DualServers:
         unset_env: set[str] | None = None,
         python_app: str = "mlflow.server:app",
         python_asgi_app: str | None = None,
+        serve_artifacts: bool = True,
+        artifacts_only: bool = False,
+        configure_artifacts_destination: bool = True,
     ) -> None:
         self.workdir = workdir
         self.seed_db = seed_db
@@ -152,6 +155,9 @@ class DualServers:
         # `tests/server/auth/test_auth.py`'s `app="mlflow.server.auth:create_app"`.
         self.python_app = python_app
         self.python_asgi_app = python_asgi_app
+        self.serve_artifacts = serve_artifacts
+        self.artifacts_only = artifacts_only
+        self.configure_artifacts_destination = configure_artifacts_destination
         self.python: ServerHandle | None = None
         self.rust: ServerHandle | None = None
 
@@ -169,13 +175,16 @@ class DualServers:
             # Without them the Python side 404s every /mlflow-artifacts route
             # and the whole artifacts section reads as a status mismatch.
             # Harmless for the Rust process, which reads CLI flags only.
-            SERVE_ARTIFACTS_ENV_VAR: "true",
-            ARTIFACTS_DESTINATION_ENV_VAR: str(art),
+            SERVE_ARTIFACTS_ENV_VAR: str(self.serve_artifacts).lower(),
             **self.extra_env,
             **(self.python_extra_env if name == "python" else self.rust_extra_env),
         }
         for variable in self.unset_env:
             env.pop(variable, None)
+        if self.configure_artifacts_destination:
+            env[ARTIFACTS_DESTINATION_ENV_VAR] = str(art)
+        if self.artifacts_only:
+            env["_MLFLOW_SERVER_ARTIFACTS_ONLY"] = "true"
         if name == "python" and "MLFLOW_SERVER_ENABLE_JOB_EXECUTION" in self.python_extra_env:
             # The invoke handlers construct MlflowClient/fluent APIs inside the
             # server process. The real `mlflow server` launcher pins those calls
@@ -229,6 +238,13 @@ class DualServers:
         rust_port = _free_port()
         rust_bin = _resolve_rust_server_bin()
         rust_cmd = _rust_server_cmd(rust_bin, rust_port, f"sqlite:///{rust_db}", str(rust_art))
+        if not self.serve_artifacts:
+            rust_cmd[rust_cmd.index("--serve-artifacts")] = "--no-serve-artifacts"
+        if not self.configure_artifacts_destination:
+            destination_index = rust_cmd.index("--artifacts-destination")
+            del rust_cmd[destination_index : destination_index + 2]
+        if self.artifacts_only:
+            rust_cmd.append("--artifacts-only")
         self.rust = self._boot("rust", rust_cmd, f"sqlite:///{rust_db}", rust_art)
         return self
 
@@ -734,7 +750,7 @@ Deliberately deferred to follow-up (documented, not covered here): assessments
 FieldMask update paths (3.9) beyond create/get; trace artifact fetch dispatch
 on spansLocation (3.10); tracing V2 deprecated adapters (3.7) beyond the search
 smoke; queryTraceMetrics / calculateTraceFilterCorrelation aggregations (3.6);
-multipart artifact create/complete/abort + presigned URLs (3.11); full RBAC
+multipart artifact create/complete/abort (3.11); full RBAC
 role/permission matrix and after-request search filtering (3.16); workspace
 delete modes RESTRICT/CASCADE/SET_DEFAULT (3.17). These are enumerated as the
 extensibility backlog for the corpus.
@@ -1017,6 +1033,38 @@ def _run_gateway_proxy_validation_section(
         return [run_case(case, servers, py_bindings, rust_bindings, allow, creds) for case in cases]
 
 
+def _run_deployment_section(
+    cases: list[Case],
+    allow: list[AllowEntry],
+    workroot: Path,
+    *,
+    serve_artifacts: bool = True,
+    artifacts_only: bool = False,
+    configure_artifacts_destination: bool = True,
+    extra_env: dict[str, str] | None = None,
+    python_asgi_app: str | None = None,
+) -> list[CaseResult]:
+    """Run a corpus section under deployment flags that differ from the default pair."""
+    seed_db = workroot / "seed.db"
+    _seed_tracking_db(seed_db)
+    artifact_root = workroot / "artifacts"
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    with DualServers(
+        workroot,
+        seed_db,
+        artifact_root,
+        extra_env={"MLFLOW_SERVER_ENABLE_JOB_EXECUTION": "false", **(extra_env or {})},
+        python_asgi_app=python_asgi_app,
+        serve_artifacts=serve_artifacts,
+        artifacts_only=artifacts_only,
+        configure_artifacts_destination=configure_artifacts_destination,
+    ) as servers:
+        py_bindings: dict[str, Any] = {}
+        rust_bindings: dict[str, Any] = {}
+        creds: dict[str, tuple[str, str]] = {}
+        return [run_case(case, servers, py_bindings, rust_bindings, allow, creds) for case in cases]
+
+
 # ---------------------------------------------------------------------------
 # Entry point.
 # ---------------------------------------------------------------------------
@@ -1045,11 +1093,79 @@ def main() -> int:
     traces_cases = sections.pop("traces", [])
     gateway_proxy_validation_cases = sections.pop("gateway_proxy_validation", [])
     mcp_server_registry_cases = sections.pop("mcp_server_registry", [])
+    artifacts_cases = sections.pop("artifacts", [])
+    artifacts_disabled_cases = sections.pop("artifacts_native_disabled", [])
+    artifacts_unconfigured_cases = sections.pop("artifacts_native_unconfigured", [])
+    server_info_no_artifacts_cases = sections.pop("server_info_no_artifacts", [])
+    presigned_artifacts_only_cases = sections.pop("presigned_download_artifacts_only", [])
+    presigned_bad_env_cases = sections.pop("presigned_download_bad_env", [])
 
     all_results: list[CaseResult] = []
     if sections:
         with tempfile.TemporaryDirectory(prefix="t124-sqlite-") as td:
             all_results.extend(_run_sqlite_sections(sections, allow, Path(td)))
+    if artifacts_cases:
+        with tempfile.TemporaryDirectory(prefix="mlflow-t124-artifacts-") as td:
+            all_results.extend(
+                _run_deployment_section(
+                    artifacts_cases,
+                    allow,
+                    Path(td),
+                    python_asgi_app="mlflow.server.fastapi_app:app",
+                )
+            )
+    if artifacts_disabled_cases:
+        with tempfile.TemporaryDirectory(prefix="mlflow-t124-artifacts-disabled-") as td:
+            all_results.extend(
+                _run_deployment_section(
+                    artifacts_disabled_cases,
+                    allow,
+                    Path(td),
+                    serve_artifacts=False,
+                    python_asgi_app="mlflow.server.fastapi_app:app",
+                )
+            )
+    if artifacts_unconfigured_cases:
+        with tempfile.TemporaryDirectory(prefix="mlflow-t124-artifacts-unconfigured-") as td:
+            all_results.extend(
+                _run_deployment_section(
+                    artifacts_unconfigured_cases,
+                    allow,
+                    Path(td),
+                    configure_artifacts_destination=False,
+                    python_asgi_app="mlflow.server.fastapi_app:app",
+                )
+            )
+    if server_info_no_artifacts_cases:
+        with tempfile.TemporaryDirectory(prefix="mlflow-t124-server-info-off-") as td:
+            all_results.extend(
+                _run_deployment_section(
+                    server_info_no_artifacts_cases,
+                    allow,
+                    Path(td),
+                    serve_artifacts=False,
+                )
+            )
+    if presigned_artifacts_only_cases:
+        with tempfile.TemporaryDirectory(prefix="mlflow-t124-presigned-artifacts-only-") as td:
+            all_results.extend(
+                _run_deployment_section(
+                    presigned_artifacts_only_cases,
+                    allow,
+                    Path(td),
+                    artifacts_only=True,
+                )
+            )
+    if presigned_bad_env_cases:
+        with tempfile.TemporaryDirectory(prefix="mlflow-t124-presigned-bad-env-") as td:
+            all_results.extend(
+                _run_deployment_section(
+                    presigned_bad_env_cases,
+                    allow,
+                    Path(td),
+                    extra_env={"MLFLOW_PRESIGNED_DOWNLOAD_URL_TTL_SECONDS": "604801"},
+                )
+            )
     if invoke_cases:
         with tempfile.TemporaryDirectory(prefix="t124-invoke-") as td:
             all_results.extend(_run_sqlite_sections({"invoke": invoke_cases}, allow, Path(td)))

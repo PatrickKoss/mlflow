@@ -35,7 +35,8 @@
 use std::collections::HashMap;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{MatchedPath, Path, State};
+use axum::extract::{MatchedPath, OriginalUri, Path, State};
+use axum::http::header::{self, HeaderValue};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -44,7 +45,10 @@ use mlflow_error::{ErrorCode, MlflowError};
 use mlflow_proto::mlflow as pb;
 use mlflow_proto::mlflow::artifacts as art_pb;
 
-use crate::proto_http::{parse_query_pairs, parse_request_with_path_params, proto_response};
+use crate::proto_http::{
+    parse_query_pairs, parse_request_lenient, parse_request_with_path_params, proto_response,
+};
+use crate::schema_validation::{SchemaEntry, Validator};
 use crate::state::{proxied_run_artifact_destination_path, AppState};
 use crate::workspace::Workspace;
 
@@ -55,6 +59,21 @@ pub(crate) const MAX_UPLOAD_ARTIFACT_BYTES: usize = 10 * 1024 * 1024;
 /// Cap for the proxy multipart control-message bodies (create/complete/abort).
 /// Artifact bytes never pass through here — they stream via `proxy_upload`.
 const MAX_CONTROL_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+const PRESIGNED_DOWNLOAD_SCHEMA: &[SchemaEntry] = &[
+    SchemaEntry {
+        param: "run_id",
+        validators: &[Validator::Required, Validator::String],
+    },
+    SchemaEntry {
+        param: "path",
+        validators: &[Validator::Required, Validator::String],
+    },
+    SchemaEntry {
+        param: "expiration",
+        validators: &[Validator::IntLike],
+    },
+];
 
 // ===========================================================================
 // T5.1 — GET /get-artifact
@@ -410,6 +429,85 @@ pub(crate) async fn list_artifacts_at(
     }
 }
 
+/// `POST /mlflow/artifacts/presigned-download-url`.
+pub async fn create_presigned_download_url(
+    State(state): State<AppState>,
+    workspace: Workspace,
+    parts: Parts,
+    body: Bytes,
+) -> Result<Response, MlflowError> {
+    let req: pb::CreatePresignedDownloadUrl = parse_request_lenient(
+        &parts,
+        &body,
+        "mlflow.CreatePresignedDownloadUrl",
+        PRESIGNED_DOWNLOAD_SCHEMA,
+    )?;
+    let run_id = req.run_id.unwrap_or_default();
+    let path = mlflow_artifacts::validate_path_is_safe(&req.path.unwrap_or_default())?;
+    let expiration = match req.expiration {
+        Some(value) => value,
+        None => mlflow_artifacts::presigned_download_ttl_seconds()?,
+    };
+    if !(1..=604_800).contains(&expiration) {
+        return Err(MlflowError::invalid_parameter_value(format!(
+            "expiration must be between 1 and 604800 seconds (got {expiration})."
+        )));
+    }
+
+    let run = state
+        .tracking_store()
+        .get_run(workspace.name(), &run_id)
+        .await?;
+    let artifact_uri = run.info.artifact_uri.unwrap_or_default();
+    let scheme = artifact_uri_scheme(&artifact_uri);
+    if matches!(
+        scheme.as_deref(),
+        Some("http" | "https" | "mlflow-artifacts")
+    ) {
+        return Err(MlflowError::invalid_parameter_value(format!(
+            "Presigned download is not supported for runs with proxied artifact storage \
+             (artifact URI scheme: {}). This endpoint requires a run with a direct cloud \
+             storage artifact URI.",
+            scheme.unwrap()
+        )));
+    }
+
+    let repo = mlflow_artifacts::factory::repo_from_uri(&artifact_uri)?;
+    if !repo.supports_multipart_download() {
+        return Err(MlflowError::not_implemented(
+            "Presigned download is not supported for the current artifact repository",
+        ));
+    }
+    let presigned = repo
+        .get_download_presigned_url(&path, expiration as u64)
+        .await?;
+    proto_response(
+        &pb::create_presigned_download_url::Response {
+            presigned_url: Some(presigned.url),
+            headers: presigned.headers.into_iter().collect(),
+            file_size: presigned.file_size,
+        },
+        "mlflow.CreatePresignedDownloadUrl.Response",
+    )
+}
+
+/// `_disable_if_artifacts_only` response for the presigned-download tracking
+/// RPC. Other historical tracking routes remain absent in artifacts-only mode;
+/// this new contract is registered explicitly so it returns upstream's 503.
+pub async fn artifacts_only_disabled_presigned_download(OriginalUri(uri): OriginalUri) -> Response {
+    let body = format!(
+        "Endpoint: {} disabled due to the mlflow server running in `--artifacts-only` mode. \
+         To enable tracking server functionality, run `mlflow server` without \
+         `--artifacts-only`",
+        uri.path()
+    );
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(Body::from(body))
+        .expect("valid response")
+}
+
 // ===========================================================================
 // T5.2 — MlflowArtifactsService proxy (gated by --serve-artifacts)
 // ===========================================================================
@@ -438,13 +536,36 @@ pub async fn proxy_download(
     parts: Parts,
 ) -> Response {
     if !state.serve_artifacts() {
-        return disabled_response(&parts);
+        return fastapi_detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Artifact serving is disabled. Run `mlflow server` with `--serve-artifacts` to enable.",
+        );
+    }
+    if state.artifacts_destination().is_none() {
+        return fastapi_detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Artifact serving is not configured.",
+        );
     }
     let repo = match state.proxied_artifacts_repo() {
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    // `send_artifact_response` validates the path and streams with headers.
+    let safe_path = match mlflow_artifacts::validate_path_is_safe(&artifact_path) {
+        Ok(path) => path,
+        Err(error) => return error.into_response(),
+    };
+    if let Some(local_path) = repo.local_path(&safe_path) {
+        return local_file_response(
+            &local_path,
+            &safe_path,
+            parts
+                .headers
+                .get(header::RANGE)
+                .and_then(|value| value.to_str().ok()),
+        )
+        .await;
+    }
     mlflow_artifacts::send_artifact_response(repo.as_ref(), &artifact_path).await
 }
 
@@ -454,15 +575,30 @@ pub async fn proxy_download(
 pub async fn proxy_upload(
     State(state): State<AppState>,
     Path(artifact_path): Path<String>,
-    parts: Parts,
+    _parts: Parts,
     body: Body,
 ) -> Response {
     if !state.serve_artifacts() {
-        return disabled_response(&parts);
+        return fastapi_detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Artifact serving is disabled. Run `mlflow server` with `--serve-artifacts` to enable.",
+        );
+    }
+    if state.artifacts_destination().is_none() {
+        return fastapi_detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Artifact serving is not configured.",
+        );
     }
     let result = async {
         let repo = state.proxied_artifacts_repo()?;
         let safe = mlflow_artifacts::validate_path_is_safe(&artifact_path)?;
+        if safe.ends_with('/') {
+            return Ok::<_, MlflowError>(Some(fastapi_detail(
+                StatusCode::BAD_REQUEST,
+                "Artifact path must include a filename (cannot end with '/').",
+            )));
+        }
         let stream = body
             .into_data_stream()
             .map(|chunk| {
@@ -470,14 +606,15 @@ pub async fn proxy_upload(
             })
             .boxed();
         repo.put(&safe, stream).await?;
-        Ok::<_, MlflowError>(())
+        Ok::<_, MlflowError>(None)
     }
     .await;
     match result {
-        Ok(()) => proto_json(
-            &art_pb::upload_artifact::Response {},
-            "mlflow.artifacts.UploadArtifact.Response",
-        ),
+        Ok(Some(response)) => response,
+        Ok(None) => Response::builder()
+            .status(StatusCode::OK)
+            .body(Body::empty())
+            .expect("valid response"),
         Err(e) => e.into_response(),
     }
 }
@@ -674,7 +811,15 @@ pub async fn proxy_presigned_download(
     let result = async {
         let repo = state.proxied_artifacts_repo()?;
         let path = mlflow_artifacts::validate_path_is_safe(&artifact_path)?;
+        if !repo.supports_multipart_download() {
+            return Err(MlflowError::not_implemented(
+                "Multipart download is not supported for the current artifact repository",
+            ));
+        }
         let ttl = mlflow_artifacts::presigned_download_ttl_seconds()?;
+        let ttl = u64::try_from(ttl).map_err(|_| {
+            MlflowError::internal_error(format!("Invalid presigned download expiration: {ttl}"))
+        })?;
         repo.get_download_presigned_url(&path, ttl).await
     }
     .await;
@@ -702,6 +847,170 @@ fn query_param(pairs: &[(String, String)], name: &str) -> Option<String> {
         .iter()
         .find(|(k, _)| k == name)
         .map(|(_, v)| v.clone())
+}
+
+fn artifact_uri_scheme(uri: &str) -> Option<String> {
+    let (scheme, _) = uri.split_once(':')?;
+    (!scheme.is_empty()
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+    .then(|| scheme.to_ascii_lowercase())
+}
+
+fn fastapi_detail(status: StatusCode, detail: &str) -> Response {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({"detail": detail}).to_string(),
+        ))
+        .expect("valid response")
+}
+
+async fn local_file_response(
+    path: &std::path::Path,
+    artifact_path: &str,
+    range_header: Option<&str>,
+) -> Response {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return MlflowError::resource_does_not_exist(format!(
+                "No such artifact: '{artifact_path}'"
+            ))
+            .into_response();
+        }
+        Err(error) => {
+            return MlflowError::internal_error(format!(
+                "Failed to inspect artifact '{}': {error}",
+                path.display()
+            ))
+            .into_response();
+        }
+    };
+    if metadata.is_dir() {
+        return fastapi_detail(
+            StatusCode::BAD_REQUEST,
+            &format!("Artifact path refers to a directory, not a file: '{artifact_path}'"),
+        );
+    }
+
+    let size = metadata.len();
+    let (status, start, end) = match parse_single_range(range_header, size) {
+        Ok(Some((start, end))) => (StatusCode::PARTIAL_CONTENT, start, end),
+        Ok(None) => (StatusCode::OK, 0, size.saturating_sub(1)),
+        Err(RangeError::Malformed) => {
+            return fastapi_detail(StatusCode::BAD_REQUEST, "Malformed Range header.");
+        }
+        Err(RangeError::Unsatisfiable) => {
+            let mut response = fastapi_detail(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "Requested Range Not Satisfiable",
+            );
+            response.headers_mut().insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes */{size}")).expect("valid range header"),
+            );
+            return response;
+        }
+    };
+    let length = if size == 0 { 0 } else { end - start + 1 };
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) => {
+            return MlflowError::internal_error(format!(
+                "Failed to open artifact '{}': {error}",
+                path.display()
+            ))
+            .into_response();
+        }
+    };
+    if let Err(error) = file.seek(std::io::SeekFrom::Start(start)).await {
+        return MlflowError::internal_error(format!(
+            "Failed to seek artifact '{}': {error}",
+            path.display()
+        ))
+        .into_response();
+    }
+    let stream = futures::stream::try_unfold((file, length), |(mut file, remaining)| async move {
+        if remaining == 0 {
+            return Ok::<_, std::io::Error>(None);
+        }
+        let mut chunk = vec![0; remaining.min(64 * 1024) as usize];
+        let read = file.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok(None);
+        }
+        chunk.truncate(read);
+        Ok(Some((Bytes::from(chunk), (file, remaining - read as u64))))
+    });
+    let filename = artifact_path.rsplit('/').next().unwrap_or(artifact_path);
+    let mut response = Response::builder()
+        .status(status)
+        .header(
+            header::CONTENT_TYPE,
+            mlflow_artifacts::mime::guess_mime_type(artifact_path),
+        )
+        .header(
+            header::CONTENT_DISPOSITION,
+            mlflow_artifacts::mime::content_disposition_attachment(filename),
+        )
+        .header("X-Content-Type-Options", "nosniff")
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, length)
+        .body(Body::from_stream(stream))
+        .expect("valid response");
+    if status == StatusCode::PARTIAL_CONTENT {
+        response.headers_mut().insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes {start}-{end}/{size}"))
+                .expect("valid range header"),
+        );
+    }
+    response
+}
+
+enum RangeError {
+    Malformed,
+    Unsatisfiable,
+}
+
+fn parse_single_range(value: Option<&str>, size: u64) -> Result<Option<(u64, u64)>, RangeError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.strip_prefix("bytes=").ok_or(RangeError::Malformed)?;
+    if value.contains(',') {
+        return Err(RangeError::Malformed);
+    }
+    let (start, end) = value.split_once('-').ok_or(RangeError::Malformed)?;
+    if size == 0 {
+        return Err(RangeError::Unsatisfiable);
+    }
+    if start.is_empty() {
+        let suffix: u64 = end.parse().map_err(|_| RangeError::Malformed)?;
+        if suffix == 0 {
+            return Err(RangeError::Unsatisfiable);
+        }
+        let start = size.saturating_sub(suffix);
+        return Ok(Some((start, size - 1)));
+    }
+    let start: u64 = start.parse().map_err(|_| RangeError::Malformed)?;
+    if start >= size {
+        return Err(RangeError::Unsatisfiable);
+    }
+    let end = if end.is_empty() {
+        size - 1
+    } else {
+        end.parse::<u64>().map_err(|_| RangeError::Malformed)?
+    };
+    if end < start {
+        return Err(RangeError::Unsatisfiable);
+    }
+    Ok(Some((start, end.min(size - 1))))
 }
 
 fn path_param(params: &HashMap<String, String>, name: &str) -> Result<String, MlflowError> {

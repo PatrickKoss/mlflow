@@ -104,6 +104,14 @@ fn spot_check_webhook_and_artifacts_endpoints() {
         "GET",
         "/api/2.0/mlflow-artifacts/artifacts/<path:artifact_path>"
     ));
+    assert!(has_route(
+        "POST",
+        "/api/2.0/mlflow/artifacts/presigned-download-url"
+    ));
+    assert!(has_route(
+        "POST",
+        "/ajax-api/2.0/mlflow/artifacts/presigned-download-url"
+    ));
 }
 
 #[test]

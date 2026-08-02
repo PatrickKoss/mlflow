@@ -328,6 +328,9 @@ async fn get_presigned_download_url(
     let result = async {
         let path = validate_path_is_safe(&artifact_path)?;
         let ttl = crate::presigned_download_ttl_seconds()?;
+        let ttl = u64::try_from(ttl).map_err(|_| {
+            MlflowError::internal_error(format!("Invalid presigned download expiration: {ttl}"))
+        })?;
         state.repo.get_download_presigned_url(&path, ttl).await
     }
     .await;

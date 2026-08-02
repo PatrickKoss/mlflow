@@ -1,0 +1,6 @@
+cases:
+  - name: presigned_download_artifacts_only_503
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: ignored, path: ignored}
+    expect_status: 503

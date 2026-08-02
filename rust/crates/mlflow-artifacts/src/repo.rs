@@ -59,6 +59,23 @@ pub struct ArtifactDownload {
 /// `Arc<dyn ArtifactRepo>` chosen at startup by [`factory::repo_from_uri`].
 #[async_trait::async_trait]
 pub trait ArtifactRepo: Send + Sync {
+    /// Whether this repository implements MLflow's multipart-upload mixin.
+    fn supports_multipart_upload(&self) -> bool {
+        false
+    }
+
+    /// Whether this repository implements MLflow's multipart-download mixin.
+    fn supports_multipart_download(&self) -> bool {
+        false
+    }
+
+    /// Resolve a repository-relative artifact to a local path when the backend
+    /// is local. Native artifact downloads use this to retain Starlette
+    /// `FileResponse` parity, including byte ranges.
+    fn local_path(&self, _path: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// Stream a single file at `path`. Errors `RESOURCE_DOES_NOT_EXIST` if
     /// absent (matching `LocalArtifactRepository._download_file`), or
     /// `INVALID_PARAMETER_VALUE` if `path` denotes a directory.
@@ -150,7 +167,7 @@ pub struct PresignedDownloadResult {
     pub file_size: Option<i64>,
 }
 
-pub fn presigned_download_ttl_seconds() -> Result<u64, MlflowError> {
+pub fn presigned_download_ttl_seconds() -> Result<i64, MlflowError> {
     match std::env::var("MLFLOW_PRESIGNED_DOWNLOAD_URL_TTL_SECONDS") {
         Ok(value) => value.parse().map_err(|error| {
             MlflowError::internal_error(format!(
@@ -177,11 +194,16 @@ pub struct ObjectStoreRepo {
     /// Prefix within the store that is this repo's artifact root (empty for the
     /// store root). All method paths are joined under this.
     root: ObjPath,
+    local_root: Option<std::path::PathBuf>,
 }
 
 impl ObjectStoreRepo {
     pub fn new(store: Arc<dyn ObjectStore>, root: ObjPath) -> Self {
-        Self { store, root }
+        Self {
+            store,
+            root,
+            local_root: None,
+        }
     }
 
     /// Join a repo-relative path onto the root, producing a full store path.
@@ -198,6 +220,10 @@ impl ObjectStoreRepo {
 
 #[async_trait::async_trait]
 impl ArtifactRepo for ObjectStoreRepo {
+    fn local_path(&self, path: &str) -> Option<std::path::PathBuf> {
+        self.local_root.as_ref().map(|root| root.join(path))
+    }
+
     async fn get(&self, path: &str) -> Result<ArtifactDownload, MlflowError> {
         let full = self.full_path(path);
         let result = match self.store.get_opts(&full, GetOptions::default()).await {
@@ -387,13 +413,23 @@ pub fn local_repo(artifact_dir: &std::path::Path) -> Result<ObjectStoreRepo, Mlf
             artifact_dir.display()
         ))
     })?;
-    let store = LocalFileSystem::new_with_prefix(artifact_dir).map_err(|e| {
+    let local_root = std::fs::canonicalize(artifact_dir).map_err(|e| {
+        MlflowError::internal_error(format!(
+            "Failed to resolve local artifact store at {}: {e}",
+            artifact_dir.display()
+        ))
+    })?;
+    let store = LocalFileSystem::new_with_prefix(&local_root).map_err(|e| {
         MlflowError::internal_error(format!(
             "Failed to open local artifact store at {}: {e}",
             artifact_dir.display()
         ))
     })?;
-    Ok(ObjectStoreRepo::new(Arc::new(store), ObjPath::default()))
+    Ok(ObjectStoreRepo {
+        store: Arc::new(store),
+        root: ObjPath::default(),
+        local_root: Some(local_root),
+    })
 }
 
 /// URI → repo resolution. Local paths / `file:` always resolve; `s3:` resolves
@@ -480,6 +516,37 @@ mod tests {
         let dl = repo.get("a/b/c.txt").await.unwrap();
         assert_eq!(dl.size, 11);
         assert_eq!(collect(dl).await, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn failed_stream_upload_does_not_publish_partial_artifact() {
+        let dir = TempDir::new().unwrap();
+        let repo = local_repo(dir.path()).unwrap();
+        repo.put("model.bin", body_from(b"existing")).await.unwrap();
+        let failing = stream::iter(vec![
+            Ok(Bytes::from_static(b"partial-new-content")),
+            Err(MlflowError::internal_error("stream failed")),
+        ])
+        .boxed();
+        assert!(repo.put("model.bin", failing).await.is_err());
+        assert_eq!(
+            collect(repo.get("model.bin").await.unwrap()).await,
+            b"existing"
+        );
+        assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains('#')));
+    }
+
+    #[test]
+    fn local_repo_reports_native_capabilities() {
+        let dir = TempDir::new().unwrap();
+        let repo = local_repo(dir.path()).unwrap();
+        assert!(!repo.supports_multipart_upload());
+        assert!(!repo.supports_multipart_download());
+        assert_eq!(repo.local_path("a/b"), Some(dir.path().join("a/b")));
     }
 
     #[tokio::test]

@@ -94,6 +94,10 @@ struct TestServer {
 
 impl TestServer {
     async fn start(tag: &str) -> Self {
+        Self::start_with_prefix(tag, None).await
+    }
+
+    async fn start_with_prefix(tag: &str, static_prefix: Option<&str>) -> Self {
         let tracking_db = TempDb::new(&format!("{tag}_track"), &tracking_fixture_path());
         let db = Db::connect(&tracking_db.uri(), PoolConfig::default())
             .await
@@ -111,7 +115,7 @@ impl TestServer {
         let config = ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
-            static_prefix: None,
+            static_prefix: static_prefix.map(str::to_string),
             backend_store_uri: None,
             default_artifact_root: None,
             serve_artifacts: true,
@@ -426,6 +430,75 @@ async fn model_version_create_source_read_denied_with_no_default() {
     )
     .await;
     assert_ne!(allowed.status, StatusCode::FORBIDDEN, "{}", allowed.body);
+}
+
+#[tokio::test]
+async fn presigned_download_routes_require_run_or_experiment_read() {
+    let srv = TestServer::start("nd_presigned").await;
+    let exp = srv.create_experiment("nd-presigned-exp").await;
+    let run = srv.create_run(&exp).await;
+    let (user, password) = srv.create_user("presigned_reader").await;
+
+    let rpc = "/api/2.0/mlflow/artifacts/presigned-download-url";
+    let denied = send(
+        &srv.base,
+        Method::POST,
+        rpc,
+        Some((&user, &password)),
+        Some(json!({"run_id": run, "path": "model.bin"})),
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN, "{}", denied.body);
+
+    let proxy =
+        format!("/ajax-api/2.0/mlflow-artifacts/presigned/{exp}/run-id/artifacts/model.bin");
+    let denied = send(
+        &srv.base,
+        Method::GET,
+        &proxy,
+        Some((&user, &password)),
+        None,
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN, "{}", denied.body);
+
+    srv.grant(&user, "experiment", &exp, "READ").await;
+    let allowed = send(
+        &srv.base,
+        Method::POST,
+        rpc,
+        Some((&user, &password)),
+        Some(json!({"run_id": run, "path": "model.bin"})),
+    )
+    .await;
+    assert_ne!(allowed.status, StatusCode::FORBIDDEN, "{}", allowed.body);
+    let allowed = send(
+        &srv.base,
+        Method::GET,
+        &proxy,
+        Some((&user, &password)),
+        None,
+    )
+    .await;
+    assert_ne!(allowed.status, StatusCode::FORBIDDEN, "{}", allowed.body);
+}
+
+#[tokio::test]
+async fn static_prefixed_presigned_proxy_route_is_authorized() {
+    let srv = TestServer::start_with_prefix("nd_presigned_static", Some("/mlflow")).await;
+    let exp = srv.create_experiment("nd-presigned-static-exp").await;
+    let (user, password) = srv.create_user("presigned_static_reader").await;
+    let path =
+        format!("/mlflow/api/2.0/mlflow-artifacts/presigned/{exp}/run-id/artifacts/model.bin");
+    let denied = send(
+        &srv.base,
+        Method::GET,
+        &path,
+        Some((&user, &password)),
+        None,
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN, "{}", denied.body);
 }
 
 #[tokio::test]

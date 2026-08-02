@@ -170,6 +170,7 @@ fn proto_validator(service: &str, method: &str) -> Option<Validator> {
         ("MlflowService", "deleteTag") => UpdateRun,
         ("MlflowService", "logParam") => UpdateRun,
         ("MlflowService", "getMetricHistory") => ReadRun,
+        ("MlflowService", "createPresignedDownloadUrl") => ReadRun,
         // ---- Prompt optimization jobs (inherit experiment) ----
         ("MlflowService", "createPromptOptimizationJob") => UpdateExperiment,
         ("MlflowService", "getPromptOptimizationJob") => ReadPromptOptimizationJob,
@@ -790,6 +791,8 @@ fn artifact_path_tail(path: &str) -> Option<String> {
         "/ajax-api/2.0/mlflow-artifacts/artifacts/",
         "/api/2.0/mlflow-artifacts/mpu/",
         "/ajax-api/2.0/mlflow-artifacts/mpu/",
+        "/api/2.0/mlflow-artifacts/presigned/",
+        "/ajax-api/2.0/mlflow-artifacts/presigned/",
     ] {
         if let Some(tail) = path.strip_prefix(prefix) {
             // mpu tails are `<action>/<experiment_id>/...`; drop the leading
@@ -815,11 +818,13 @@ fn find(routes: &[Route], path: &str, method: &str) -> Option<(Validator, Vec<(S
 /// `_is_proxy_artifact_path` (`__init__.py:2801`): the artifact-proxy download/
 /// upload/list/delete + multipart-upload paths, on both prefixes.
 pub fn is_proxy_artifact_path(path: &str) -> bool {
-    const PREFIXES: [&str; 4] = [
+    const PREFIXES: [&str; 6] = [
         "/api/2.0/mlflow-artifacts/artifacts",
         "/ajax-api/2.0/mlflow-artifacts/artifacts",
         "/api/2.0/mlflow-artifacts/mpu/",
         "/ajax-api/2.0/mlflow-artifacts/mpu/",
+        "/api/2.0/mlflow-artifacts/presigned/",
+        "/ajax-api/2.0/mlflow-artifacts/presigned/",
     ];
     PREFIXES.iter().any(|p| path.starts_with(p))
 }
@@ -1120,6 +1125,9 @@ mod tests {
         assert!(is_proxy_artifact_path(
             "/ajax-api/2.0/mlflow-artifacts/mpu/create/1/run/artifacts/model"
         ));
+        assert!(is_proxy_artifact_path(
+            "/api/2.0/mlflow-artifacts/presigned/1/run/artifacts/model"
+        ));
         assert!(!is_proxy_artifact_path("/api/2.0/mlflow/experiments/get"));
         // PUT upload dispatches to the update validator.
         assert_eq!(
@@ -1137,5 +1145,25 @@ mod tests {
             )),
             Validator::ReadExperimentArtifactProxy
         );
+        assert_eq!(
+            validator_of(dispatch_request(
+                "/ajax-api/2.0/mlflow-artifacts/presigned/1/run/artifacts/model",
+                "GET"
+            )),
+            Validator::ReadExperimentArtifactProxy
+        );
+    }
+
+    #[test]
+    fn presigned_download_rpc_reads_run() {
+        for prefix in ["/api/2.0", "/ajax-api/2.0"] {
+            assert_eq!(
+                validator_of(dispatch_request(
+                    &format!("{prefix}/mlflow/artifacts/presigned-download-url"),
+                    "POST"
+                )),
+                Validator::ReadRun
+            );
+        }
     }
 }

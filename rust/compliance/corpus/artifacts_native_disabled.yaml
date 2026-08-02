@@ -1,0 +1,12 @@
+# Native ASGI artifact routes when proxied artifact serving is disabled.
+cases:
+  - name: artifact_get_serving_disabled
+    method: GET
+    path: /api/2.0/mlflow-artifacts/artifacts/file.txt
+    expect_status: 503
+
+  - name: artifact_put_serving_disabled
+    method: PUT
+    path: /ajax-api/2.0/mlflow-artifacts/artifacts/file.txt
+    raw_body: "not written"
+    expect_status: 503

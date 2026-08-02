@@ -1,0 +1,119 @@
+# Tracking-service presigned download URL validation and repository dispatch.
+cases:
+  - name: presigned_create_local_experiment
+    method: POST
+    path: /api/2.0/mlflow/experiments/create
+    body: {name: presigned_local_experiment}
+    bind:
+      - {bind: presigned_local_experiment_id, from: $.experiment_id}
+    expect_status: 200
+
+  - name: presigned_create_local_run
+    method: POST
+    path: /api/2.0/mlflow/runs/create
+    body:
+      experiment_id: "${presigned_local_experiment_id}"
+      start_time: 1
+      run_name: presigned-local-run
+    bind:
+      - {bind: presigned_local_run_id, from: $.run.info.run_id}
+    expect_status: 200
+
+  - name: presigned_missing_run_id
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {path: model.pkl}
+    expect_status: 400
+
+  - name: presigned_blank_run_id
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: "", path: model.pkl}
+    expect_status: 400
+
+  - name: presigned_non_string_run_id
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: 123, path: model.pkl}
+    expect_status: 400
+
+  - name: presigned_missing_path
+    method: POST
+    path: /ajax-api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: "${presigned_local_run_id}"}
+    expect_status: 400
+
+  - name: presigned_blank_path
+    method: POST
+    path: /ajax-api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: "${presigned_local_run_id}", path: ""}
+    expect_status: 400
+
+  - name: presigned_non_string_path
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: "${presigned_local_run_id}", path: 123}
+    expect_status: 400
+
+  - name: presigned_unsafe_path
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: missing, path: ../secret}
+    expect_status: 400
+
+  - name: presigned_expiration_zero
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: missing, path: model.pkl, expiration: 0}
+    expect_status: 400
+
+  - name: presigned_expiration_too_large
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: missing, path: model.pkl, expiration: 604801}
+    expect_status: 400
+
+  - name: presigned_expiration_lower_bound_valid
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: "${presigned_local_run_id}", path: model.pkl, expiration: 1}
+    expect_status: 501
+
+  - name: presigned_expiration_upper_bound_valid
+    method: POST
+    path: /ajax-api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: "${presigned_local_run_id}", path: model.pkl, expiration: 604800}
+    expect_status: 501
+
+  - name: presigned_local_repo_not_implemented
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: "${presigned_local_run_id}", path: model.pkl}
+    expect_status: 501
+
+  - name: presigned_create_proxied_experiment
+    method: POST
+    path: /api/2.0/mlflow/experiments/create
+    body:
+      name: presigned_proxied_experiment
+      artifact_location: mlflow-artifacts:/presigned-proxy
+    bind:
+      - {bind: presigned_proxied_experiment_id, from: $.experiment_id}
+    expect_status: 200
+
+  - name: presigned_create_proxied_run
+    method: POST
+    path: /api/2.0/mlflow/runs/create
+    body:
+      experiment_id: "${presigned_proxied_experiment_id}"
+      start_time: 1
+      run_name: presigned-proxied-run
+    bind:
+      - {bind: presigned_proxied_run_id, from: $.run.info.run_id}
+    expect_status: 200
+
+  - name: presigned_proxied_run_rejected
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: "${presigned_proxied_run_id}", path: model.pkl}
+    expect_status: 400

@@ -7,6 +7,7 @@
 //! plus both URL prefixes and the exact `Content-Type`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -83,13 +84,24 @@ impl TestServer {
     /// optionally wiring an `AuthStore` and/or `WorkspaceStore` to exercise
     /// the deployment-flag matrix.
     async fn start(tag: &str, with_auth: bool, with_workspaces: bool) -> Self {
+        Self::start_with_repo(tag, with_auth, with_workspaces, false, None, None).await
+    }
+
+    async fn start_with_repo(
+        tag: &str,
+        with_auth: bool,
+        with_workspaces: bool,
+        serve_artifacts: bool,
+        repo: Option<Arc<dyn mlflow_artifacts::ArtifactRepo>>,
+        destination: Option<String>,
+    ) -> Self {
         let tracking_db = TempDb::new(&format!("{tag}_track"), &tracking_fixture_path());
         let db = Db::connect(&tracking_db.uri(), PoolConfig::default())
             .await
             .expect("connect tracking fixture");
         let store = TrackingStore::new(db.clone(), ART_ROOT);
 
-        let mut state = AppState::new(store);
+        let mut state = AppState::with_artifacts(store, serve_artifacts, repo, destination.clone());
 
         let auth_db_file = if with_auth {
             let auth_db_file = TempDb::new(&format!("{tag}_auth"), &auth_fixture_path());
@@ -113,8 +125,8 @@ impl TestServer {
             static_prefix: None,
             backend_store_uri: None,
             default_artifact_root: None,
-            serve_artifacts: true,
-            artifacts_destination: None,
+            serve_artifacts,
+            artifacts_destination: destination,
             allowed_hosts: None,
             cors_allowed_origins: None,
             x_frame_options: "SAMEORIGIN".to_string(),
@@ -214,12 +226,16 @@ fn assert_shape(resp: &HttpResponse, workspaces_enabled: bool) {
     assert_eq!(resp.json["store_type"], "SqlStore");
     assert_eq!(resp.json["workspaces_enabled"], workspaces_enabled);
     assert_eq!(resp.json["trace_archival_enabled"], false);
-    // Exactly three keys — no `auth_enabled`, no extras.
+    assert_eq!(resp.json["multipart_uploads_enabled"], false);
+    assert_eq!(resp.json["multipart_downloads_enabled"], false);
+    // Exactly the five upstream keys — no `auth_enabled`.
     let obj = resp.json.as_object().unwrap();
-    assert_eq!(obj.len(), 3);
+    assert_eq!(obj.len(), 5);
     assert!(obj.contains_key("store_type"));
     assert!(obj.contains_key("workspaces_enabled"));
     assert!(obj.contains_key("trace_archival_enabled"));
+    assert!(obj.contains_key("multipart_uploads_enabled"));
+    assert!(obj.contains_key("multipart_downloads_enabled"));
 }
 
 #[tokio::test]
@@ -284,8 +300,25 @@ async fn exact_byte_body_plain_deployment() {
     assert_eq!(resp.status, StatusCode::OK);
     assert_eq!(
         resp.body,
-        r#"{"store_type":"SqlStore","workspaces_enabled":false,"trace_archival_enabled":false}"#
+        r#"{"store_type":"SqlStore","workspaces_enabled":false,"trace_archival_enabled":false,"multipart_uploads_enabled":false,"multipart_downloads_enabled":false}"#
     );
+}
+
+#[tokio::test]
+async fn repository_resolution_failure_disables_both_capabilities() {
+    let srv = TestServer::start_with_repo(
+        "unresolved_capabilities",
+        false,
+        false,
+        true,
+        None,
+        Some("unsupported://destination".to_string()),
+    )
+    .await;
+    let resp = get(&srv.base, "/api/3.0/mlflow/server-info").await;
+    assert_eq!(resp.status, StatusCode::OK, "{}", resp.body);
+    assert_eq!(resp.json["multipart_uploads_enabled"], false);
+    assert_eq!(resp.json["multipart_downloads_enabled"], false);
 }
 
 #[tokio::test]
@@ -301,4 +334,29 @@ async fn only_get_is_registered() {
     let resp = client.request(req).await.expect("request");
     // axum returns 405 for a registered path hit with an unregistered method.
     assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn s3_proxy_advertises_both_multipart_capabilities() {
+    if std::env::var("MLFLOW_TEST_S3_ENDPOINT").is_err() {
+        eprintln!("skipped: MLFLOW_TEST_S3_ENDPOINT is unset");
+        return;
+    }
+    let bucket =
+        std::env::var("MLFLOW_TEST_S3_BUCKET").unwrap_or_else(|_| "mlflow-soak".to_string());
+    let destination = format!("s3://{bucket}/server-info-{}", std::process::id());
+    let repo = mlflow_artifacts::factory::repo_from_uri(&destination).unwrap();
+    let srv = TestServer::start_with_repo(
+        "s3_capabilities",
+        false,
+        false,
+        true,
+        Some(repo),
+        Some(destination),
+    )
+    .await;
+    let resp = get(&srv.base, "/api/3.0/mlflow/server-info").await;
+    assert_eq!(resp.status, StatusCode::OK, "{}", resp.body);
+    assert_eq!(resp.json["multipart_uploads_enabled"], true);
+    assert_eq!(resp.json["multipart_downloads_enabled"], true);
 }

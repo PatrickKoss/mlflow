@@ -1,0 +1,6 @@
+cases:
+  - name: presigned_download_out_of_range_environment_default
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: missing, path: model.pkl}
+    expect_status: 400

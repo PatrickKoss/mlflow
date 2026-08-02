@@ -290,6 +290,14 @@ impl S3ArtifactRepo {
 
 #[async_trait::async_trait]
 impl ArtifactRepo for S3ArtifactRepo {
+    fn supports_multipart_upload(&self) -> bool {
+        true
+    }
+
+    fn supports_multipart_download(&self) -> bool {
+        true
+    }
+
     async fn get(&self, path: &str) -> Result<ArtifactDownload, MlflowError> {
         self.inner.get(path).await
     }

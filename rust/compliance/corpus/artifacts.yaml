@@ -6,14 +6,14 @@ cases:
     method: PUT
     path: /api/2.0/mlflow-artifacts/artifacts/compliance/hello.txt
     raw_body: "hello from compliance harness"
-    compare_body: false
+    compare_body: true
     expect_status: 200
 
   - name: artifact_upload_second
     method: PUT
     path: /api/2.0/mlflow-artifacts/artifacts/compliance/nested/world.txt
     raw_body: "second file"
-    compare_body: false
+    compare_body: true
     expect_status: 200
 
   - name: artifact_list_root
@@ -24,8 +24,26 @@ cases:
   - name: artifact_download
     method: GET
     path: /api/2.0/mlflow-artifacts/artifacts/compliance/hello.txt
-    compare_body: false
+    compare_body: true
     expect_status: 200
+
+  - name: artifact_download_range
+    method: GET
+    path: /api/2.0/mlflow-artifacts/artifacts/compliance/hello.txt
+    headers: {Range: "bytes=0-4"}
+    compare_body: true
+    expect_status: 206
+
+  - name: artifact_download_directory
+    method: GET
+    path: /api/2.0/mlflow-artifacts/artifacts/compliance/nested
+    expect_status: 400
+
+  - name: artifact_upload_trailing_slash
+    method: PUT
+    path: /ajax-api/2.0/mlflow-artifacts/artifacts/compliance/new-directory/
+    raw_body: "must not be published"
+    expect_status: 400
 
   - name: artifact_download_missing
     method: GET

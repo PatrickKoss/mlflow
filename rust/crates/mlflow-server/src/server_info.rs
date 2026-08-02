@@ -6,12 +6,9 @@
 //! `_get_paths("/mlflow/server-info", version=3)`
 //! (`mlflow/server/handlers.py:6797-6802`), `["GET"]` only.
 //!
-//! Response shape (`jsonify({...})`, `handlers.py:6612-6616`) — exactly three
-//! fields, no more:
-//!
-//! ```json
-//! {"store_type": "SqlStore" | "FileStore" | null, "workspaces_enabled": bool, "trace_archival_enabled": bool}
-//! ```
+//! Response shape includes the proxied repository's multipart upload/download
+//! capabilities. Both are false when artifact serving is disabled or repository
+//! resolution is unavailable.
 //!
 //! `store_type` is `"FileStore"` / `"SqlStore"` / `None` depending on
 //! `isinstance(store, FileStore | SqlAlchemyStore)`. The Rust server has no
@@ -37,8 +34,8 @@
 //!
 //! There is deliberately **no** `auth_enabled` field: Python's `_get_server_info`
 //! does not emit one, and the UI's `ServerInfoResponse` interface
-//! (`mlflow/server/js/src/experiment-tracking/hooks/useServerInfo.tsx:9-13`)
-//! only declares `store_type` / `workspaces_enabled` / `trace_archival_enabled`.
+//! (`mlflow/server/js/src/experiment-tracking/hooks/useServerInfo.tsx`) consumes
+//! the fields exposed by this handler.
 //! The plan's D5 line ("auth, workspaces...") describes deployment-consistency
 //! intent, not a wire field — auth-gated UI reads a different signal (the
 //! authenticated-user/whoami surface), not `server-info`.
@@ -52,10 +49,25 @@ use crate::state::AppState;
 
 /// `_get_server_info` (`handlers.py:6586-6616`).
 pub async fn server_info(State(state): State<AppState>) -> impl IntoResponse {
+    let (multipart_uploads_enabled, multipart_downloads_enabled) = if state.serve_artifacts() {
+        state
+            .proxied_artifacts_repo()
+            .map(|repo| {
+                (
+                    repo.supports_multipart_upload(),
+                    repo.supports_multipart_download(),
+                )
+            })
+            .unwrap_or((false, false))
+    } else {
+        (false, false)
+    };
     let payload = json!({
         "store_type": "SqlStore",
         "workspaces_enabled": state.workspace_store().is_some(),
         "trace_archival_enabled": false,
+        "multipart_uploads_enabled": multipart_uploads_enabled,
+        "multipart_downloads_enabled": multipart_downloads_enabled,
     });
     json_ok(&payload)
 }

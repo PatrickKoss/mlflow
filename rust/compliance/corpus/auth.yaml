@@ -239,3 +239,93 @@ cases:
       sample_rate: 0.0
     auth: user
     expect_status: 200
+  - name: auth_admin_create_presigned_experiment
+    method: POST
+    path: /api/2.0/mlflow/experiments/create
+    body: {name: auth_presigned_experiment}
+    auth: admin
+    compare_body: false
+    bind:
+      - {bind: auth_presigned_experiment_id, from: $.experiment_id}
+    expect_status: 200
+
+  - name: auth_admin_create_presigned_run
+    method: POST
+    path: /api/2.0/mlflow/runs/create
+    body:
+      experiment_id: "${auth_presigned_experiment_id}"
+      start_time: 1
+      run_name: auth-presigned-run
+    auth: admin
+    compare_body: false
+    bind:
+      - {bind: auth_presigned_run_id, from: $.run.info.run_id}
+    expect_status: 200
+
+  - name: auth_user_presigned_rpc_read_granted
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: "${auth_presigned_run_id}", path: missing.txt}
+    auth: user
+    compare_body: false
+    expect_status: 501
+
+  - name: auth_user_presigned_proxy_read_granted
+    method: GET
+    path: /ajax-api/2.0/mlflow-artifacts/presigned/${auth_presigned_experiment_id}/missing.txt
+    auth: user
+    compare_body: false
+    expect_status: 501
+
+  - name: auth_admin_revoke_experiment_read
+    method: POST
+    path: /api/3.0/mlflow/users/permissions/revoke
+    body:
+      username: alice
+      resource_type: experiment
+      resource_id: "${auth_presigned_experiment_id}"
+    auth: admin
+    compare_body: false
+    expect_status: 200
+
+  - name: auth_user_presigned_rpc_read_denied
+    method: POST
+    path: /ajax-api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: "${auth_presigned_run_id}", path: missing.txt}
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_user_presigned_proxy_read_denied
+    method: GET
+    path: /api/2.0/mlflow-artifacts/presigned/${auth_presigned_experiment_id}/missing.txt
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_admin_restore_experiment_read
+    method: POST
+    path: /api/3.0/mlflow/users/permissions/grant
+    body:
+      username: alice
+      resource_type: experiment
+      resource_id: "${auth_presigned_experiment_id}"
+      permission: READ
+    auth: admin
+    compare_body: false
+    expect_status: 200
+
+  - name: auth_user_presigned_rpc_read_restored
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-download-url
+    body: {run_id: "${auth_presigned_run_id}", path: missing.txt}
+    auth: user
+    compare_body: false
+    expect_status: 501
+
+  - name: auth_user_presigned_proxy_read_restored
+    method: GET
+    path: /api/2.0/mlflow-artifacts/presigned/${auth_presigned_experiment_id}/missing.txt
+    auth: user
+    compare_body: false
+    expect_status: 501
