@@ -56,6 +56,12 @@ percent-encoding = "2.3.2"
 mime_guess = "2.0.5"
 async-trait = "0.1"
 
+# MinIO-backed S3 integration tests only build with the aws backend enabled;
+# plain `cargo test -p mlflow-artifacts` must stay green without it.
+[[test]]
+name = "s3_minio"
+required-features = ["aws"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tower = { workspace = true, features = ["util"] }
