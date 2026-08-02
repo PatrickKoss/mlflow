@@ -1,0 +1,180 @@
+cases:
+  - name: create_secret
+    method: POST
+    path: /api/3.0/mlflow/gateway/secrets/create
+    body:
+      secret_name: budget-conformance-secret
+      secret_value: {api_key: obvious-fake-budget-key}
+      provider: openai
+      auth_config: {api_base: "${provider_base}/v1"}
+      created_by: conformance-user
+    bind:
+      - {bind: secret_id, from: "$.secret.secret_id"}
+    expect_status: 200
+
+  - name: create_model
+    method: POST
+    path: /api/3.0/mlflow/gateway/model-definitions/create
+    body:
+      name: budget-conformance-model
+      secret_id: "${secret_id}"
+      provider: openai
+      model_name: gpt-4
+      created_by: conformance-user
+    bind:
+      - {bind: model_id, from: "$.model_definition.model_definition_id"}
+    expect_status: 200
+
+  - name: create_target_endpoint
+    method: POST
+    path: /api/3.0/mlflow/gateway/endpoints/create
+    body:
+      name: budget-target-endpoint
+      model_configs:
+        - model_definition_id: "${model_id}"
+          linkage_type: PRIMARY
+          weight: 1.0
+      usage_tracking: false
+      created_by: conformance-user
+    bind:
+      - {bind: target_endpoint_id, from: "$.endpoint.endpoint_id"}
+    expect_status: 200
+
+  - name: create_other_endpoint
+    method: POST
+    path: /api/3.0/mlflow/gateway/endpoints/create
+    body:
+      name: budget-other-endpoint
+      model_configs:
+        - model_definition_id: "${model_id}"
+          linkage_type: PRIMARY
+          weight: 1.0
+      usage_tracking: false
+      created_by: conformance-user
+    expect_status: 200
+
+  - name: endpoint_without_target
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/create
+    body:
+      budget_unit: USD
+      budget_amount: 10.0
+      duration: {unit: DAYS, value: 1}
+      target_scope: ENDPOINT
+      budget_action: REJECT
+    expect_status: 400
+
+  - name: global_with_target
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/create
+    body:
+      budget_unit: USD
+      budget_amount: 10.0
+      duration: {unit: DAYS, value: 1}
+      target_scope: GLOBAL
+      budget_action: REJECT
+      target_value: "${target_endpoint_id}"
+    expect_status: 400
+
+  - name: endpoint_with_nonexistent_target
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/create
+    body:
+      budget_unit: USD
+      budget_amount: 10.0
+      duration: {unit: DAYS, value: 1}
+      target_scope: ENDPOINT
+      budget_action: REJECT
+      target_value: ep-does-not-exist
+    expect_status: 404
+
+  - name: create_scope_change_policy
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/create
+    body:
+      budget_unit: USD
+      budget_amount: 10.0
+      duration: {unit: DAYS, value: 1}
+      target_scope: GLOBAL
+      budget_action: REJECT
+    bind:
+      - {bind: scope_change_policy_id, from: "$.budget_policy.budget_policy_id"}
+    expect_status: 200
+
+  - name: scope_change_without_target
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/update
+    body:
+      budget_policy_id: "${scope_change_policy_id}"
+      target_scope: ENDPOINT
+    expect_status: 400
+
+  - name: scope_change_with_target
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/update
+    body:
+      budget_policy_id: "${scope_change_policy_id}"
+      target_scope: ENDPOINT
+      target_value: "${target_endpoint_id}"
+    expect_status: 200
+
+  - name: delete_scope_change_policy
+    method: DELETE
+    path: /api/3.0/mlflow/gateway/budgets/delete
+    body: {budget_policy_id: "${scope_change_policy_id}"}
+    expect_status: 200
+
+  - name: create_endpoint_reject_policy
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/create
+    body:
+      budget_unit: USD
+      budget_amount: 0.0
+      duration: {unit: DAYS, value: 1}
+      target_scope: ENDPOINT
+      budget_action: REJECT
+      target_value: "${target_endpoint_id}"
+    bind:
+      - {bind: endpoint_policy_id, from: "$.budget_policy.budget_policy_id"}
+    expect_status: 200
+
+  - name: endpoint_policy_rejects_target
+    method: POST
+    path: /gateway/budget-target-endpoint/mlflow/invocations
+    body: {messages: [{role: user, content: reject target}]}
+    expect_status: 429
+
+  - name: endpoint_policy_allows_other
+    method: POST
+    path: /gateway/budget-other-endpoint/mlflow/invocations
+    body: {messages: [{role: user, content: allow other}]}
+    expect_status: 200
+
+  - name: delete_endpoint_policy
+    method: DELETE
+    path: /api/3.0/mlflow/gateway/budgets/delete
+    body: {budget_policy_id: "${endpoint_policy_id}"}
+    expect_status: 200
+
+  - name: create_global_reject_policy
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/create
+    body:
+      budget_unit: USD
+      budget_amount: 0.0
+      duration: {unit: DAYS, value: 1}
+      target_scope: GLOBAL
+      budget_action: REJECT
+    expect_status: 200
+
+  - name: global_policy_rejects_target
+    method: POST
+    path: /gateway/budget-target-endpoint/mlflow/invocations
+    body: {messages: [{role: user, content: global target}]}
+    expect_status: 429
+
+  - name: global_policy_rejects_other
+    method: POST
+    path: /gateway/budget-other-endpoint/mlflow/invocations
+    body: {messages: [{role: user, content: global other}]}
+    expect_status: 429

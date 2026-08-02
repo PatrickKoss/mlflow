@@ -703,7 +703,7 @@ async fn usage_tracked_invocations_persist_gateway_and_cost_spans() {
     assert_eq!(
         fixture
             .store
-            .sum_gateway_trace_cost(0, i64::MAX, None)
+            .sum_gateway_trace_cost(0, i64::MAX, None, None)
             .await
             .unwrap(),
         cost["total_cost"].as_f64().unwrap()
@@ -731,7 +731,7 @@ async fn usage_tracked_invocations_persist_gateway_and_cost_spans() {
     assert_eq!(
         fixture
             .store
-            .sum_gateway_trace_cost(0, i64::MAX, None)
+            .sum_gateway_trace_cost(0, i64::MAX, None, None)
             .await
             .unwrap(),
         2.0 * cost["total_cost"].as_f64().unwrap()
@@ -777,7 +777,7 @@ async fn usage_tracked_invocations_persist_gateway_and_cost_spans() {
     assert_eq!(
         fixture
             .store
-            .sum_gateway_trace_cost(0, i64::MAX, None)
+            .sum_gateway_trace_cost(0, i64::MAX, None, None)
             .await
             .unwrap(),
         3.0 * cost["total_cost"].as_f64().unwrap()
@@ -921,6 +921,7 @@ async fn reject_policy_matches_python_boundary_and_429_body() {
             "GLOBAL",
             "REJECT",
             Some("budget-test"),
+            None,
         )
         .await
         .unwrap();
@@ -985,6 +986,56 @@ async fn reject_policy_matches_python_boundary_and_429_body() {
 }
 
 #[tokio::test]
+async fn endpoint_policy_records_stream_cost_and_rejects_only_its_endpoint() {
+    let fixture = Fixture::new().await;
+    let endpoint = fixture
+        .store
+        .get_gateway_endpoint(WORKSPACE_DEFAULT_NAME, None, Some("traced-openai-endpoint"))
+        .await
+        .unwrap();
+    let invocation_cost = token_cost("openai", "gpt-4", 2, 3).unwrap();
+    fixture
+        .store
+        .create_budget_policy(
+            WORKSPACE_DEFAULT_NAME,
+            "USD",
+            invocation_cost,
+            "DAYS",
+            1,
+            "ENDPOINT",
+            "REJECT",
+            Some("budget-test"),
+            Some(&endpoint.endpoint_id),
+        )
+        .await
+        .unwrap();
+
+    let first = fixture
+        .post("traced-openai-endpoint", chat("at boundary", true))
+        .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    first.into_body().collect().await.unwrap();
+
+    let other = fixture
+        .post("openai-endpoint", chat("not targeted", true))
+        .await;
+    assert_eq!(other.status(), StatusCode::OK);
+    other.into_body().collect().await.unwrap();
+
+    let rejected = fixture
+        .post("traced-openai-endpoint", chat("must reject", true))
+        .await;
+    assert_eq!(rejected.status(), StatusCode::TOO_MANY_REQUESTS);
+    let window = fixture
+        .store
+        .list_budget_windows(WORKSPACE_DEFAULT_NAME)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(window.current_spend, invocation_cost);
+}
+
+#[tokio::test]
 async fn alert_policy_dispatches_python_shaped_budget_webhook_once() {
     let fixture = Fixture::new().await;
     fixture
@@ -1015,6 +1066,7 @@ async fn alert_policy_dispatches_python_shaped_budget_webhook_once() {
             "GLOBAL",
             "ALERT",
             Some("budget-test"),
+            None,
         )
         .await
         .unwrap();
@@ -1045,6 +1097,7 @@ async fn alert_policy_dispatches_python_shaped_budget_webhook_once() {
     assert_eq!(envelope["data"]["duration_value"], 1);
     assert_eq!(envelope["data"]["target_scope"], "GLOBAL");
     assert_eq!(envelope["data"]["workspace"], WORKSPACE_DEFAULT_NAME);
+    assert!(envelope["data"]["target_value"].is_null());
     assert!(envelope["data"]["window_start"].is_i64());
 }
 

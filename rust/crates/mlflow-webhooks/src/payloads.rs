@@ -99,8 +99,9 @@ pub fn example_payload_for_event(event: WebhookEvent) -> Option<Value> {
             ("current_spend", json!(105.50)),
             ("duration_unit", json!("MONTHS")),
             ("duration_value", json!(1)),
-            ("target_scope", json!("WORKSPACE")),
+            ("target_scope", json!("ENDPOINT")),
             ("workspace", json!("default")),
+            ("target_value", json!("ep-abc123")),
             ("window_start", json!(1704067200000i64)),
         ]),
         _ => return None,
@@ -127,6 +128,17 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(p["name"], json!("example_model"));
+    }
+
+    #[test]
+    fn budget_policy_exceeded_payload_includes_endpoint_target() {
+        let payload = example_payload_for_event(WebhookEvent::new(
+            WebhookEntity::BudgetPolicy,
+            WebhookAction::Exceeded,
+        ))
+        .unwrap();
+        assert_eq!(payload["target_scope"], json!("ENDPOINT"));
+        assert_eq!(payload["target_value"], json!("ep-abc123"));
     }
 
     #[test]

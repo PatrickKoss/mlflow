@@ -17,11 +17,13 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from dataclasses import asdict
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -48,8 +50,9 @@ DEFAULT_REPORT_DIR = ROOT / "rust" / "compliance" / "report"
 CLASSIFICATIONS = ("server_reachable", "client_only")
 BACKENDS = ("sqlite", "postgres")
 SERVER_IMPLEMENTATIONS = ("python_http", "rust")
-SUITES = ("ledger", "mcp_server_registry")
+SUITES = ("ledger", "mcp_server_registry", "gateway_budget_policy")
 MCP_CORPUS_PATH = ROOT / "rust" / "compliance" / "corpus" / "mcp_server_registry.yaml"
+GATEWAY_BUDGET_CORPUS_PATH = ROOT / "rust" / "genai-inventory" / "gateway_budget_policy.yaml"
 _logger = logging.getLogger(__name__)
 
 # These cases exercise the public SDK/store boundary without optional provider
@@ -114,8 +117,12 @@ def _mcp_normalize_options(raw: dict[str, Any]) -> NormalizeOptions:
     )
 
 
-def _run_mcp_sequence(url: str, cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    bindings: dict[str, Any] = {}
+def _run_mcp_sequence(
+    url: str,
+    cases: list[dict[str, Any]],
+    initial_bindings: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    bindings: dict[str, Any] = dict(initial_bindings or {})
     results: list[dict[str, Any]] = []
     for case in cases:
         path = substitute(case["path"], bindings)
@@ -158,6 +165,7 @@ def _run_mcp_sequence(url: str, cases: list[dict[str, Any]]) -> list[dict[str, A
         results.append({
             "name": case["name"],
             "status": status,
+            "expected_status": case.get("expect_status"),
             "body": normalize(response_body, options),
         })
     return results
@@ -226,6 +234,140 @@ def _write_mcp_registry_report(args: argparse.Namespace) -> int:
     json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     lines = [
         "# T-S1 MCP server registry conformance",
+        "",
+        "| Backend | Cases | Passed | Failed | Diffs |",
+        "| --- | ---: | ---: | ---: | ---: |",
+    ]
+    lines.extend(
+        f"| {run['backend']} | {run['cases']} | {run['passed']} | "
+        f"{run['failed']} | {run['diffs']} |"
+        for run in runs
+    )
+    markdown_path.write_text("\n".join(lines) + "\n")
+    _logger.info("Wrote %s and %s", json_path.relative_to(ROOT), markdown_path.relative_to(ROOT))
+    return int(any(run["failed"] for run in runs))
+
+
+@contextlib.contextmanager
+def _gateway_budget_provider() -> Iterator[str]:
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            size = int(self.headers.get("content-length", "0"))
+            self.rfile.read(size)
+            payload = json.dumps({
+                "id": "chatcmpl-budget-fixture",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gpt-4",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "fixture response"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+            }).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _run_gateway_budget_suite(args: argparse.Namespace, backend: str) -> dict[str, Any]:
+    cases = (yaml.safe_load(GATEWAY_BUDGET_CORPUS_PATH.read_text()) or {}).get("cases", [])
+    observed: dict[str, list[dict[str, Any]]] = {}
+    logs: dict[str, str] = {}
+    with _gateway_budget_provider() as provider_base:
+        for implementation in SERVER_IMPLEMENTATIONS:
+            with _server(
+                args.server_bin,
+                implementation,
+                backend,
+                args.postgres_uri,
+                "gateway-budget-policy",
+                extra_env={"MLFLOW_SERVER_ENABLE_JOB_EXECUTION": "false"},
+            ) as (url, server_log):
+                observed[implementation] = _run_mcp_sequence(
+                    url, cases, {"provider_base": provider_base}
+                )
+                log_copy = (
+                    args.report_dir / f"ts6_gateway_budget_policy_{implementation}_{backend}.log"
+                )
+                log_copy.write_text(server_log.read_text())
+                logs[implementation] = log_copy.relative_to(ROOT).as_posix()
+
+    results = []
+    for python_result, rust_result in zip(observed["python_http"], observed["rust"], strict=True):
+        expected = python_result["expected_status"]
+        diffs = []
+        if expected is not None and python_result["status"] != expected:
+            diffs.append({
+                "json_pointer": "/__python_expected_status__",
+                "python_value": python_result["status"],
+                "rust_value": expected,
+                "kind": "status",
+            })
+        if expected is not None and rust_result["status"] != expected:
+            diffs.append({
+                "json_pointer": "/__rust_expected_status__",
+                "python_value": expected,
+                "rust_value": rust_result["status"],
+                "kind": "status",
+            })
+        if python_result["status"] != rust_result["status"]:
+            diffs.append({
+                "json_pointer": "/__status__",
+                "python_value": python_result["status"],
+                "rust_value": rust_result["status"],
+                "kind": "status",
+            })
+        diffs.extend(
+            asdict(diff) for diff in diff_normalized(python_result["body"], rust_result["body"])
+        )
+        results.append({
+            "name": python_result["name"],
+            "expected_status": expected,
+            "python_status": python_result["status"],
+            "rust_status": rust_result["status"],
+            "diffs": diffs,
+        })
+    failed = sum(bool(result["diffs"]) for result in results)
+    return {
+        "backend": backend,
+        "cases": len(results),
+        "passed": len(results) - failed,
+        "failed": failed,
+        "diffs": sum(len(result["diffs"]) for result in results),
+        "results": results,
+        "evidence": logs,
+    }
+
+
+def _write_gateway_budget_report(args: argparse.Namespace) -> int:
+    args.report_dir.mkdir(parents=True, exist_ok=True)
+    backends = args.backend or list(BACKENDS)
+    runs = [_run_gateway_budget_suite(args, backend) for backend in backends]
+    report = {"schema_version": 1, "task": "T-S6", "suite": "gateway_budget_policy", "runs": runs}
+    json_path = args.report_dir / "ts6_gateway_budget_policy.json"
+    markdown_path = args.report_dir / "ts6_gateway_budget_policy.md"
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    lines = [
+        "# T-S6 gateway budget-policy conformance",
         "",
         "| Backend | Cases | Passed | Failed | Diffs |",
         "| --- | ---: | ---: | ---: | ---: |",
@@ -608,6 +750,8 @@ def main() -> int:
         raise FileNotFoundError(f"release Rust server not found: {args.server_bin}")
     if suites == ["mcp_server_registry"]:
         return _write_mcp_registry_report(args)
+    if suites == ["gateway_budget_policy"]:
+        return _write_gateway_budget_report(args)
     _run_checked(["uv", "run", "--no-sync", "python", str(HERE / "validate_ledger.py")])
     ledger = json.loads(LEDGER_PATH.read_text())
     args.report_dir.mkdir(parents=True, exist_ok=True)

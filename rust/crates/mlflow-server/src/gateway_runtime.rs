@@ -1396,6 +1396,14 @@ pub async fn raw_proxy(
         None => path,
     };
     let guardrails = load_guardrails(&state, &workspace, &endpoint, &headers).await;
+    let trace = endpoint.usage_tracking.then(|| GatewayTraceContext {
+        state: state.clone(),
+        workspace: workspace.clone(),
+        endpoint: endpoint.clone(),
+        request: payload.clone(),
+        request_type: "raw_proxy",
+        started_ns: unix_nanos(),
+    });
     let payload = match guardrails.before(payload, None).await {
         Ok(payload) => payload,
         Err(error) => return guardrail_error_response(error, start),
@@ -1407,7 +1415,14 @@ pub async fn raw_proxy(
     if let Err(error) = prepare_dynamic_auth(&model, &mut request).await {
         return error.response(start.elapsed());
     }
-    raw_proxy_response(request, start, guardrails, payload).await
+    raw_proxy_response(
+        request,
+        trace.map(|trace| (trace, model, "proxy")),
+        start,
+        guardrails,
+        payload,
+    )
+    .await
 }
 
 // Raw-proxy routes address the endpoint's primary model directly; traffic
@@ -1460,7 +1475,12 @@ async fn complete_gateway_trace(
         match trace
             .state
             .budget_tracker()
-            .record_cost(cost.total_cost, Some(&trace.workspace), now)
+            .record_cost(
+                cost.total_cost,
+                Some(&trace.workspace),
+                Some(&trace.endpoint.endpoint_id),
+                now,
+            )
             .await
         {
             Ok(windows) => {
@@ -1985,7 +2005,7 @@ async fn check_budget_limit(
     }
     match state
         .budget_tracker()
-        .should_reject_request(Some(workspace), now)
+        .should_reject_request(Some(workspace), Some(&endpoint.endpoint_id), now)
         .await
     {
         Ok(Some(window)) => {
@@ -2799,6 +2819,11 @@ fn stream_has_terminal_event(bytes: &[u8]) -> bool {
 
 async fn raw_proxy_response(
     request: ProviderRequest,
+    trace: Option<(
+        GatewayTraceContext,
+        ResolvedGatewayModelConfig,
+        &'static str,
+    )>,
     start: Instant,
     guardrails: LoadedGuardrails,
     request_payload: Value,
@@ -2832,11 +2857,14 @@ async fn raw_proxy_response(
     }
     let media_type = content_type.split(';').next().unwrap_or_default().trim();
     if matches!(media_type, "text/event-stream" | "application/x-ndjson") {
-        let output = response.bytes_stream().map(|result| {
-            Ok::<_, Infallible>(
-                result.unwrap_or_else(|error| sse_error(&error.to_string(), "ClientPayloadError")),
-            )
-        });
+        let state = RawProviderStream {
+            initial: None,
+            upstream: Some(response.bytes_stream().boxed()),
+            done: false,
+            trace,
+            trace_bytes: Vec::new(),
+        };
+        let output = stream::unfold(state, next_raw_stream_chunk).map(Ok::<_, Infallible>);
         let mut result = Response::new(Body::from_stream(output));
         result.headers_mut().insert(
             header::CONTENT_TYPE,
@@ -2848,11 +2876,16 @@ async fn raw_proxy_response(
     if content_type.contains("application/json") {
         return match response.json::<Value>().await {
             Ok(value) => match guardrails.after(&request_payload, value, None).await {
-                Ok(value) => with_non_stream_timing(
-                    json_response(StatusCode::OK, value),
-                    start,
-                    provider_start.elapsed(),
-                ),
+                Ok(value) => {
+                    if let Some((trace, model, method)) = trace.as_ref() {
+                        complete_gateway_trace(trace, model, method, &value, "OK").await;
+                    }
+                    with_non_stream_timing(
+                        json_response(StatusCode::OK, value),
+                        start,
+                        provider_start.elapsed(),
+                    )
+                }
                 Err(error) => guardrail_error_response(error, start),
             },
             Err(error) => {
@@ -2867,6 +2900,9 @@ async fn raw_proxy_response(
             Ok(value) => value,
             Err(error) => return guardrail_error_response(error, start),
         };
+        if let Some((trace, model, method)) = trace.as_ref() {
+            complete_gateway_trace(trace, model, method, &value, "OK").await;
+        }
         return with_non_stream_timing(
             json_response(StatusCode::OK, value),
             start,

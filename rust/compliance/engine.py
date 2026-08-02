@@ -128,6 +128,7 @@ ID_FIELDS = frozenset({
     "mapping_id",
     "endpoint_id",
     "budget_policy_id",
+    "target_value",
     "guardrail_id",
     "dataset_id",
     "job_id",

@@ -99,6 +99,13 @@ impl BudgetTracker {
         }
     }
 
+    pub async fn invalidate(&self) {
+        match self {
+            Self::InMemory(tracker) => tracker.state.lock().await.last_refresh = None,
+            Self::Redis(tracker) => *tracker.last_refresh.lock().await = None,
+        }
+    }
+
     pub async fn refresh_policies(
         &self,
         policies: Vec<BudgetPolicy>,
@@ -127,22 +134,36 @@ impl BudgetTracker {
         &self,
         cost_usd: f64,
         workspace: Option<&str>,
+        endpoint_id: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<Vec<PolicyWindow>, BudgetError> {
         match self {
-            Self::InMemory(tracker) => Ok(tracker.record_cost(cost_usd, workspace, now).await),
-            Self::Redis(tracker) => tracker.record_cost(cost_usd, workspace, now).await,
+            Self::InMemory(tracker) => Ok(tracker
+                .record_cost(cost_usd, workspace, endpoint_id, now)
+                .await),
+            Self::Redis(tracker) => {
+                tracker
+                    .record_cost(cost_usd, workspace, endpoint_id, now)
+                    .await
+            }
         }
     }
 
     pub async fn should_reject_request(
         &self,
         workspace: Option<&str>,
+        endpoint_id: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<Option<PolicyWindow>, BudgetError> {
         match self {
-            Self::InMemory(tracker) => Ok(tracker.should_reject_request(workspace, now).await),
-            Self::Redis(tracker) => tracker.should_reject_request(workspace, now).await,
+            Self::InMemory(tracker) => Ok(tracker
+                .should_reject_request(workspace, endpoint_id, now)
+                .await),
+            Self::Redis(tracker) => {
+                tracker
+                    .should_reject_request(workspace, endpoint_id, now)
+                    .await
+            }
         }
     }
 
@@ -223,6 +244,7 @@ impl InMemoryBudgetTracker {
         &self,
         cost_usd: f64,
         workspace: Option<&str>,
+        endpoint_id: Option<&str>,
         now: DateTime<Utc>,
     ) -> Vec<PolicyWindow> {
         let mut state = self.state.lock().await;
@@ -236,7 +258,7 @@ impl InMemoryBudgetTracker {
                     window.exceeded = false;
                 }
             }
-            if !policy_applies(&window.policy, workspace) {
+            if !policy_applies(&window.policy, workspace, endpoint_id) {
                 continue;
             }
             window.cumulative_spend += cost_usd;
@@ -251,11 +273,12 @@ impl InMemoryBudgetTracker {
     async fn should_reject_request(
         &self,
         workspace: Option<&str>,
+        endpoint_id: Option<&str>,
         now: DateTime<Utc>,
     ) -> Option<PolicyWindow> {
         self.state.lock().await.windows.iter().find_map(|window| {
             (now < window.window_end
-                && policy_applies(&window.policy, workspace)
+                && policy_applies(&window.policy, workspace, endpoint_id)
                 && window.policy.budget_action == "REJECT"
                 && window.cumulative_spend >= window.policy.budget_amount)
                 .then(|| window.clone())
@@ -422,6 +445,7 @@ impl RedisBudgetTracker {
         &self,
         cost_usd: f64,
         workspace: Option<&str>,
+        endpoint_id: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<Vec<PolicyWindow>, BudgetError> {
         let mut connection = self.connection().await?;
@@ -434,7 +458,7 @@ impl RedisBudgetTracker {
             let Some(policy) = self.load_policy(&mut connection, &policy_id).await? else {
                 continue;
             };
-            if !policy_applies(&policy, workspace) {
+            if !policy_applies(&policy, workspace, endpoint_id) {
                 continue;
             }
             let (mut window, _) = self.ensure_window(&mut connection, &policy, now).await?;
@@ -456,6 +480,7 @@ impl RedisBudgetTracker {
     async fn should_reject_request(
         &self,
         workspace: Option<&str>,
+        endpoint_id: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<Option<PolicyWindow>, BudgetError> {
         let mut connection = self.connection().await?;
@@ -467,7 +492,8 @@ impl RedisBudgetTracker {
             let Some(policy) = self.load_policy(&mut connection, &policy_id).await? else {
                 continue;
             };
-            if !policy_applies(&policy, workspace) || policy.budget_action != "REJECT" {
+            if !policy_applies(&policy, workspace, endpoint_id) || policy.budget_action != "REJECT"
+            {
                 continue;
             }
             let stored: HashMap<String, String> = redis::cmd("HGETALL")
@@ -557,27 +583,34 @@ impl RedisBudgetTracker {
 pub async fn refresh_from_store(
     tracker: &BudgetTracker,
     store: &TrackingStore,
-    workspace: &str,
+    _workspace: &str,
     now: DateTime<Utc>,
 ) -> Result<(), BudgetError> {
     if !tracker.needs_refresh().await {
         return Ok(());
     }
+    // Scope matching happens in the tracker: GLOBAL policies apply everywhere,
+    // ENDPOINT policies match only the endpoint ID, and WORKSPACE policies match
+    // the request workspace. Loading the full set keeps that behavior independent
+    // of which workspace happens to refresh the shared tracker first.
     let policies = store
-        .list_budget_policies(workspace, SEARCH_MAX_RESULTS_DEFAULT, None)
+        .list_budget_policies_for_enforcement(SEARCH_MAX_RESULTS_DEFAULT)
         .await
-        .map_err(|error| BudgetError(error.to_string()))?
-        .policies;
+        .map_err(|error| BudgetError(error.to_string()))?;
     let windows = tracker.refresh_policies(policies, now).await?;
     let mut spend = HashMap::new();
     for window in windows {
         let spend_workspace =
             (window.policy.target_scope == "WORKSPACE").then_some(window.policy.workspace.as_str());
+        let endpoint_id = (window.policy.target_scope == "ENDPOINT")
+            .then_some(window.policy.target_value.as_deref())
+            .flatten();
         if let Ok(value) = store
             .sum_gateway_trace_cost(
                 window.window_start.timestamp_millis(),
                 window.window_end.timestamp_millis(),
                 spend_workspace,
+                endpoint_id,
             )
             .await
         {
@@ -612,8 +645,8 @@ pub fn exceeded_payload(window: &PolicyWindow, workspace: Option<&str>) -> Value
         "duration_unit": window.policy.duration_unit,
         "duration_value": window.policy.duration_value,
         "target_scope": window.policy.target_scope,
-        "target_value": Value::Null,
         "workspace": workspace.unwrap_or(&window.policy.workspace),
+        "target_value": window.policy.target_value,
         "window_start": window.window_start.timestamp_millis(),
     })
 }
@@ -627,8 +660,18 @@ fn refresh_interval() -> Duration {
     )
 }
 
-fn policy_applies(policy: &BudgetPolicy, workspace: Option<&str>) -> bool {
-    policy.target_scope == "GLOBAL" || policy.workspace == workspace.unwrap_or(DEFAULT_WORKSPACE)
+fn policy_applies(
+    policy: &BudgetPolicy,
+    workspace: Option<&str>,
+    endpoint_id: Option<&str>,
+) -> bool {
+    if policy.target_scope == "GLOBAL" {
+        return true;
+    }
+    if policy.target_scope == "ENDPOINT" {
+        return endpoint_id.is_some() && policy.target_value.as_deref() == endpoint_id;
+    }
+    policy.workspace == workspace.unwrap_or(DEFAULT_WORKSPACE)
 }
 
 pub(crate) fn window_bounds(
@@ -721,6 +764,7 @@ fn serialize_policy(policy: &BudgetPolicy) -> String {
         "target_scope": policy.target_scope,
         "budget_action": policy.budget_action,
         "workspace": policy.workspace,
+        "target_value": policy.target_value,
         "created_at": policy.created_at,
         "last_updated_at": policy.last_updated_at,
     })
@@ -763,6 +807,10 @@ fn deserialize_policy(data: &str) -> Result<BudgetPolicy, BudgetError> {
             .and_then(Value::as_i64)
             .unwrap_or_default(),
         workspace: string("workspace"),
+        target_value: value
+            .get("target_value")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -808,6 +856,7 @@ mod tests {
             last_updated_by: None,
             last_updated_at: 0,
             workspace: DEFAULT_WORKSPACE.to_string(),
+            target_value: None,
         }
     }
 
@@ -830,11 +879,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let crossed = tracker.record_cost(100.0, None, now()).await.unwrap();
+        let crossed = tracker.record_cost(100.0, None, None, now()).await.unwrap();
         assert_eq!(crossed.len(), 2);
         assert_eq!(
             tracker
-                .should_reject_request(None, now())
+                .should_reject_request(None, None, now())
                 .await
                 .unwrap()
                 .unwrap()
@@ -843,10 +892,69 @@ mod tests {
             "reject"
         );
         assert!(tracker
-            .record_cost(1.0, None, now())
+            .record_cost(1.0, None, None, now())
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn endpoint_policy_matches_endpoint_and_ignores_workspace() {
+        let tracker = BudgetTracker::InMemory(Arc::new(InMemoryBudgetTracker::default()));
+        let mut endpoint_policy = policy("endpoint", 10.0, "REJECT");
+        endpoint_policy.target_scope = "ENDPOINT".to_string();
+        endpoint_policy.target_value = Some("ep-one".to_string());
+        endpoint_policy.workspace = "owning-workspace".to_string();
+        tracker
+            .refresh_policies(vec![endpoint_policy], now())
+            .await
+            .unwrap();
+
+        assert!(tracker
+            .record_cost(10.0, Some("different-workspace"), Some("ep-two"), now())
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            tracker
+                .record_cost(10.0, Some("different-workspace"), Some("ep-one"), now())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(tracker
+            .should_reject_request(Some("owning-workspace"), Some("ep-two"), now())
+            .await
+            .unwrap()
+            .is_none());
+        assert!(tracker
+            .should_reject_request(Some("different-workspace"), Some("ep-one"), now())
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn redis_policy_snapshot_round_trips_target_and_accepts_stale_entries() {
+        let mut endpoint_policy = policy("endpoint", 10.0, "REJECT");
+        endpoint_policy.target_scope = "ENDPOINT".to_string();
+        endpoint_policy.target_value = Some("ep-one".to_string());
+        assert_eq!(
+            deserialize_policy(&serialize_policy(&endpoint_policy))
+                .unwrap()
+                .target_value
+                .as_deref(),
+            Some("ep-one")
+        );
+
+        let stale = serialize_policy(&policy("stale", 10.0, "REJECT"));
+        let mut stale: Value = serde_json::from_str(&stale).unwrap();
+        stale.as_object_mut().unwrap().remove("target_value");
+        assert_eq!(
+            deserialize_policy(&stale.to_string()).unwrap().target_value,
+            None
+        );
     }
 
     #[tokio::test]
@@ -856,7 +964,7 @@ mod tests {
             .refresh_policies(vec![policy("one", 50.0, "ALERT")], now())
             .await
             .unwrap();
-        tracker.record_cost(40.0, None, now()).await.unwrap();
+        tracker.record_cost(40.0, None, None, now()).await.unwrap();
         tracker
             .backfill_spend(&HashMap::from([("one".to_string(), 10.0)]))
             .await
@@ -867,7 +975,10 @@ mod tests {
         );
 
         let next_day = now() + chrono::Duration::days(1);
-        tracker.record_cost(5.0, None, next_day).await.unwrap();
+        tracker
+            .record_cost(5.0, None, None, next_day)
+            .await
+            .unwrap();
         let window = tracker.get_all_windows().await.unwrap().remove(0);
         assert_eq!(window.cumulative_spend, 5.0);
         assert!(!window.exceeded);
@@ -896,7 +1007,9 @@ mod tests {
 
     #[test]
     fn alert_payload_field_order_and_values_match_python() {
-        let p = policy("bp-test", 50.0, "ALERT");
+        let mut p = policy("bp-test", 50.0, "ALERT");
+        p.target_scope = "ENDPOINT".to_string();
+        p.target_value = Some("ep-test".to_string());
         let (start, end) = window_bounds(&p, now()).unwrap();
         let value = exceeded_payload(
             &PolicyWindow {
@@ -911,7 +1024,7 @@ mod tests {
         assert_eq!(
             value.to_string(),
             format!(
-                "{{\"budget_policy_id\":\"bp-test\",\"budget_unit\":\"USD\",\"budget_amount\":50.0,\"current_spend\":60.0,\"duration_unit\":\"DAYS\",\"duration_value\":1,\"target_scope\":\"GLOBAL\",\"target_value\":null,\"workspace\":\"default\",\"window_start\":{}}}",
+                "{{\"budget_policy_id\":\"bp-test\",\"budget_unit\":\"USD\",\"budget_amount\":50.0,\"current_spend\":60.0,\"duration_unit\":\"DAYS\",\"duration_value\":1,\"target_scope\":\"ENDPOINT\",\"workspace\":\"default\",\"target_value\":\"ep-test\",\"window_start\":{}}}",
                 start.timestamp_millis()
             )
         );
@@ -993,16 +1106,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            first.record_cost(100.0, None, now()).await.unwrap().len(),
+            first
+                .record_cost(100.0, None, None, now())
+                .await
+                .unwrap()
+                .len(),
             1
         );
         assert!(second
-            .should_reject_request(None, now())
+            .should_reject_request(None, None, now())
             .await
             .unwrap()
             .is_some());
         first
-            .record_cost(5.0, None, now() + chrono::Duration::days(1))
+            .record_cost(5.0, None, None, now() + chrono::Duration::days(1))
             .await
             .unwrap();
         let window = second.get_all_windows().await.unwrap().remove(0);
@@ -1035,8 +1152,11 @@ mod tests {
                 .refresh_policies(vec![policy("bp-reject", 100.0, "REJECT")], now())
                 .await
                 .unwrap();
-            tracker.record_cost(spend, None, now()).await.unwrap();
-            let rejected = tracker.should_reject_request(None, now()).await.unwrap();
+            tracker.record_cost(spend, None, None, now()).await.unwrap();
+            let rejected = tracker
+                .should_reject_request(None, None, now())
+                .await
+                .unwrap();
             rust.insert(
                 name.to_string(),
                 match rejected {
@@ -1055,8 +1175,14 @@ mod tests {
             .refresh_policies(vec![policy("bp-alert", 50.0, "ALERT")], now())
             .await
             .unwrap();
-        alert_tracker.record_cost(49.0, None, now()).await.unwrap();
-        let crossed = alert_tracker.record_cost(1.0, None, now()).await.unwrap();
+        alert_tracker
+            .record_cost(49.0, None, None, now())
+            .await
+            .unwrap();
+        let crossed = alert_tracker
+            .record_cost(1.0, None, None, now())
+            .await
+            .unwrap();
         rust.insert("alert".to_string(), exceeded_payload(&crossed[0], None));
 
         let reset_tracker = BudgetTracker::InMemory(Arc::new(InMemoryBudgetTracker::default()));
@@ -1064,9 +1190,12 @@ mod tests {
             .refresh_policies(vec![policy("bp-reset", 100.0, "ALERT")], now())
             .await
             .unwrap();
-        reset_tracker.record_cost(150.0, None, now()).await.unwrap();
         reset_tracker
-            .record_cost(10.0, None, now() + chrono::Duration::days(1))
+            .record_cost(150.0, None, None, now())
+            .await
+            .unwrap();
+        reset_tracker
+            .record_cost(10.0, None, None, now() + chrono::Duration::days(1))
             .await
             .unwrap();
         let reset = reset_tracker.get_all_windows().await.unwrap().remove(0);

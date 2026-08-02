@@ -14,7 +14,7 @@ use super::dbutil::{RowLike, Val};
 use super::evaluation_datasets::python_json_dumps;
 use super::experiments::{internal, is_unique_violation, now_millis};
 use super::scorers::ScorerVersion;
-use super::search::{SEARCH_MAX_RESULTS_DEFAULT, SEARCH_MAX_RESULTS_THRESHOLD};
+use super::search::SEARCH_MAX_RESULTS_THRESHOLD;
 use super::TrackingStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +166,7 @@ pub struct BudgetPolicy {
     pub last_updated_by: Option<String>,
     pub last_updated_at: i64,
     pub workspace: String,
+    pub target_value: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -176,6 +177,7 @@ pub struct BudgetPolicyUpdate<'a> {
     pub target_scope: Option<&'a str>,
     pub budget_action: Option<&'a str>,
     pub updated_by: Option<&'a str>,
+    pub target_value: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1939,11 +1941,17 @@ impl TrackingStore {
         target_scope: &str,
         budget_action: &str,
         created_by: Option<&str>,
+        target_value: Option<&str>,
     ) -> Result<BudgetPolicy, MlflowError> {
+        let target_value = normalize_budget_target_value(target_scope, target_value)?;
+        if target_scope == "ENDPOINT" {
+            self.get_gateway_endpoint(workspace, target_value, None)
+                .await?;
+        }
         let id = uuid_id("bp-");
         let now = now_millis();
         let dialect = self.db().dialect();
-        let placeholders = (1..=12)
+        let placeholders = (1..=13)
             .map(|index| dialect.placeholder(index))
             .collect::<Vec<_>>();
         self.db()
@@ -1951,7 +1959,8 @@ impl TrackingStore {
                 &format!(
                     "INSERT INTO budget_policies (budget_policy_id, budget_unit, budget_amount, \
                      duration_unit, duration_value, target_scope, budget_action, created_by, \
-                     created_at, last_updated_by, last_updated_at, workspace) VALUES ({})",
+                     created_at, last_updated_by, last_updated_at, workspace, target_value) \
+                     VALUES ({})",
                     placeholders.join(", ")
                 ),
                 &[
@@ -1967,6 +1976,7 @@ impl TrackingStore {
                     Val::OptText(created_by.map(str::to_string)),
                     Val::Int(now),
                     Val::Text(workspace.to_string()),
+                    Val::OptText(target_value.map(str::to_string)),
                 ],
             )
             .await
@@ -1985,7 +1995,8 @@ impl TrackingStore {
                 &format!(
                     "SELECT budget_policy_id, budget_unit, budget_amount, duration_unit, \
                      duration_value, target_scope, budget_action, created_by, created_at, \
-                     last_updated_by, last_updated_at, workspace FROM budget_policies WHERE \
+                     last_updated_by, last_updated_at, workspace, target_value FROM \
+                     budget_policies WHERE \
                      budget_policy_id = {} AND workspace = {}",
                     dialect.placeholder(1),
                     dialect.placeholder(2)
@@ -2011,7 +2022,17 @@ impl TrackingStore {
         budget_policy_id: &str,
         update: BudgetPolicyUpdate<'_>,
     ) -> Result<BudgetPolicy, MlflowError> {
-        self.get_budget_policy(workspace, budget_policy_id).await?;
+        let existing = self.get_budget_policy(workspace, budget_policy_id).await?;
+        let effective_scope = update.target_scope.unwrap_or(&existing.target_scope);
+        let inherited_target = (effective_scope == existing.target_scope)
+            .then_some(existing.target_value.as_deref())
+            .flatten();
+        let effective_target = update.target_value.or(inherited_target);
+        let effective_target = normalize_budget_target_value(effective_scope, effective_target)?;
+        if update.target_value.is_some() && effective_scope == "ENDPOINT" {
+            self.get_gateway_endpoint(workspace, effective_target, None)
+                .await?;
+        }
         let dialect = self.db().dialect();
         let mut assignments = Vec::new();
         let mut values = Vec::new();
@@ -2045,6 +2066,19 @@ impl TrackingStore {
             values.push(Val::Text(value.to_string()));
             assignments.push(format!(
                 "target_scope = {}",
+                dialect.placeholder(values.len())
+            ));
+            if value != existing.target_scope {
+                values.push(Val::OptText(effective_target.map(str::to_string)));
+                assignments.push(format!(
+                    "target_value = {}",
+                    dialect.placeholder(values.len())
+                ));
+            }
+        } else if update.target_value.is_some() {
+            values.push(Val::OptText(effective_target.map(str::to_string)));
+            assignments.push(format!(
+                "target_value = {}",
                 dialect.placeholder(values.len())
             ));
         }
@@ -2125,7 +2159,8 @@ impl TrackingStore {
                 &format!(
                     "SELECT budget_policy_id, budget_unit, budget_amount, duration_unit, \
                      duration_value, target_scope, budget_action, created_by, created_at, \
-                     last_updated_by, last_updated_at, workspace FROM budget_policies WHERE \
+                     last_updated_by, last_updated_at, workspace, target_value FROM \
+                     budget_policies WHERE \
                      workspace = {} ORDER BY budget_policy_id LIMIT {} OFFSET {}",
                     dialect.placeholder(1),
                     dialect.placeholder(2),
@@ -2151,25 +2186,64 @@ impl TrackingStore {
         })
     }
 
+    pub async fn list_budget_policies_for_enforcement(
+        &self,
+        max_results: i64,
+    ) -> Result<Vec<BudgetPolicy>, MlflowError> {
+        validate_max_results(max_results)?;
+        let dialect = self.db().dialect();
+        self.db()
+            .fetch_all(
+                &format!(
+                    "SELECT budget_policy_id, budget_unit, budget_amount, duration_unit, \
+                     duration_value, target_scope, budget_action, created_by, created_at, \
+                     last_updated_by, last_updated_at, workspace, target_value FROM \
+                     budget_policies ORDER BY budget_policy_id LIMIT {}",
+                    dialect.placeholder(1),
+                ),
+                &[Val::Int(max_results)],
+                map_budget_policy,
+            )
+            .await
+            .map_err(internal)
+    }
+
     pub async fn list_budget_windows(
         &self,
         workspace: &str,
     ) -> Result<Vec<BudgetWindow>, MlflowError> {
+        let dialect = self.db().dialect();
         let policies = self
-            .list_budget_policies(workspace, SEARCH_MAX_RESULTS_DEFAULT, None)
-            .await?
-            .policies;
+            .db()
+            .fetch_all(
+                &format!(
+                    "SELECT budget_policy_id, budget_unit, budget_amount, duration_unit, \
+                     duration_value, target_scope, budget_action, created_by, created_at, \
+                     last_updated_by, last_updated_at, workspace, target_value FROM \
+                     budget_policies WHERE target_scope = 'GLOBAL' OR workspace = {} ORDER BY \
+                     budget_policy_id",
+                    dialect.placeholder(1),
+                ),
+                &[Val::Text(workspace.to_string())],
+                map_budget_policy,
+            )
+            .await
+            .map_err(internal)?;
         let now = Utc::now();
         let mut windows = Vec::with_capacity(policies.len());
         for policy in policies {
             let (start, end) = budget_window_bounds(&policy, now)?;
             let spend_workspace =
                 (policy.target_scope == "WORKSPACE").then_some(policy.workspace.as_str());
+            let endpoint_id = (policy.target_scope == "ENDPOINT")
+                .then_some(policy.target_value.as_deref())
+                .flatten();
             let current_spend = self
                 .sum_gateway_trace_cost(
                     start.timestamp_millis(),
                     end.timestamp_millis(),
                     spend_workspace,
+                    endpoint_id,
                 )
                 .await?;
             windows.push(BudgetWindow {
@@ -2190,6 +2264,7 @@ impl TrackingStore {
         start_time_ms: i64,
         end_time_ms: i64,
         workspace: Option<&str>,
+        endpoint_id: Option<&str>,
     ) -> Result<f64, MlflowError> {
         let dialect = self.db().dialect();
         let mut values = vec![
@@ -2205,6 +2280,11 @@ impl TrackingStore {
             values.push(Val::Text(workspace.to_string()));
             workspace_filter = format!(" AND e.workspace = {}", dialect.placeholder(values.len()));
         }
+        let mut endpoint_filter = String::new();
+        if let Some(endpoint_id) = endpoint_id {
+            values.push(Val::Text(endpoint_id.to_string()));
+            endpoint_filter = format!(" AND tm.value = {}", dialect.placeholder(values.len()));
+        }
         self.db()
             .fetch_optional(
                 &format!(
@@ -2212,7 +2292,7 @@ impl TrackingStore {
                      trace_info t ON t.request_id = sm.trace_id JOIN trace_request_metadata tm ON \
                      tm.request_id = t.request_id{workspace_join} WHERE sm.\"key\" = {} AND \
                      tm.\"key\" = {} AND t.timestamp_ms >= {} AND t.timestamp_ms < \
-                     {}{workspace_filter}",
+                     {}{workspace_filter}{endpoint_filter}",
                     dialect.placeholder(1),
                     dialect.placeholder(2),
                     dialect.placeholder(3),
@@ -2629,7 +2709,25 @@ fn map_budget_policy(row: &dyn RowLike) -> Result<BudgetPolicy, sqlx::Error> {
         last_updated_by: row.get_opt_string("last_updated_by")?,
         last_updated_at: row.get_i64("last_updated_at")?,
         workspace: row.get_string("workspace")?,
+        target_value: row.get_opt_string("target_value")?,
     })
+}
+
+fn normalize_budget_target_value<'a>(
+    target_scope: &str,
+    target_value: Option<&'a str>,
+) -> Result<Option<&'a str>, MlflowError> {
+    if target_scope == "ENDPOINT" {
+        return target_value
+            .filter(|value| !value.is_empty())
+            .map(Some)
+            .ok_or_else(|| {
+                MlflowError::invalid_parameter_value(
+                    "target_value is required when target_scope is ENDPOINT.",
+                )
+            });
+    }
+    Ok(None)
 }
 
 fn budget_window_bounds(

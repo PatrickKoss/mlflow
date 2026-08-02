@@ -28,7 +28,15 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 import mlflow
-from mlflow.entities import GatewayEndpointModelConfig, GatewayModelLinkageType
+from mlflow.entities import (
+    BudgetAction,
+    BudgetDuration,
+    BudgetDurationUnit,
+    BudgetTargetScope,
+    BudgetUnit,
+    GatewayEndpointModelConfig,
+    GatewayModelLinkageType,
+)
 from mlflow.gateway.providers.gemini import GeminiProvider
 from mlflow.server.fastapi_app import add_gateway_timing_middleware
 from mlflow.server.gateway_api import gateway_router
@@ -654,3 +662,47 @@ def test_python_rust_gateway_runtime_mock_differential(tmp_path: Path, monkeypat
                     mlflow.set_tracking_uri(previous_tracking_uri)
 
                 assert python_inputs == rust_inputs == nested_body
+
+
+def test_endpoint_budget_rejects_only_targeted_streaming_route(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MLFLOW_CRYPTO_KEK_PASSPHRASE", FAKE_PASSPHRASE)
+    db_uri = f"sqlite:///{tmp_path / 'gateway-budget.db'}"
+    artifacts = tmp_path / "budget-artifacts"
+    artifacts.mkdir()
+    store = SqlAlchemyStore(db_uri, artifacts.as_uri())
+    with mock_provider_server() as mock_base:
+        target = _seed(store, "openai", mock_base, suffix="budget-target")
+        _seed(store, "openai", mock_base, suffix="budget-other")
+        store.create_budget_policy(
+            budget_unit=BudgetUnit.USD,
+            budget_amount=0.0,
+            duration=BudgetDuration(unit=BudgetDurationUnit.DAYS, value=1),
+            target_scope=BudgetTargetScope.ENDPOINT,
+            budget_action=BudgetAction.REJECT,
+            target_value=target.endpoint_id,
+        )
+        _align_disposable_schema_marker_with_rust(store)
+
+        with rust_server(db_uri) as rust_base:
+            targeted = requests.post(
+                f"{rust_base}/gateway/openai-budget-target-endpoint/mlflow/invocations",
+                json={
+                    "messages": [{"role": "user", "content": "targeted stream"}],
+                    "stream": True,
+                },
+                timeout=10,
+            )
+            assert targeted.status_code == 429
+
+            other = requests.post(
+                f"{rust_base}/gateway/openai-budget-other-endpoint/mlflow/invocations",
+                json={
+                    "messages": [{"role": "user", "content": "other stream"}],
+                    "stream": True,
+                },
+                timeout=10,
+            )
+            assert other.status_code == 200
+            assert other.headers["content-type"].startswith("text/event-stream")
+            assert other.content.startswith(b"data: ")
+            assert b'"provider":"openai"' in other.content

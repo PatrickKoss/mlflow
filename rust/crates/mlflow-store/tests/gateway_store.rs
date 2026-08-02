@@ -25,7 +25,7 @@ async fn seed_gateway_cost(
     trace_id: &str,
     timestamp_ms: i64,
     cost: f64,
-    gateway_tagged: bool,
+    endpoint_id: Option<&str>,
 ) {
     store
         .start_trace(
@@ -40,10 +40,10 @@ async fn seed_gateway_cost(
                 request_preview: None,
                 response_preview: None,
                 tags: Vec::new(),
-                trace_metadata: if gateway_tagged {
+                trace_metadata: if let Some(endpoint_id) = endpoint_id {
                     vec![(
                         "mlflow.gateway.endpointId".to_string(),
-                        "ep-fixture".to_string(),
+                        endpoint_id.to_string(),
                     )]
                 } else {
                     Vec::new()
@@ -105,10 +105,19 @@ async fn gateway_cost_sum_uses_total_cost_tag_time_bounds_and_workspace() {
         "tr-default",
         1_000,
         1.25,
-        true,
+        Some("ep-fixture"),
     )
     .await;
-    seed_gateway_cost(&store, "other", &exp_other, "tr-other", 1_500, 2.5, true).await;
+    seed_gateway_cost(
+        &store,
+        "other",
+        &exp_other,
+        "tr-other",
+        1_500,
+        2.5,
+        Some("ep-other"),
+    )
+    .await;
     seed_gateway_cost(
         &store,
         WORKSPACE_DEFAULT_NAME,
@@ -116,37 +125,100 @@ async fn gateway_cost_sum_uses_total_cost_tag_time_bounds_and_workspace() {
         "tr-not-gateway",
         1_500,
         100.0,
-        false,
+        None,
     )
     .await;
 
     assert_eq!(
         store
-            .sum_gateway_trace_cost(1_000, 2_000, None)
+            .sum_gateway_trace_cost(1_000, 2_000, None, None)
             .await
             .unwrap(),
         3.75
     );
     assert_eq!(
         store
-            .sum_gateway_trace_cost(1_000, 2_000, Some(WORKSPACE_DEFAULT_NAME))
+            .sum_gateway_trace_cost(1_000, 2_000, Some(WORKSPACE_DEFAULT_NAME), None)
             .await
             .unwrap(),
         1.25
     );
     assert_eq!(
         store
-            .sum_gateway_trace_cost(1_001, 1_500, None)
+            .sum_gateway_trace_cost(1_001, 1_500, None, None)
             .await
             .unwrap(),
         0.0
     );
     assert_eq!(
         store
-            .sum_gateway_trace_cost(1_500, 1_501, None)
+            .sum_gateway_trace_cost(1_500, 1_501, None, None)
             .await
             .unwrap(),
         2.5
+    );
+    assert_eq!(
+        store
+            .sum_gateway_trace_cost(1_000, 2_000, None, Some("ep-fixture"))
+            .await
+            .unwrap(),
+        1.25
+    );
+    assert_eq!(
+        store
+            .sum_gateway_trace_cost(1_000, 2_000, None, Some("ep-other"))
+            .await
+            .unwrap(),
+        2.5
+    );
+}
+
+#[tokio::test]
+async fn budget_windows_include_global_and_owning_workspace_policies() {
+    let (_temp, store) = store("budget_window_listing").await;
+    store
+        .create_budget_policy(
+            WORKSPACE_DEFAULT_NAME,
+            "USD",
+            10.0,
+            "DAYS",
+            1,
+            "GLOBAL",
+            "ALERT",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .create_budget_policy(
+            "other",
+            "USD",
+            10.0,
+            "DAYS",
+            1,
+            "WORKSPACE",
+            "ALERT",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let enforcement_policies = store
+        .list_budget_policies_for_enforcement(1000)
+        .await
+        .unwrap();
+    assert_eq!(enforcement_policies.len(), 2);
+
+    assert_eq!(store.list_budget_windows("other").await.unwrap().len(), 2);
+    assert_eq!(
+        store
+            .list_budget_windows(WORKSPACE_DEFAULT_NAME)
+            .await
+            .unwrap()
+            .len(),
+        1
     );
 }
 
@@ -364,6 +436,144 @@ async fn secret_model_endpoint_crud_round_trip_and_cache_invalidation() {
         .await
         .unwrap();
 
+    let error = store
+        .create_budget_policy(
+            WORKSPACE_DEFAULT_NAME,
+            "USD",
+            25.0,
+            "DAYS",
+            1,
+            "ENDPOINT",
+            "REJECT",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "target_value is required when target_scope is ENDPOINT."
+    );
+    let error = store
+        .create_budget_policy(
+            WORKSPACE_DEFAULT_NAME,
+            "USD",
+            25.0,
+            "DAYS",
+            1,
+            "ENDPOINT",
+            "REJECT",
+            None,
+            Some("ep-does-not-exist"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "GatewayEndpoint not found (endpoint_id='ep-does-not-exist')"
+    );
+
+    let endpoint_budget = store
+        .create_budget_policy(
+            WORKSPACE_DEFAULT_NAME,
+            "USD",
+            25.0,
+            "DAYS",
+            1,
+            "ENDPOINT",
+            "REJECT",
+            Some("test-user"),
+            Some(&endpoint.endpoint_id),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        endpoint_budget.target_value.as_deref(),
+        Some(endpoint.endpoint_id.as_str())
+    );
+    seed_gateway_cost(
+        &store,
+        WORKSPACE_DEFAULT_NAME,
+        endpoint.experiment_id.as_deref().unwrap(),
+        "tr-endpoint-history",
+        chrono::Utc::now().timestamp_millis(),
+        4.5,
+        Some(&endpoint.endpoint_id),
+    )
+    .await;
+    let endpoint_window = store
+        .list_budget_windows(WORKSPACE_DEFAULT_NAME)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|window| window.budget_policy_id == endpoint_budget.budget_policy_id)
+        .unwrap();
+    assert_eq!(endpoint_window.current_spend, 4.5);
+    let endpoint_budget = store
+        .update_budget_policy(
+            WORKSPACE_DEFAULT_NAME,
+            &endpoint_budget.budget_policy_id,
+            BudgetPolicyUpdate {
+                budget_amount: Some(30.0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        endpoint_budget.target_value.as_deref(),
+        Some(endpoint.endpoint_id.as_str())
+    );
+    let error = store
+        .update_budget_policy(
+            WORKSPACE_DEFAULT_NAME,
+            &endpoint_budget.budget_policy_id,
+            BudgetPolicyUpdate {
+                target_value: Some("ep-does-not-exist"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.message,
+        "GatewayEndpoint not found (endpoint_id='ep-does-not-exist')"
+    );
+    let endpoint_budget = store
+        .update_budget_policy(
+            WORKSPACE_DEFAULT_NAME,
+            &endpoint_budget.budget_policy_id,
+            BudgetPolicyUpdate {
+                target_scope: Some("GLOBAL"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(endpoint_budget.target_scope, "GLOBAL");
+    assert_eq!(endpoint_budget.target_value, None);
+    let endpoint_budget = store
+        .update_budget_policy(
+            WORKSPACE_DEFAULT_NAME,
+            &endpoint_budget.budget_policy_id,
+            BudgetPolicyUpdate {
+                target_scope: Some("ENDPOINT"),
+                target_value: Some(&endpoint.endpoint_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(endpoint_budget.target_scope, "ENDPOINT");
+    assert_eq!(
+        endpoint_budget.target_value.as_deref(),
+        Some(endpoint.endpoint_id.as_str())
+    );
+    store
+        .delete_budget_policy(WORKSPACE_DEFAULT_NAME, &endpoint_budget.budget_policy_id)
+        .await
+        .unwrap();
+
     let budget = store
         .create_budget_policy(
             WORKSPACE_DEFAULT_NAME,
@@ -374,9 +584,11 @@ async fn secret_model_endpoint_crud_round_trip_and_cache_invalidation() {
             "WORKSPACE",
             "ALERT",
             Some("test-user"),
+            Some("stray-target"),
         )
         .await
         .unwrap();
+    assert_eq!(budget.target_value, None);
     let budget = store
         .update_budget_policy(
             WORKSPACE_DEFAULT_NAME,

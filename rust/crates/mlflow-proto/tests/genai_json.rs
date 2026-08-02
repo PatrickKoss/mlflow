@@ -28,6 +28,42 @@ where
 }
 
 #[test]
+fn endpoint_budget_policy_proto_json_round_trip_preserves_target() {
+    let message = mlflow::GatewayBudgetPolicy {
+        budget_policy_id: Some("bp-1".to_string()),
+        budget_unit: Some(mlflow::BudgetUnit::Usd as i32),
+        budget_amount: Some(25.5),
+        duration: Some(mlflow::BudgetDuration {
+            unit: Some(mlflow::BudgetDurationUnit::Days as i32),
+            value: Some(1),
+        }),
+        target_scope: Some(mlflow::BudgetTargetScope::Endpoint as i32),
+        budget_action: Some(mlflow::BudgetAction::Reject as i32),
+        created_at: Some(9_007_199_254_740_993),
+        target_value: Some("ep-1".to_string()),
+        ..Default::default()
+    };
+
+    assert_round_trip(
+        &message,
+        "mlflow.GatewayBudgetPolicy",
+        r#"{
+  "budget_policy_id": "bp-1",
+  "budget_unit": "USD",
+  "budget_amount": 25.5,
+  "duration": {
+    "unit": "DAYS",
+    "value": 1
+  },
+  "target_scope": "ENDPOINT",
+  "budget_action": "REJECT",
+  "created_at": 9007199254740993,
+  "target_value": "ep-1"
+}"#,
+    );
+}
+
+#[test]
 fn datasets_proto_json_round_trip_preserves_presence_and_json_strings() {
     let message = datasets::Dataset {
         dataset_id: Some("d-1".to_string()),

@@ -1341,6 +1341,11 @@ pub async fn create_budget_policy(
     let scope = target_scope(required_enum(req.target_scope, "target_scope")?)?;
     let action = budget_action(required_enum(req.budget_action, "budget_action")?)?;
     let amount = req.budget_amount.ok_or_else(|| missing("budget_amount"))?;
+    let target_value = req
+        .target_value
+        .as_deref()
+        .filter(|value| !value.is_empty());
+    validate_budget_target_scope(scope, target_value)?;
     let policy = state
         .tracking_store()
         .create_budget_policy(
@@ -1352,8 +1357,10 @@ pub async fn create_budget_policy(
             scope,
             action,
             req.created_by.as_deref().filter(|v| !v.is_empty()),
+            target_value,
         )
         .await?;
+    state.budget_tracker().invalidate().await;
     proto_response(
         &pb::create_gateway_budget_policy::Response {
             budget_policy: Some(budget_proto(policy)),
@@ -1414,11 +1421,33 @@ pub async fn update_budget_policy(
         .transpose()?;
     let scope = req.target_scope.map(target_scope).transpose()?;
     let action = req.budget_action.map(budget_action).transpose()?;
+    let target_value_provided = req.target_value.is_some();
+    let target_value = req
+        .target_value
+        .as_deref()
+        .filter(|value| !value.is_empty());
+    let budget_policy_id = required(req.budget_policy_id.as_deref(), "budget_policy_id")?;
+    if scope.is_some() || target_value_provided {
+        let existing = state
+            .tracking_store()
+            .get_budget_policy(workspace.name(), budget_policy_id)
+            .await?;
+        let effective_scope = scope.unwrap_or(&existing.target_scope);
+        let inherited_target = (effective_scope == existing.target_scope)
+            .then_some(existing.target_value.as_deref())
+            .flatten();
+        let effective_target = if target_value_provided {
+            target_value
+        } else {
+            inherited_target
+        };
+        validate_budget_target_scope(effective_scope, effective_target)?;
+    }
     let policy = state
         .tracking_store()
         .update_budget_policy(
             workspace.name(),
-            required(req.budget_policy_id.as_deref(), "budget_policy_id")?,
+            budget_policy_id,
             BudgetPolicyUpdate {
                 budget_unit: unit,
                 budget_amount: req.budget_amount,
@@ -1426,9 +1455,11 @@ pub async fn update_budget_policy(
                 target_scope: scope,
                 budget_action: action,
                 updated_by: req.updated_by.as_deref().filter(|v| !v.is_empty()),
+                target_value,
             },
         )
         .await?;
+    state.budget_tracker().invalidate().await;
     proto_response(
         &pb::update_gateway_budget_policy::Response {
             budget_policy: Some(budget_proto(policy)),
@@ -1456,6 +1487,7 @@ pub async fn delete_budget_policy(
             required(req.budget_policy_id.as_deref(), "budget_policy_id")?,
         )
         .await?;
+    state.budget_tracker().invalidate().await;
     empty_response!(
         pb::delete_gateway_budget_policy::Response,
         "mlflow.DeleteGatewayBudgetPolicy.Response"
@@ -2033,9 +2065,7 @@ fn budget_proto(policy: BudgetPolicy) -> pb::GatewayBudgetPolicy {
         }),
         target_scope: pb::BudgetTargetScope::from_str_name(&policy.target_scope)
             .map(|value| value as i32),
-        // T-S6 owns budget target-value persistence and behavior. Keep the
-        // newly merged protobuf field neutral until that port lands.
-        target_value: None,
+        target_value: policy.target_value,
         budget_action: pb::BudgetAction::from_str_name(&policy.budget_action)
             .map(|value| value as i32),
         created_by: Some(policy.created_by.unwrap_or_default()),
@@ -2043,6 +2073,24 @@ fn budget_proto(policy: BudgetPolicy) -> pb::GatewayBudgetPolicy {
         last_updated_by: Some(policy.last_updated_by.unwrap_or_default()),
         last_updated_at: Some(policy.last_updated_at),
     }
+}
+
+fn validate_budget_target_scope(
+    target_scope: &str,
+    target_value: Option<&str>,
+) -> Result<(), MlflowError> {
+    if target_scope == "ENDPOINT" {
+        if target_value.is_none() {
+            return Err(MlflowError::invalid_parameter_value(
+                "target_value is required when target_scope is ENDPOINT.",
+            ));
+        }
+    } else if target_value.is_some() {
+        return Err(MlflowError::invalid_parameter_value(
+            "target_value can only be set when target_scope is ENDPOINT.",
+        ));
+    }
+    Ok(())
 }
 
 fn scorer_proto(scorer: ScorerVersion) -> pb::Scorer {

@@ -186,6 +186,114 @@ cases:
       updated_by: corpus-user
     expect_status: 200
 
+  - name: gateway_create_endpoint_budget_missing_target
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/create
+    body:
+      budget_unit: USD
+      budget_amount: 25.5
+      duration: {unit: DAYS, value: 1}
+      target_scope: ENDPOINT
+      budget_action: REJECT
+    expect_status: 400
+
+  - name: gateway_create_global_budget_with_target
+    method: POST
+    path: /ajax-api/3.0/mlflow/gateway/budgets/create
+    body:
+      budget_unit: USD
+      budget_amount: 25.5
+      duration: {unit: DAYS, value: 1}
+      target_scope: GLOBAL
+      budget_action: REJECT
+      target_value: "${gateway_endpoint_id}"
+    expect_status: 400
+
+  - name: gateway_create_endpoint_budget_nonexistent_target
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/create
+    body:
+      budget_unit: USD
+      budget_amount: 25.5
+      duration: {unit: DAYS, value: 1}
+      target_scope: ENDPOINT
+      budget_action: REJECT
+      target_value: ep-does-not-exist
+    expect_status: 404
+
+  - name: gateway_create_endpoint_budget
+    method: POST
+    path: /ajax-api/3.0/mlflow/gateway/budgets/create
+    body:
+      budget_unit: USD
+      budget_amount: 25.5
+      duration: {unit: DAYS, value: 1}
+      target_scope: ENDPOINT
+      budget_action: REJECT
+      target_value: "${gateway_endpoint_id}"
+    bind:
+      - {bind: gateway_endpoint_budget_policy_id, from: "$.budget_policy.budget_policy_id"}
+    expect_status: 200
+
+  - name: gateway_update_endpoint_budget_scope_echo_preserves_target
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/update
+    body:
+      budget_policy_id: "${gateway_endpoint_budget_policy_id}"
+      target_scope: ENDPOINT
+      budget_amount: 30.0
+    expect_status: 200
+
+  - name: gateway_update_endpoint_budget_nonexistent_target
+    method: POST
+    path: /ajax-api/3.0/mlflow/gateway/budgets/update
+    body:
+      budget_policy_id: "${gateway_endpoint_budget_policy_id}"
+      target_value: ep-does-not-exist
+    expect_status: 404
+
+  - name: gateway_create_global_budget_for_scope_change
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/create
+    body:
+      budget_unit: USD
+      budget_amount: 25.5
+      duration: {unit: DAYS, value: 1}
+      target_scope: GLOBAL
+      budget_action: REJECT
+    bind:
+      - {bind: gateway_scope_change_budget_policy_id, from: "$.budget_policy.budget_policy_id"}
+    expect_status: 200
+
+  - name: gateway_update_budget_switch_to_endpoint_without_target
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/update
+    body:
+      budget_policy_id: "${gateway_scope_change_budget_policy_id}"
+      target_scope: ENDPOINT
+    expect_status: 400
+
+  - name: gateway_update_budget_switch_to_endpoint_with_target
+    method: POST
+    path: /api/3.0/mlflow/gateway/budgets/update
+    body:
+      budget_policy_id: "${gateway_scope_change_budget_policy_id}"
+      target_scope: ENDPOINT
+      target_value: "${gateway_endpoint_id}"
+    expect_status: 200
+
+  - name: gateway_delete_endpoint_budget
+    method: DELETE
+    path: /api/3.0/mlflow/gateway/budgets/delete
+    body: {budget_policy_id: "${gateway_endpoint_budget_policy_id}"}
+    expect_status: 200
+
+  - name: gateway_delete_scope_change_budget
+    method: DELETE
+    path: /ajax-api/3.0/mlflow/gateway/budgets/delete
+    body: {budget_policy_id: "${gateway_scope_change_budget_policy_id}"}
+    expect_status: 200
+
   - name: gateway_set_endpoint_tag
     method: POST
     path: /api/3.0/mlflow/gateway/endpoints/set-tag
