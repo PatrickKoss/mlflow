@@ -40825,6 +40825,29 @@
         "strategy": "existing_python_tests"
       },
       "http_method": "GET",
+      "id": "surface:assistant:assistant_providers:GET",
+      "module": null,
+      "native_owner_crate": "mlflow-server",
+      "paths": [
+        "/ajax-api/3.0/mlflow/assistant/providers"
+      ],
+      "qualname": "assistant_providers",
+      "reachability_evidence": "mlflow/server/assistant/api.py:528",
+      "scope": "part_ii_surface",
+      "source": "mlflow/server/assistant/api.py:528",
+      "symbol_kind": "http_route",
+      "task": "T20.2",
+      "tier": "B"
+    },
+    {
+      "ambiguity": null,
+      "classification": "server_reachable",
+      "classification_reason": "Part II assistant server surface",
+      "fixture_oracle": {
+        "oracle_group": "surface:assistant",
+        "strategy": "existing_python_tests"
+      },
+      "http_method": "GET",
       "id": "surface:assistant:assistant_config_get:GET",
       "module": null,
       "native_owner_crate": "mlflow-server",
@@ -41275,14 +41298,14 @@
     "classification_counts": {
       "client_only": 375,
       "dead": 0,
-      "server_reachable": 1546
+      "server_reachable": 1547
     },
     "phase_counts": {
       "T16": 138,
       "T17": 6,
       "T18": 55,
       "T19": 1331,
-      "T20": 12,
+      "T20": 13,
       "T21": 4,
       "T22": 0
     },
@@ -41310,7 +41333,7 @@
       "T19.4": 63,
       "T19.5": 99,
       "T20.1": 6,
-      "T20.2": 3,
+      "T20.2": 4,
       "T20.3": 2,
       "T20.4": 1,
       "T21.1": 1,
@@ -41325,7 +41348,7 @@
     },
     "tier_counts": {
       "A": 184,
-      "B": 28,
+      "B": 29,
       "C": 1334
     }
   },

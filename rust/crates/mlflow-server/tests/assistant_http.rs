@@ -18,7 +18,7 @@ use mlflow_server::assistant::{
     AssistantRuntime,
 };
 use mlflow_server::{build_app_with_recorder, AppState, ServerConfig};
-use mlflow_store::{Db, PoolConfig, TrackingStore};
+use mlflow_store::{Db, PoolConfig, TrackingStore, WORKSPACE_DEFAULT_NAME};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -133,6 +133,7 @@ struct Fixture {
     _directory: tempfile::TempDir,
     app: axum::Router,
     runtime: AssistantRuntime,
+    store: TrackingStore,
     requests: Arc<Mutex<Vec<AssistantProviderRequest>>>,
     model_calls: ModelCalls,
 }
@@ -180,6 +181,11 @@ impl Fixture {
                 ),
                 models: AssistantProviderError::NotConfigured("fixture models missing".to_string()),
             }),
+            Arc::new(FailingProvider {
+                name: "mlflow_gateway",
+                health: AssistantProviderError::NotImplemented(String::new()),
+                models: AssistantProviderError::NotImplemented(String::new()),
+            }),
         ];
         let runtime = AssistantRuntime::new(
             directory.path().join("sessions"),
@@ -195,12 +201,13 @@ impl Fixture {
                 ..Default::default()
             },
             recorder,
-            Some(AppState::new(store).with_assistant_runtime(runtime.clone())),
+            Some(AppState::new(store.clone()).with_assistant_runtime(runtime.clone())),
         );
         Self {
             _directory: directory,
             app,
             runtime,
+            store,
             requests,
             model_calls,
         }
@@ -258,6 +265,206 @@ impl Fixture {
             .await;
         assert_eq!(status, StatusCode::OK);
     }
+}
+
+#[tokio::test]
+async fn gateway_api_keys_validate_and_create_idempotent_llm_connections() {
+    let fixture = Fixture::new().await;
+    for (provider, update, detail) in [
+        (
+            "mlflow_gateway",
+            json!({"gateway_vendor":"openai"}),
+            "Gateway vendor connections require an API key.",
+        ),
+        (
+            "claude_code",
+            json!({"api_key":"obvious-fake-key"}),
+            "API keys must be stored in LLM Connections through the 'mlflow_gateway' provider.",
+        ),
+        (
+            "mlflow_gateway",
+            json!({"api_key":"obvious-fake-key"}),
+            "Gateway API keys require a gateway_vendor.",
+        ),
+        (
+            "mlflow_gateway",
+            json!({"api_key":"obvious-fake-key","gateway_vendor":"unknown"}),
+            "Unknown Gateway vendor: 'unknown'",
+        ),
+    ] {
+        let (status, _, body) = fixture
+            .local(
+                Method::PUT,
+                &format!("{PREFIX}/config"),
+                Some(json!({"providers": {provider: update}})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(&body), json!({"detail": detail}));
+    }
+
+    for api_key in ["obvious-fake-key-one", "obvious-fake-key-two"] {
+        let (status, _, body) = fixture
+            .local(
+                Method::PUT,
+                &format!("{PREFIX}/config"),
+                Some(json!({
+                    "providers": {
+                        "mlflow_gateway": {
+                            "api_key": api_key,
+                            "gateway_vendor": "openai",
+                            "selected": true,
+                        }
+                    }
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let response = json_body(&body);
+        assert_eq!(
+            response["providers"]["mlflow_gateway"]["model"],
+            "mlflow-assistant-openai"
+        );
+        assert!(response["providers"]["mlflow_gateway"]
+            .get("api_key")
+            .is_none());
+    }
+
+    let name = "mlflow-assistant-openai";
+    let secret = fixture
+        .store
+        .get_gateway_secret_info(WORKSPACE_DEFAULT_NAME, None, Some(name))
+        .await
+        .unwrap();
+    assert_eq!(secret.provider.as_deref(), Some("openai"));
+    assert_eq!(
+        fixture
+            .store
+            .get_decrypted_gateway_secret(WORKSPACE_DEFAULT_NAME, &secret.secret_id)
+            .await
+            .unwrap(),
+        json!({"api_key":"obvious-fake-key-two"})
+    );
+    let model = fixture
+        .store
+        .get_gateway_model_definition(WORKSPACE_DEFAULT_NAME, None, Some(name))
+        .await
+        .unwrap();
+    assert_eq!(model.secret_id.as_deref(), Some(secret.secret_id.as_str()));
+    assert_eq!(model.provider, "openai");
+    assert_eq!(model.model_name, "gpt-5.5");
+    let endpoint = fixture
+        .store
+        .get_gateway_endpoint(WORKSPACE_DEFAULT_NAME, None, Some(name))
+        .await
+        .unwrap();
+    assert_eq!(endpoint.model_mappings.len(), 1);
+    assert_eq!(
+        endpoint.model_mappings[0].model_definition_id,
+        model.model_definition_id
+    );
+    assert_eq!(
+        fixture
+            .store
+            .list_gateway_model_definitions(WORKSPACE_DEFAULT_NAME, None, None)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|definition| definition.name == name)
+            .count(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .store
+            .list_gateway_endpoints(WORKSPACE_DEFAULT_NAME, None, None)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|endpoint| endpoint.name.as_deref() == Some(name))
+            .count(),
+        1
+    );
+    let config_text = std::fs::read_to_string(
+        fixture
+            ._directory
+            .path()
+            .join("home/.mlflow/assistant/config.json"),
+    )
+    .unwrap();
+    assert!(!config_text.contains("obvious-fake-key"));
+
+    let (status, _, body) = fixture
+        .local(Method::GET, &format!("{PREFIX}/providers"), None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json_body(&body)["resolved"],
+        json!({
+            "name":"mlflow_gateway",
+            "model":"mlflow-assistant-openai",
+            "auto_selected":false,
+            "requires_api_key":false,
+            "has_api_key":true,
+            "model_provider":"openai",
+            "model_options":["gpt-5.5"],
+            "provider_model":"gpt-5.5",
+        })
+    );
+}
+
+#[tokio::test]
+async fn providers_response_has_exact_none_shape_for_an_empty_registry() {
+    let directory = tempfile::tempdir().unwrap();
+    let db_path = directory.path().join("assistant-empty.db");
+    std::fs::copy(fixture_path(), &db_path).unwrap();
+    let db = Db::connect(
+        &format!("sqlite:///{}", db_path.display()),
+        PoolConfig::default(),
+    )
+    .await
+    .unwrap();
+    let store = TrackingStore::new(db, directory.path().join("artifacts").display().to_string());
+    let home = directory.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let runtime = AssistantRuntime::new(
+        directory.path().join("sessions"),
+        home.join(".mlflow/assistant/config.json"),
+        directory.path().join("skills"),
+        home,
+        Vec::new(),
+    );
+    let recorder = PrometheusBuilder::new().build_recorder().handle();
+    let app = build_app_with_recorder(
+        &ServerConfig {
+            disable_security_middleware: true,
+            ..Default::default()
+        },
+        recorder,
+        Some(AppState::new(store).with_assistant_runtime(runtime)),
+    );
+    let mut request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("{PREFIX}/providers"))
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        4242,
+    )));
+    let (_, _, body) = collect(app.oneshot(request).await.unwrap()).await;
+    assert_eq!(
+        json_body(&body),
+        json!({
+            "providers":[],
+            "resolved":null,
+            "gateway_vendor_options":{
+                "openai":["gpt-5.5"],
+                "anthropic":["claude-sonnet-5"],
+                "gemini":["gemini-3-pro"],
+            },
+        })
+    );
 }
 
 async fn collect(response: Response<Body>) -> (StatusCode, axum::http::HeaderMap, Bytes) {

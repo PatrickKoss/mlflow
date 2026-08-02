@@ -27,7 +27,7 @@ class _Script:
 
 
 @contextmanager
-def scripted_server(turns):
+def scripted_server(turns, *, append_done=True):
     script = _Script(turns)
 
     class Handler(BaseHTTPRequestHandler):
@@ -36,7 +36,8 @@ def scripted_server(turns):
             script.requests.append(json.loads(self.rfile.read(length)))
             chunks = script.turns.pop(0)
             body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks)
-            body += "data: [DONE]\n\n"
+            if append_done:
+                body += "data: [DONE]\n\n"
             encoded = body.encode()
             self.send_response(200)
             self.send_header("content-type", "text/event-stream")
@@ -89,7 +90,7 @@ def _config(path, base_url, permissions=None):
 def _provider():
     return OpenAICompatibleProvider(
         name="oai_test",
-        display_name="OAI Test",
+        display_name="Ollama",
         description="fixture",
         connection_hint="fixture hint",
         list_models_fn=lambda *_args: ["fixture-model"],
@@ -160,17 +161,18 @@ def _delta(*, content=None, tool_calls=None):
     return {"choices": [{"delta": delta, "index": 0}]}
 
 
-def _compare(tmp_path, turns, request_factory):
-    with scripted_server(turns) as (base_url, python_script):
+def _compare(tmp_path, turns, request_factory, *, append_done=True):
+    with scripted_server(turns, append_done=append_done) as (base_url, python_script):
         request = request_factory(base_url)
         python = _python_frames(tmp_path, base_url, request)
         python_requests = python_script.requests
-    with scripted_server(turns) as (base_url, rust_script):
+    with scripted_server(turns, append_done=append_done) as (base_url, rust_script):
         request = request_factory(base_url)
         rust = _rust_frames(request)
         rust_requests = rust_script.requests
     assert rust == python
     assert rust_requests == python_requests
+    assert all("stream_options" not in request for request in rust_requests)
     return rust
 
 
@@ -277,3 +279,74 @@ def test_trim_boundary_transcript_is_identical(tmp_path):
         for message in json.loads(final)
         if isinstance(message.get("content"), str)
     )
+
+
+def test_truncated_empty_stream_is_frame_identical_error_without_done(tmp_path):
+    frames = _compare(
+        tmp_path,
+        [[{"id": "ignored-without-signal", "choices": []}]],
+        lambda base: _request(tmp_path, base),
+        append_done=False,
+    )
+    assert frames == [
+        "event: error\n"
+        'data: {"error": "Ollama returned an empty response and ended unexpectedly. '
+        "The upstream provider likely failed before producing any output (e.g. an invalid "
+        'API key or a rate limit)."}\n\n'
+    ]
+
+
+def test_mid_stream_error_frame_is_frame_identical_and_terminates_without_done(tmp_path):
+    frames = _compare(
+        tmp_path,
+        [[{"error": {"message": "invalid API key", "type": "authentication_error"}}]],
+        lambda base: _request(tmp_path, base),
+    )
+    assert frames == ['event: error\ndata: {"error": "Ollama error: invalid API key"}\n\n']
+
+
+def test_mid_stream_error_without_message_uses_python_error_repr(tmp_path):
+    frames = _compare(
+        tmp_path,
+        [[{"error": {"code": "invalid_api_key"}}]],
+        lambda base: _request(tmp_path, base),
+    )
+    assert frames == [
+        "event: error\n"
+        "data: {\"error\": \"Ollama returned an error: {'code': 'invalid_api_key'}\"}\n\n"
+    ]
+
+
+def test_non_object_error_frame_uses_message_form(tmp_path):
+    frames = _compare(
+        tmp_path,
+        [[{"error": "upstream disconnected"}]],
+        lambda base: _request(tmp_path, base),
+    )
+    assert frames == ['event: error\ndata: {"error": "Ollama error: upstream disconnected"}\n\n']
+
+
+def test_cache_read_tokens_usage_frame_is_identical(tmp_path):
+    frames = _compare(
+        tmp_path,
+        [
+            [
+                {
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 2,
+                        "total_tokens": 12,
+                        "prompt_tokens_details": {"cached_tokens": 7},
+                    },
+                }
+            ]
+        ],
+        lambda base: _request(tmp_path, base),
+    )
+    assert frames[0] == (
+        'event: stream_event\ndata: {"event": {"type": "usage", "usage": '
+        '{"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12, '
+        '"cache_read_tokens": 7, "total_cost_usd": null}}}\n\n'
+    )
+    assert frames[-1].startswith("event: done")

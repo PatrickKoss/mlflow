@@ -74,6 +74,10 @@ impl ProviderKind {
     }
 }
 
+pub fn is_available(provider: ProviderKind) -> bool {
+    find_executable(provider.binary()).is_some()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PermissionsConfig {
     pub allow_edit_files: bool,
@@ -862,9 +866,10 @@ fn parse_rate_limit_event(data: &Value) -> Option<Event> {
 }
 
 fn claude_usage_event(usage: &Value, cost: Value) -> Event {
+    let cache_read_tokens = numeric_or_zero(usage.get("cache_read_input_tokens"));
     let prompt_tokens = numeric_or_zero(usage.get("input_tokens"))
         + numeric_or_zero(usage.get("cache_creation_input_tokens"))
-        + numeric_or_zero(usage.get("cache_read_input_tokens"));
+        + cache_read_tokens;
     let completion_tokens = numeric_or_zero(usage.get("output_tokens"));
     Event::from_stream_event(json!({
         "type": "usage",
@@ -872,6 +877,7 @@ fn claude_usage_event(usage: &Value, cost: Value) -> Event {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
+            "cache_read_tokens": cache_read_tokens,
             "total_cost_usd": cost,
         }
     }))
@@ -933,6 +939,7 @@ fn codex_usage_event(usage: &Value, model: Option<&str>) -> Event {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
+            "cache_read_tokens": cached_tokens.unwrap_or(0),
             "total_cost_usd": total_cost,
         }
     }))
@@ -1464,6 +1471,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, EventType::StreamEvent);
         assert_eq!(events[0].data["event"]["usage"]["prompt_tokens"], 9);
+        assert_eq!(events[0].data["event"]["usage"]["cache_read_tokens"], 4);
         assert_eq!(events[1].event_type, EventType::Done);
     }
 
@@ -1524,6 +1532,7 @@ mod tests {
             usage[0].data["event"]["usage"]["total_cost_usd"],
             json!(2.97e-5)
         );
+        assert_eq!(usage[0].data["event"]["usage"]["cache_read_tokens"], 4);
     }
 
     #[test]

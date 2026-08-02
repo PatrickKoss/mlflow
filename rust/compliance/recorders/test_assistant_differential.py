@@ -23,7 +23,7 @@ import requests
 import uvicorn
 from fastapi import FastAPI
 
-from mlflow.assistant.providers import MlflowGatewayProvider
+from mlflow.assistant.providers import CodexProvider, MlflowGatewayProvider, OllamaProvider
 from mlflow.assistant.providers.base import AssistantProvider
 from mlflow.assistant.types import Event, Message, TextBlock
 from mlflow.server.assistant.api import assistant_router
@@ -51,7 +51,7 @@ class ScriptedProvider(AssistantProvider):
 
     @property
     def description(self):
-        return "Differential fixture"
+        return "AI-powered assistant using Claude Code CLI"
 
     def is_available(self):
         return True
@@ -79,6 +79,7 @@ class ScriptedProvider(AssistantProvider):
                 "prompt_tokens": 8,
                 "completion_tokens": 24,
                 "total_tokens": 32,
+                "cache_read_tokens": 0,
                 "total_cost_usd": 0.0,
             },
         })
@@ -92,7 +93,7 @@ def _free_port():
 
 
 @contextmanager
-def rust_server(tmp_path, *, config=None, remote_enabled=None):
+def rust_server(tmp_path, *, config=None, remote_enabled=None, stub_claude=True, path=None):
     assert RUST_BINARY.exists(), f"build first: cargo build -p mlflow-server ({RUST_BINARY})"
     database = tmp_path / "rust.db"
     shutil.copy(FIXTURE_DB, database)
@@ -109,10 +110,13 @@ def rust_server(tmp_path, *, config=None, remote_enabled=None):
         **os.environ,
         "HOME": str(home),
         "TMPDIR": str(sessions),
-        "MLFLOW_ASSISTANT_DEV_STUB_PROVIDERS": "claude",
         "MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE": "true",
         "MLFLOW_SERVER_ENABLE_JOB_EXECUTION": "false",
     }
+    if stub_claude:
+        env["MLFLOW_ASSISTANT_DEV_STUB_PROVIDERS"] = "claude"
+    if path is not None:
+        env["PATH"] = str(path)
     if remote_enabled is not None:
         env["MLFLOW_ENABLE_REMOTE_ASSISTANT"] = str(remote_enabled).lower()
     process = subprocess.Popen(
@@ -145,7 +149,7 @@ def rust_server(tmp_path, *, config=None, remote_enabled=None):
 
 
 @contextmanager
-def python_server(tmp_path, stack, *, config=None, remote_enabled=None):
+def python_server(tmp_path, stack, *, config=None, remote_enabled=None, resolve_none=False):
     import mlflow.assistant.config as config_module
     import mlflow.server.assistant.session as session_module
 
@@ -157,10 +161,21 @@ def python_server(tmp_path, stack, *, config=None, remote_enabled=None):
         config_path.write_text(json.dumps(config))
     stack.enter_context(patch.object(config_module, "CONFIG_PATH", config_path))
     stack.enter_context(patch.object(session_module, "SESSION_DIR", tmp_path / "python-sessions"))
+    scripted = ScriptedProvider()
     stack.enter_context(
         patch(
             "mlflow.server.assistant.api.list_providers",
-            return_value=[ScriptedProvider(), MlflowGatewayProvider()],
+            return_value=[scripted, CodexProvider(), MlflowGatewayProvider(), OllamaProvider()],
+        )
+    )
+    stack.enter_context(
+        patch(
+            "mlflow.server.assistant.api.resolve_default_provider",
+            side_effect=(
+                (lambda **_kwargs: None)
+                if resolve_none
+                else (lambda remote=False, **_kwargs: None if remote else scripted)
+            ),
         )
     )
     if remote_enabled is not None:
@@ -205,16 +220,10 @@ def _normalize(content, session_id):
     return re.sub(rb"mlflow-dev-stub-[A-Za-z0-9]+", b"<provider-session-id>", content)
 
 
-def _compare(py_response, rs_response, py_session="", rs_session="", d18=False):
+def _compare(py_response, rs_response, py_session="", rs_session=""):
     assert py_response.status_code == rs_response.status_code
     py_body = py_response.content
     rs_body = rs_response.content
-    if d18:
-        py_value = py_response.json()
-        py_value["stream_url"] = (
-            py_value["stream_url"].replace("/assistant/stream/", "/assistant/sessions/") + "/stream"
-        )
-        py_body = json.dumps(py_value, separators=(",", ":")).encode()
     py_body = _normalize(py_body, py_session)
     rs_body = _normalize(rs_body, rs_session)
     assert py_body == rs_body, f"PY={py_body!r}\nRS={rs_body!r}"
@@ -224,7 +233,7 @@ def _compare(py_response, rs_response, py_session="", rs_session="", d18=False):
             assert py_response.headers.get(name) == rs_response.headers.get(name)
 
 
-def test_python_rust_assistant_27_case_differential(tmp_path):
+def test_python_rust_assistant_route_differential(tmp_path):
     with ExitStack() as stack, rust_server(tmp_path) as rust_base:
         with python_server(tmp_path, stack) as python_base:
             python = requests.Session()
@@ -247,16 +256,27 @@ def test_python_rust_assistant_27_case_differential(tmp_path):
                 return py, rs
 
             compare("GET", f"{PREFIX}/config")  # 1
-            compare("GET", f"{PREFIX}/providers/claude_code/health")  # 2
-            compare("GET", f"{PREFIX}/providers/missing/health")  # 3
-            compare("GET", f"{PREFIX}/providers/claude_code/models")  # 4
-            compare("GET", f"{PREFIX}/providers/missing/models")  # 5
-            compare("PUT", f"{PREFIX}/config", json={})  # 6
-            compare("POST", f"{PREFIX}/skills/install", json={"type": "invalid"})  # 7
-            compare("POST", f"{PREFIX}/message")  # 8
-            compare("POST", f"{PREFIX}/message", json={})  # 9
-            compare("POST", f"{PREFIX}/message", json={"message": 1})  # 10
-            compare("POST", f"{PREFIX}/message", json={"message": "x", "context": []})  # 11
+            _, providers = compare("GET", f"{PREFIX}/providers")  # 2
+            assert providers.json()["resolved"] == {
+                "name": "claude_code",
+                "model": None,
+                "auto_selected": True,
+                "requires_api_key": False,
+                "has_api_key": False,
+                "model_provider": None,
+                "model_options": [],
+                "provider_model": None,
+            }
+            compare("GET", f"{PREFIX}/providers/claude_code/health")  # 3
+            compare("GET", f"{PREFIX}/providers/missing/health")  # 4
+            compare("GET", f"{PREFIX}/providers/claude_code/models")  # 5
+            compare("GET", f"{PREFIX}/providers/missing/models")  # 6
+            compare("PUT", f"{PREFIX}/config", json={})  # 7
+            compare("POST", f"{PREFIX}/skills/install", json={"type": "invalid"})  # 8
+            compare("POST", f"{PREFIX}/message")  # 9
+            compare("POST", f"{PREFIX}/message", json={})  # 10
+            compare("POST", f"{PREFIX}/message", json={"message": 1})  # 11
+            compare("POST", f"{PREFIX}/message", json={"message": "x", "context": []})  # 12
 
             py, rs = pair(
                 "PUT",
@@ -264,10 +284,12 @@ def test_python_rust_assistant_27_case_differential(tmp_path):
                 json={"providers": {"claude_code": {"selected": True}}},
             )
             _compare(py, rs)
-            comparisons += 1  # 12
-            compare("GET", f"{PREFIX}/config")  # 13
-            compare("POST", f"{PREFIX}/skills/install", json={"type": "custom"})  # 14
-            compare("POST", f"{PREFIX}/skills/install", json={"type": "project"})  # 15
+            comparisons += 1  # 13
+            compare("GET", f"{PREFIX}/config")  # 14
+            _, providers = compare("GET", f"{PREFIX}/providers")  # 15
+            assert providers.json()["resolved"]["auto_selected"] is False
+            compare("POST", f"{PREFIX}/skills/install", json={"type": "custom"})  # 16
+            compare("POST", f"{PREFIX}/skills/install", json={"type": "project"})  # 17
 
             py, rs = pair(
                 "POST",
@@ -276,40 +298,40 @@ def test_python_rust_assistant_27_case_differential(tmp_path):
             )
             py_session = py.json()["session_id"]
             rs_session = rs.json()["session_id"]
-            _compare(py, rs, py_session, rs_session, d18=True)
-            comparisons += 1  # 16
-
-            py = python.get(python_base + f"{PREFIX}/sessions/{py_session}/stream", timeout=10)
-            rs = rust.get(rust_base + f"{PREFIX}/sessions/{rs_session}/stream", timeout=10)
-            _compare(py, rs, py_session, rs_session)
-            comparisons += 1  # 17
-
-            py = python.get(python_base + f"{PREFIX}/sessions/{py_session}/stream", timeout=10)
-            rs = rust.get(rust_base + f"{PREFIX}/sessions/{rs_session}/stream", timeout=10)
             _compare(py, rs, py_session, rs_session)
             comparisons += 1  # 18
+
+            py = python.get(python_base + f"{PREFIX}/sessions/{py_session}/stream", timeout=10)
+            rs = rust.get(rust_base + f"{PREFIX}/sessions/{rs_session}/stream", timeout=10)
+            _compare(py, rs, py_session, rs_session)
+            comparisons += 1  # 19
+
+            py = python.get(python_base + f"{PREFIX}/sessions/{py_session}/stream", timeout=10)
+            rs = rust.get(rust_base + f"{PREFIX}/sessions/{rs_session}/stream", timeout=10)
+            _compare(py, rs, py_session, rs_session)
+            comparisons += 1  # 20
             compare(
                 "POST",
                 f"{PREFIX}/sessions/not-a-uuid/permission",
                 json={"request_id": "tool-1", "decision": "allow"},
-            )  # 19
+            )  # 21
             missing = "00000000-0000-0000-0000-000000000001"
             compare(
                 "POST",
                 f"{PREFIX}/sessions/{missing}/permission",
                 json={"request_id": "tool-1", "decision": "allow"},
-            )  # 20
+            )  # 22
             compare(
                 "POST",
                 f"{PREFIX}/sessions/{missing}/permission",
                 json={"request_id": "tool-1", "decision": "invalid"},
-            )  # 21
+            )  # 23
             compare(
                 "PATCH",
                 f"{PREFIX}/sessions/{missing}",
                 json={"status": "invalid"},
-            )  # 22
-            compare("GET", f"{PREFIX}/sessions/{missing}/stream")  # 23
+            )  # 24
+            compare("GET", f"{PREFIX}/sessions/{missing}/stream")  # 25
 
             py = python.post(
                 python_base + f"{PREFIX}/sessions/{py_session}/permission",
@@ -322,11 +344,11 @@ def test_python_rust_assistant_27_case_differential(tmp_path):
                 timeout=10,
             )
             _compare(py, rs, py_session, rs_session)
-            comparisons += 1  # 24
+            comparisons += 1  # 26
             py = python.get(python_base + f"{PREFIX}/sessions/{py_session}/stream", timeout=10)
             rs = rust.get(rust_base + f"{PREFIX}/sessions/{rs_session}/stream", timeout=10)
             _compare(py, rs, py_session, rs_session)
-            comparisons += 1  # 25
+            comparisons += 1  # 27
             py = python.patch(
                 python_base + f"{PREFIX}/sessions/{py_session}",
                 json={"status": "cancelled"},
@@ -338,14 +360,71 @@ def test_python_rust_assistant_27_case_differential(tmp_path):
                 timeout=10,
             )
             _compare(py, rs, py_session, rs_session)
-            comparisons += 1  # 26
+            comparisons += 1  # 28
             compare(
                 "PUT",
                 f"{PREFIX}/config",
                 json={"projects": {"7": {"location": "/definitely/missing/path"}}},
-            )  # 27
+            )  # 29
 
-            assert comparisons == 27
+            _, gateway = compare(
+                "PUT",
+                f"{PREFIX}/config",
+                json={
+                    "providers": {
+                        "mlflow_gateway": {
+                            "model": "mlflow-assistant-openai",
+                            "selected": True,
+                        }
+                    }
+                },
+            )  # 30
+            assert gateway.json()["providers"]["mlflow_gateway"]["model"] == (
+                "mlflow-assistant-openai"
+            )
+            _, providers = compare("GET", f"{PREFIX}/providers")  # 31
+            assert providers.json()["resolved"] == {
+                "name": "mlflow_gateway",
+                "model": "mlflow-assistant-openai",
+                "auto_selected": False,
+                "requires_api_key": False,
+                "has_api_key": True,
+                "model_provider": "openai",
+                "model_options": ["gpt-5.5"],
+                "provider_model": "gpt-5.5",
+            }
+            for provider, update, detail in (
+                (
+                    "mlflow_gateway",
+                    {"gateway_vendor": "openai"},
+                    "Gateway vendor connections require an API key.",
+                ),
+                (
+                    "claude_code",
+                    {"api_key": "obvious-fake-key"},
+                    "API keys must be stored in LLM Connections through the "
+                    "'mlflow_gateway' provider.",
+                ),
+                (
+                    "mlflow_gateway",
+                    {"api_key": "obvious-fake-key"},
+                    "Gateway API keys require a gateway_vendor.",
+                ),
+                (
+                    "mlflow_gateway",
+                    {"api_key": "obvious-fake-key", "gateway_vendor": "unknown"},
+                    "Unknown Gateway vendor: 'unknown'",
+                ),
+            ):
+                _, response = compare(
+                    "PUT",
+                    f"{PREFIX}/config",
+                    json={"providers": {provider: update}},
+                )
+                assert response.status_code == 400
+                assert response.json() == {"detail": detail}
+
+            assert comparisons == 35
 
 
 def test_python_rust_assistant_remote_access_matrix(tmp_path):
@@ -415,7 +494,6 @@ def test_python_rust_assistant_remote_access_matrix(tmp_path):
                         rs_response,
                         py_response.json()["session_id"],
                         rs_response.json()["session_id"],
-                        d18=True,
                     )
                 else:
                     assert py_response.content == rs_response.content
@@ -447,3 +525,79 @@ def test_python_rust_assistant_remote_access_matrix(tmp_path):
                         )
                         _compare(py_local_only, rs_local_only)
                         assert rs_local_only.status_code == 403
+
+
+def test_python_rust_no_provider_stream_is_exact_sse_error(tmp_path):
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    with (
+        ExitStack() as stack,
+        rust_server(tmp_path, stub_claude=False, path=empty_path) as rust_base,
+    ):
+        with python_server(tmp_path, stack, resolve_none=True) as python_base:
+            py_message = requests.post(
+                f"{python_base}{PREFIX}/message", json={"message": "hello"}, timeout=10
+            )
+            rs_message = requests.post(
+                f"{rust_base}{PREFIX}/message", json={"message": "hello"}, timeout=10
+            )
+            _compare(
+                py_message,
+                rs_message,
+                py_message.json()["session_id"],
+                rs_message.json()["session_id"],
+            )
+            py_stream = requests.get(
+                f"{python_base}{PREFIX}/sessions/{py_message.json()['session_id']}/stream",
+                timeout=10,
+            )
+            rs_stream = requests.get(
+                f"{rust_base}{PREFIX}/sessions/{rs_message.json()['session_id']}/stream",
+                timeout=10,
+            )
+            _compare(py_stream, rs_stream)
+            assert rs_stream.content == (
+                b"event: error\n"
+                b'data: {"error": "No assistant provider is configured or available."}\n\n'
+            )
+
+
+def test_python_rust_auto_selection_localhost_vs_remote(tmp_path):
+    with ExitStack() as stack, rust_server(tmp_path, remote_enabled=True) as rust_base:
+        with python_server(tmp_path, stack, remote_enabled=True) as python_base:
+            py_local = requests.post(
+                f"{python_base}{PREFIX}/message", json={"message": "local"}, timeout=10
+            )
+            rs_local = requests.post(
+                f"{rust_base}{PREFIX}/message", json={"message": "local"}, timeout=10
+            )
+            _compare(
+                py_local,
+                rs_local,
+                py_local.json()["session_id"],
+                rs_local.json()["session_id"],
+            )
+
+            remote_headers = {"X-Forwarded-For": "203.0.113.10"}
+            py_config = requests.get(
+                f"{python_base}{PREFIX}/config", headers=remote_headers, timeout=10
+            )
+            rs_config = requests.get(
+                f"{rust_base}{PREFIX}/config", headers=remote_headers, timeout=10
+            )
+            _compare(py_config, rs_config)
+            assert py_config.json()["providers"] == {}
+            py_remote = requests.post(
+                f"{python_base}{PREFIX}/message",
+                headers=remote_headers,
+                json={"message": "remote"},
+                timeout=10,
+            )
+            rs_remote = requests.post(
+                f"{rust_base}{PREFIX}/message",
+                headers=remote_headers,
+                json={"message": "remote"},
+                timeout=10,
+            )
+            _compare(py_remote, rs_remote)
+            assert rs_remote.status_code == 403

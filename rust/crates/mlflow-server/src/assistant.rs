@@ -4,6 +4,7 @@
 //! framing, and the provider integration seam. CLI process execution belongs
 //! to T20.2 and plugs in through [`AssistantProvider`].
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt::Debug;
 use std::fs::{self, OpenOptions};
@@ -23,7 +24,7 @@ use axum::Router;
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream};
 use futures::{FutureExt, StreamExt};
-use mlflow_store::python_json_dumps;
+use mlflow_store::{python_json_dumps, EndpointModelConfig, TrackingStore, WORKSPACE_DEFAULT_NAME};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -39,6 +40,15 @@ const NO_PROVIDER_DETAIL: &str = "No assistant provider is configured or availab
 const DEV_STUB_ENV: &str = "MLFLOW_ASSISTANT_DEV_STUB_PROVIDERS";
 const REMOTE_ASSISTANT_ENV: &str = "MLFLOW_ENABLE_REMOTE_ASSISTANT";
 const DEV_STUB_REPLY: &str = "This is a synthetic reply from the MLflow dev stub Claude CLI. The real Claude Code provider is replaced so the Assistant chat panel can be reviewed without credentials or LLM calls. No model was invoked to produce this message.";
+const GATEWAY_PROVIDER: &str = "mlflow_gateway";
+const GATEWAY_MANAGED_PREFIX: &str = "mlflow-assistant-";
+const GATEWAY_UNSUPPORTED_DETAIL: &str = "This MLflow server's tracking backend does not support the AI Gateway. Assistant-managed LLM Connections require a database-backed tracking store.";
+const DEFAULT_PROVIDER_ORDER: &[&str] = &["claude_code", "codex", GATEWAY_PROVIDER];
+const GATEWAY_VENDOR_MODELS: &[(&str, &str)] = &[
+    ("openai", "gpt-5.5"),
+    ("anthropic", "claude-sonnet-5"),
+    ("gemini", "gemini-3-pro"),
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AssistantMessage {
@@ -274,6 +284,19 @@ pub enum AssistantProviderError {
 /// execution; this module retains HTTP status mapping and SSE framing.
 pub trait AssistantProvider: Send + Sync + Debug {
     fn name(&self) -> &str;
+    fn display_name(&self) -> &str {
+        self.name()
+    }
+    fn description(&self) -> &str {
+        ""
+    }
+    fn is_available(
+        &self,
+        _tracking_store: TrackingStore,
+        _config: Option<Value>,
+    ) -> BoxFuture<'static, bool> {
+        async { true }.boxed()
+    }
     fn allows_remote_access(&self) -> bool {
         false
     }
@@ -370,6 +393,46 @@ impl AssistantRuntime {
         })
     }
 
+    async fn resolve_default_provider(
+        &self,
+        config: &AssistantConfig,
+        tracking_store: &TrackingStore,
+        remote: bool,
+        include_gateway: bool,
+    ) -> Option<Arc<dyn AssistantProvider>> {
+        for name in DEFAULT_PROVIDER_ORDER {
+            if !include_gateway && *name == GATEWAY_PROVIDER {
+                continue;
+            }
+            let Some(provider) = self.provider(name) else {
+                continue;
+            };
+            if remote && !provider.allows_remote_access() {
+                continue;
+            }
+            if provider
+                .is_available(tracking_store.clone(), config.providers.get(*name).cloned())
+                .await
+            {
+                return Some(provider);
+            }
+        }
+        None
+    }
+
+    async fn resolve_provider(
+        &self,
+        config: &AssistantConfig,
+        tracking_store: &TrackingStore,
+        remote: bool,
+    ) -> Option<Arc<dyn AssistantProvider>> {
+        if let Some(provider) = self.selected_provider(config) {
+            return (!remote || provider.allows_remote_access()).then_some(provider);
+        }
+        self.resolve_default_provider(config, tracking_store, remote, true)
+            .await
+    }
+
     fn load_config(&self) -> AssistantConfig {
         AssistantConfig::load(&self.inner.config_path)
     }
@@ -441,8 +504,22 @@ impl AssistantConfig {
         fs::write(path, body)
     }
 
-    fn response_value(&self, is_localhost: bool, remote_access_allowed: bool) -> Value {
+    fn response_value(
+        &self,
+        is_localhost: bool,
+        remote_access_allowed: bool,
+        synthesized_provider: Option<&str>,
+    ) -> Value {
         let mut providers = self.providers.clone();
+        if let Some(name) = synthesized_provider {
+            let provider = providers
+                .entry(name.to_string())
+                .or_insert_with(default_provider);
+            provider
+                .as_object_mut()
+                .expect("normalized provider")
+                .insert("selected".to_string(), Value::Bool(true));
+        }
         for provider in providers.values_mut() {
             if let Some(provider) = provider.as_object_mut() {
                 provider.shift_remove("api_key");
@@ -506,6 +583,42 @@ impl BuiltinProvider {
 impl AssistantProvider for BuiltinProvider {
     fn name(&self) -> &str {
         self.name
+    }
+
+    fn display_name(&self) -> &str {
+        match self.kind {
+            BuiltinKind::Gateway => "MLflow AI Gateway",
+            BuiltinKind::Ollama => "Ollama",
+        }
+    }
+
+    fn description(&self) -> &str {
+        match self.kind {
+            BuiltinKind::Gateway => {
+                "AI-powered assistant backed by an MLflow AI Gateway endpoint configured on this server."
+            }
+            BuiltinKind::Ollama => {
+                "AI-powered assistant using a locally running Ollama server."
+            }
+        }
+    }
+
+    fn is_available(
+        &self,
+        tracking_store: TrackingStore,
+        _config: Option<Value>,
+    ) -> BoxFuture<'static, bool> {
+        let kind = self.kind;
+        async move {
+            match kind {
+                BuiltinKind::Gateway => tracking_store
+                    .list_gateway_endpoints(WORKSPACE_DEFAULT_NAME, None, None)
+                    .await
+                    .is_ok_and(|endpoints| !endpoints.is_empty()),
+                BuiltinKind::Ollama => true,
+            }
+        }
+        .boxed()
     }
 
     fn allows_remote_access(&self) -> bool {
@@ -624,10 +737,7 @@ impl AssistantProvider for BuiltinProvider {
                 .and_then(|value| value.get("base_url"))
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            api_key: value
-                .and_then(|value| value.get("api_key"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            api_key: None,
             permissions,
         };
         openai_compatible::stream(config, request)
@@ -655,6 +765,29 @@ impl CliProvider {
 impl AssistantProvider for CliProvider {
     fn name(&self) -> &str {
         self.kind.name()
+    }
+
+    fn display_name(&self) -> &str {
+        match self.kind {
+            ProviderKind::ClaudeCode => "Claude Code",
+            ProviderKind::Codex => "Codex",
+        }
+    }
+
+    fn description(&self) -> &str {
+        match self.kind {
+            ProviderKind::ClaudeCode => "AI-powered assistant using Claude Code CLI",
+            ProviderKind::Codex => "AI-powered assistant using the Codex CLI",
+        }
+    }
+
+    fn is_available(
+        &self,
+        _tracking_store: TrackingStore,
+        _config: Option<Value>,
+    ) -> BoxFuture<'static, bool> {
+        let kind = self.kind;
+        async move { assistant_providers::is_available(kind) }.boxed()
     }
 
     fn resolve_skills_path(&self, base_directory: &FsPath) -> PathBuf {
@@ -748,6 +881,14 @@ impl AssistantProvider for DevClaudeProvider {
         "claude_code"
     }
 
+    fn display_name(&self) -> &str {
+        "Claude Code"
+    }
+
+    fn description(&self) -> &str {
+        "AI-powered assistant using Claude Code CLI"
+    }
+
     fn resolve_skills_path(&self, base_directory: &FsPath) -> PathBuf {
         base_directory.join(".claude/skills")
     }
@@ -779,7 +920,7 @@ impl AssistantProvider for DevClaudeProvider {
             ),
             AssistantEvent::new(
                 "stream_event",
-                json!({"event": {"type": "usage", "usage": {"prompt_tokens": 8, "completion_tokens": 24, "total_tokens": 32, "total_cost_usd": 0.0}}}),
+                json!({"event": {"type": "usage", "usage": {"prompt_tokens": 8, "completion_tokens": 24, "total_tokens": 32, "cache_read_tokens": 0, "total_cost_usd": 0.0}}}),
             ),
             AssistantEvent::new(
                 "done",
@@ -809,6 +950,7 @@ pub fn routes() -> Router<AppState> {
             &format!("{PREFIX}/providers/{{provider}}/health"),
             get(provider_health),
         )
+        .route(&format!("{PREFIX}/providers"), get(get_providers))
         .route(
             &format!("{PREFIX}/config"),
             get(get_config).put(update_config),
@@ -885,9 +1027,6 @@ fn enforce_provider_remote_access(
     client: AssistantClient,
     provider: Option<&dyn AssistantProvider>,
 ) -> Option<Response> {
-    if let Some(response) = enforce_remote_opt_in(client) {
-        return Some(response);
-    }
     (!client.is_localhost && !provider.is_some_and(AssistantProvider::allows_remote_access))
         .then(|| detail_response(StatusCode::FORBIDDEN, REMOTE_ACCESS_DETAIL))
 }
@@ -899,8 +1038,13 @@ async fn send_message(
 ) -> Response {
     let runtime = state.assistant_runtime();
     let config = runtime.load_config();
-    let selected_provider = runtime.selected_provider(&config);
-    if let Some(response) = enforce_provider_remote_access(client, selected_provider.as_deref()) {
+    if let Some(response) = enforce_remote_opt_in(client) {
+        return response;
+    }
+    let provider = runtime
+        .resolve_provider(&config, state.tracking_store(), !client.is_localhost)
+        .await;
+    if let Some(response) = enforce_provider_remote_access(client, provider.as_deref()) {
         return response;
     }
     let request = match parse_object_body(&body) {
@@ -958,8 +1102,6 @@ async fn send_message(
     if runtime.sessions().save(&session_id, &session).is_err() {
         return internal_error();
     }
-    // D18: Python emits `/stream/{id}`, but the decided Rust contract returns
-    // the actual route used by the frontend.
     json_response(
         StatusCode::OK,
         json!({"session_id": session_id, "stream_url": format!("{PREFIX}/sessions/{session_id}/stream")}),
@@ -974,7 +1116,12 @@ async fn stream_response(
 ) -> Response {
     let runtime = state.assistant_runtime().clone();
     let config = runtime.load_config();
-    let provider = runtime.selected_provider(&config);
+    if let Some(response) = enforce_remote_opt_in(client) {
+        return response;
+    }
+    let provider = runtime
+        .resolve_provider(&config, state.tracking_store(), !client.is_localhost)
+        .await;
     if let Some(response) = enforce_provider_remote_access(client, provider.as_deref()) {
         return response;
     }
@@ -1057,7 +1204,12 @@ async fn patch_session(
 ) -> Response {
     let runtime = state.assistant_runtime();
     let config = runtime.load_config();
-    let provider = runtime.selected_provider(&config);
+    if let Some(response) = enforce_remote_opt_in(client) {
+        return response;
+    }
+    let provider = runtime
+        .resolve_provider(&config, state.tracking_store(), !client.is_localhost)
+        .await;
     if let Some(response) = enforce_provider_remote_access(client, provider.as_deref()) {
         return response;
     }
@@ -1099,7 +1251,12 @@ async fn resolve_permission(
 ) -> Response {
     let runtime = state.assistant_runtime();
     let config = runtime.load_config();
-    let provider = runtime.selected_provider(&config);
+    if let Some(response) = enforce_remote_opt_in(client) {
+        return response;
+    }
+    let provider = runtime
+        .resolve_provider(&config, state.tracking_store(), !client.is_localhost)
+        .await;
     if let Some(response) = enforce_provider_remote_access(client, provider.as_deref()) {
         return response;
     }
@@ -1171,6 +1328,115 @@ async fn provider_health(
     }
 }
 
+async fn get_providers(
+    State(state): State<AppState>,
+    Extension(_client): Extension<AssistantClient>,
+) -> Response {
+    let runtime = state.assistant_runtime();
+    let config = runtime.load_config();
+    let mut providers = Vec::with_capacity(runtime.inner.providers.len());
+    let mut availability = HashMap::new();
+    for provider in &runtime.inner.providers {
+        let available = provider
+            .is_available(
+                state.tracking_store().clone(),
+                config.providers.get(provider.name()).cloned(),
+            )
+            .await;
+        availability.insert(provider.name().to_string(), available);
+        providers.push(json!({
+            "name": provider.name(),
+            "display_name": provider.display_name(),
+            "description": provider.description(),
+            "available": available,
+            "selected": config.providers.get(provider.name()).is_some_and(|value| {
+                value.get("selected").and_then(Value::as_bool) == Some(true)
+            }),
+            "requires_api_key": false,
+            "has_api_key": false,
+            "allows_remote_access": provider.allows_remote_access(),
+            "model_options": [],
+        }));
+    }
+
+    let resolved = runtime
+        .selected_provider(&config)
+        .map(|provider| resolved_provider_value(provider.as_ref(), &config, false))
+        .or_else(|| {
+            runtime
+                .inner
+                .providers
+                .iter()
+                .find(|provider| {
+                    provider.name() != GATEWAY_PROVIDER
+                        && availability.get(provider.name()) == Some(&true)
+                })
+                .map(|provider| resolved_provider_value(provider.as_ref(), &config, true))
+        });
+
+    json_response(
+        StatusCode::OK,
+        json!({
+            "providers": providers,
+            "resolved": resolved,
+            "gateway_vendor_options": gateway_vendor_options(),
+        }),
+    )
+}
+
+fn resolved_provider_value(
+    provider: &dyn AssistantProvider,
+    config: &AssistantConfig,
+    auto_selected: bool,
+) -> Value {
+    let model = config
+        .providers
+        .get(provider.name())
+        .and_then(|value| value.get("model"))
+        .and_then(Value::as_str)
+        .filter(|model| *model != "default")
+        .map(str::to_string);
+    let gateway_vendor = (provider.name() == GATEWAY_PROVIDER)
+        .then(|| {
+            model
+                .as_deref()
+                .and_then(gateway_vendor_from_managed_endpoint)
+        })
+        .flatten();
+    let provider_model = gateway_vendor.and_then(gateway_vendor_model);
+    json!({
+        "name": provider.name(),
+        "model": model,
+        "auto_selected": auto_selected,
+        "requires_api_key": false,
+        "has_api_key": gateway_vendor.is_some(),
+        "model_provider": gateway_vendor,
+        "model_options": provider_model.into_iter().collect::<Vec<_>>(),
+        "provider_model": provider_model,
+    })
+}
+
+fn gateway_vendor_options() -> Value {
+    Value::Object(
+        GATEWAY_VENDOR_MODELS
+            .iter()
+            .map(|(vendor, model)| ((*vendor).to_string(), json!([model])))
+            .collect(),
+    )
+}
+
+fn gateway_vendor_model(vendor: &str) -> Option<&'static str> {
+    GATEWAY_VENDOR_MODELS
+        .iter()
+        .find_map(|(candidate, model)| (*candidate == vendor).then_some(*model))
+}
+
+fn gateway_vendor_from_managed_endpoint(model: &str) -> Option<&str> {
+    model
+        .strip_prefix(GATEWAY_MANAGED_PREFIX)
+        .filter(|vendor| gateway_vendor_model(vendor).is_some())
+}
+
 async fn get_config(
     State(state): State<AppState>,
     Extension(client): Extension<AssistantClient>,
@@ -1178,7 +1444,20 @@ async fn get_config(
     let runtime = state.assistant_runtime();
     let config = runtime.load_config();
     let selected_provider = runtime.selected_provider(&config);
-    let remote_access_allowed = match selected_provider.as_deref() {
+    let provider = match selected_provider.clone() {
+        Some(provider) => Some(provider),
+        None => {
+            runtime
+                .resolve_default_provider(
+                    &config,
+                    state.tracking_store(),
+                    !client.is_localhost,
+                    false,
+                )
+                .await
+        }
+    };
+    let remote_access_allowed = match provider.as_deref() {
         None => false,
         Some(provider) => match remote_assistant_enabled() {
             Ok(enabled) => enabled && provider.allows_remote_access(),
@@ -1187,7 +1466,14 @@ async fn get_config(
     };
     json_response(
         StatusCode::OK,
-        config.response_value(client.is_localhost, remote_access_allowed),
+        config.response_value(
+            client.is_localhost,
+            remote_access_allowed,
+            selected_provider
+                .is_none()
+                .then(|| provider.as_ref().map(|provider| provider.name()))
+                .flatten(),
+        ),
     )
 }
 
@@ -1222,29 +1508,39 @@ async fn update_config(
             let Some(update) = update.as_object() else {
                 return internal_error();
             };
+            let gateway_model =
+                match store_gateway_api_key(state.tracking_store(), name, update).await {
+                    Ok(model) => model,
+                    Err(GatewayConnectionError::BadRequest(detail)) => {
+                        return detail_response(StatusCode::BAD_REQUEST, &detail)
+                    }
+                    Err(GatewayConnectionError::Internal) => return internal_error(),
+                };
             let existing = config.providers.get(name).cloned();
-            let model = update
-                .get("model")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
+            let model = gateway_model
                 .or_else(|| {
-                    existing
-                        .as_ref()
-                        .and_then(|value| value.get("model"))
+                    update
+                        .get("model")
                         .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
                         .map(str::to_string)
+                        .or_else(|| {
+                            existing
+                                .as_ref()
+                                .and_then(|value| value.get("model"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .or_else(|| Some("default".to_string()))
                 })
-                .unwrap_or_else(|| "default".to_string());
+                .expect("provider model has a default");
             let mut provider = existing.unwrap_or_else(default_provider);
             let object = provider.as_object_mut().expect("normalized provider");
             object.insert("model".to_string(), Value::String(model));
             if let Some(Value::String(base_url)) = update.get("base_url") {
                 object.insert("base_url".to_string(), Value::String(base_url.clone()));
             }
-            if let Some(Value::String(api_key)) = update.get("api_key") {
-                object.insert("api_key".to_string(), Value::String(api_key.clone()));
-            }
+            object.shift_remove("api_key");
             if let Some(permissions) = update.get("permissions") {
                 let Some(permissions) = normalize_permissions_update(permissions) else {
                     return internal_error();
@@ -1306,8 +1602,144 @@ async fn update_config(
     };
     json_response(
         StatusCode::OK,
-        config.response_value(true, remote_access_allowed),
+        config.response_value(true, remote_access_allowed, None),
     )
+}
+
+#[derive(Debug)]
+enum GatewayConnectionError {
+    BadRequest(String),
+    Internal,
+}
+
+async fn store_gateway_api_key(
+    store: &TrackingStore,
+    provider_name: &str,
+    provider_data: &Map<String, Value>,
+) -> Result<Option<String>, GatewayConnectionError> {
+    let api_key = provider_data
+        .get("api_key")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let gateway_vendor = provider_data.get("gateway_vendor");
+    if api_key.is_none() && gateway_vendor.is_none() {
+        return Ok(None);
+    }
+    let Some(api_key) = api_key else {
+        return Err(GatewayConnectionError::BadRequest(
+            "Gateway vendor connections require an API key.".to_string(),
+        ));
+    };
+    if provider_name != GATEWAY_PROVIDER {
+        return Err(GatewayConnectionError::BadRequest(
+            "API keys must be stored in LLM Connections through the 'mlflow_gateway' provider."
+                .to_string(),
+        ));
+    }
+    let Some(vendor) = gateway_vendor.and_then(Value::as_str) else {
+        return Err(GatewayConnectionError::BadRequest(
+            "Gateway API keys require a gateway_vendor.".to_string(),
+        ));
+    };
+    let Some(model_name) = gateway_vendor_model(vendor) else {
+        return Err(GatewayConnectionError::BadRequest(format!(
+            "Unknown Gateway vendor: '{vendor}'"
+        )));
+    };
+    ensure_gateway_connection(store, vendor, model_name, api_key)
+        .await
+        .map(Some)
+}
+
+async fn ensure_gateway_connection(
+    store: &TrackingStore,
+    vendor: &str,
+    model_name: &str,
+    api_key: &str,
+) -> Result<String, GatewayConnectionError> {
+    let name = format!("{GATEWAY_MANAGED_PREFIX}{vendor}");
+    let secret_value = HashMap::from([("api_key".to_string(), api_key.to_string())]);
+    let secret = match store
+        .get_gateway_secret_info(WORKSPACE_DEFAULT_NAME, None, Some(&name))
+        .await
+    {
+        Ok(secret) => store
+            .update_gateway_secret(
+                WORKSPACE_DEFAULT_NAME,
+                &secret.secret_id,
+                Some(&secret_value),
+                None,
+                None,
+            )
+            .await
+            .map_err(gateway_store_error)?,
+        Err(error) if error.error_code == mlflow_error::ErrorCode::ResourceDoesNotExist => store
+            .create_gateway_secret(
+                WORKSPACE_DEFAULT_NAME,
+                &name,
+                &secret_value,
+                Some(vendor),
+                &HashMap::new(),
+                None,
+            )
+            .await
+            .map_err(gateway_store_error)?,
+        Err(error) => return Err(gateway_store_error(error)),
+    };
+
+    let model_definition = match store
+        .get_gateway_model_definition(WORKSPACE_DEFAULT_NAME, None, Some(&name))
+        .await
+    {
+        Ok(model_definition) => model_definition,
+        Err(error) if error.error_code == mlflow_error::ErrorCode::ResourceDoesNotExist => store
+            .create_gateway_model_definition(
+                WORKSPACE_DEFAULT_NAME,
+                &name,
+                &secret.secret_id,
+                vendor,
+                model_name,
+                None,
+            )
+            .await
+            .map_err(gateway_store_error)?,
+        Err(error) => return Err(gateway_store_error(error)),
+    };
+
+    let endpoint = match store
+        .get_gateway_endpoint(WORKSPACE_DEFAULT_NAME, None, Some(&name))
+        .await
+    {
+        Ok(endpoint) => endpoint,
+        Err(error) if error.error_code == mlflow_error::ErrorCode::ResourceDoesNotExist => store
+            .create_gateway_endpoint(
+                WORKSPACE_DEFAULT_NAME,
+                &name,
+                &[EndpointModelConfig {
+                    model_definition_id: model_definition.model_definition_id,
+                    linkage_type: "PRIMARY".to_string(),
+                    weight: 1.0,
+                    fallback_order: None,
+                }],
+                None,
+                None,
+                None,
+                None,
+                true,
+            )
+            .await
+            .map_err(gateway_store_error)?,
+        Err(error) => return Err(gateway_store_error(error)),
+    };
+    Ok(endpoint.name.unwrap_or(name))
+}
+
+fn gateway_store_error(error: mlflow_error::MlflowError) -> GatewayConnectionError {
+    if error.error_code == mlflow_error::ErrorCode::NotImplemented {
+        GatewayConnectionError::BadRequest(GATEWAY_UNSUPPORTED_DETAIL.to_string())
+    } else {
+        GatewayConnectionError::Internal
+    }
 }
 
 async fn install_skills_endpoint(
@@ -1422,6 +1854,27 @@ async fn list_provider_models(
     if !client.is_localhost && !instance.allows_remote_access() {
         return detail_response(StatusCode::FORBIDDEN, REMOTE_ACCESS_DETAIL);
     }
+    if provider == GATEWAY_PROVIDER {
+        return match state
+            .tracking_store()
+            .list_gateway_endpoints(WORKSPACE_DEFAULT_NAME, None, None)
+            .await
+        {
+            Ok(endpoints) => {
+                let mut models = endpoints
+                    .into_iter()
+                    .filter_map(|endpoint| endpoint.name)
+                    .filter(|name| !name.is_empty())
+                    .collect::<Vec<_>>();
+                models.sort();
+                json_response(StatusCode::OK, json!({"models": models}))
+            }
+            Err(error) if error.error_code == mlflow_error::ErrorCode::NotImplemented => {
+                json_response(StatusCode::OK, json!({"models": []}))
+            }
+            Err(_) => internal_error(),
+        };
+    }
     let config = runtime.load_config();
     let api_key = headers
         .get("x-api-key")
@@ -1464,7 +1917,6 @@ fn normalize_provider(value: &Value) -> Option<Value> {
         .transpose()?
         .unwrap_or(false);
     let base_url = nullable_string(value.get("base_url"))?;
-    let api_key = nullable_string(value.get("api_key"))?;
     let permissions = match value.get("permissions") {
         Some(value) => normalize_permissions(value)?,
         None => default_permissions(),
@@ -1488,7 +1940,6 @@ fn normalize_provider(value: &Value) -> Option<Value> {
         "model": model,
         "selected": selected,
         "base_url": base_url,
-        "api_key": api_key,
         "permissions": permissions,
         "skills": skills,
     }))
@@ -1499,7 +1950,6 @@ fn default_provider() -> Value {
         "model": "default",
         "selected": false,
         "base_url": null,
-        "api_key": null,
         "permissions": default_permissions(),
         "skills": {"type": "global", "custom_path": null},
     })
@@ -1796,5 +2246,15 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(entries, vec![format!("{session_id}.json")]);
+    }
+
+    #[test]
+    fn unsupported_gateway_store_error_has_exact_detail() {
+        match gateway_store_error(mlflow_error::MlflowError::not_implemented("unsupported")) {
+            GatewayConnectionError::BadRequest(detail) => {
+                assert_eq!(detail, GATEWAY_UNSUPPORTED_DETAIL)
+            }
+            GatewayConnectionError::Internal => panic!("expected a bad-request mapping"),
+        }
     }
 }

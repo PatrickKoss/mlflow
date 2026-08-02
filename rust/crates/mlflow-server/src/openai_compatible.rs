@@ -379,7 +379,6 @@ async fn model_turn(
         "messages":messages,
         "tools":tools_schema(),
         "stream":true,
-        "stream_options":{"include_usage":true},
     }));
     if let Some(api_key) = api_key.filter(|value| !value.is_empty()) {
         request = request.bearer_auth(api_key);
@@ -398,6 +397,7 @@ async fn model_turn(
     };
     let mut think_buffer = String::new();
     let mut in_think = false;
+    let mut stream_had_signal = false;
     while let Some(chunk) = bytes.try_next().await.map_err(|error| error.to_string())? {
         line_buffer.extend_from_slice(&chunk);
         while let Some(index) = line_buffer.iter().position(|byte| *byte == b'\n') {
@@ -409,6 +409,8 @@ async fn model_turn(
                 &mut turn,
                 &mut think_buffer,
                 &mut in_think,
+                &mut stream_had_signal,
+                display_name,
             )
             .await?;
         }
@@ -421,8 +423,15 @@ async fn model_turn(
             &mut turn,
             &mut think_buffer,
             &mut in_think,
+            &mut stream_had_signal,
+            display_name,
         )
         .await?;
+    }
+    if !stream_had_signal {
+        return Err(format!(
+            "{display_name} returned an empty response and ended unexpectedly. The upstream provider likely failed before producing any output (e.g. an invalid API key or a rate limit)."
+        ));
     }
     turn.tool_calls = turn
         .tool_calls
@@ -451,6 +460,8 @@ async fn process_line(
     turn: &mut ModelTurn,
     think_buffer: &mut String,
     in_think: &mut bool,
+    stream_had_signal: &mut bool,
+    display_name: &str,
 ) -> Result<(), String> {
     let mut line = std::str::from_utf8(raw)
         .map_err(|error| error.to_string())?
@@ -458,21 +469,43 @@ async fn process_line(
     if let Some(data) = line.strip_prefix("data:") {
         line = data.trim();
     }
-    if line.is_empty() || line == "[DONE]" || line.starts_with(':') {
+    if line == "[DONE]" {
+        *stream_had_signal = true;
+        return Ok(());
+    }
+    if line.is_empty() || line.starts_with(':') {
         return Ok(());
     }
     let Ok(chunk) = serde_json::from_str::<Value>(line) else {
         return Ok(());
     };
+    if let Some(error) = chunk.get("error").filter(|error| python_truthy(error)) {
+        *stream_had_signal = true;
+        let message = match error.as_object() {
+            Some(error) => error.get("message"),
+            None => Some(error),
+        }
+        .filter(|message| python_truthy(message));
+        return Err(match message {
+            Some(message) => format!("{display_name} error: {}", python_string(message)),
+            None => format!("{display_name} returned an error: {}", python_repr(error)),
+        });
+    }
     if let Some(usage) = chunk.get("usage").filter(|usage| python_truthy(usage)) {
+        *stream_had_signal = true;
         send(sender, usage_event(usage, model)).await?;
     }
-    let Some(delta) = chunk
+    let Some(choice) = chunk
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("delta"))
     else {
+        return Ok(());
+    };
+    if choice.get("finish_reason").is_some_and(python_truthy) {
+        *stream_had_signal = true;
+    }
+    let Some(delta) = choice.get("delta") else {
         return Ok(());
     };
     if let Some(text) = delta
@@ -480,6 +513,7 @@ async fn process_line(
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
     {
+        *stream_had_signal = true;
         think_buffer.push_str(text);
         let (visible, remaining, state) = strip_think_blocks(think_buffer, *in_think);
         *think_buffer = remaining;
@@ -496,7 +530,12 @@ async fn process_line(
             .await?;
         }
     }
-    if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+    if let Some(calls) = delta
+        .get("tool_calls")
+        .filter(|calls| python_truthy(calls))
+        .and_then(Value::as_array)
+    {
+        *stream_had_signal = true;
         for call in calls {
             merge_tool_call(&mut turn.tool_calls, call);
         }
@@ -623,6 +662,7 @@ fn usage_event(usage: &Value, model: &str) -> AssistantEvent {
             "prompt_tokens":prompt,
             "completion_tokens":completion,
             "total_tokens":total,
+            "cache_read_tokens":cache_read.unwrap_or(0),
             "total_cost_usd":token_cost(model,prompt,completion,cache_read,cache_creation),
         }}}),
     )
@@ -681,6 +721,39 @@ fn python_truthy(value: &Value) -> bool {
         Value::String(value) => !value.is_empty(),
         Value::Array(value) => !value.is_empty(),
         Value::Object(value) => !value.is_empty(),
+    }
+}
+
+fn python_string(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        _ => python_repr(value),
+    }
+}
+
+fn python_repr(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_string(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => format!("'{value}'"),
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(python_repr)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Value::Object(values) => format!(
+            "{{{}}}",
+            values
+                .iter()
+                .map(|(key, value)| format!("'{key}': {}", python_repr(value)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

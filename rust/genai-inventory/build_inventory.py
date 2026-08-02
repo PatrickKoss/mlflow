@@ -1162,6 +1162,17 @@ def _hand_surfaces(tests: list[dict[str, Any]]) -> list[dict[str, Any]]:
             '"/providers/{provider}/health"',
         ),
         (
+            "assistant_providers",
+            "assistant",
+            "T20.2",
+            "mlflow-server",
+            "B",
+            "GET",
+            ["/ajax-api/3.0/mlflow/assistant/providers"],
+            "mlflow/server/assistant/api.py",
+            '@assistant_router.get("/providers"',
+        ),
+        (
             "assistant_config_get",
             "assistant",
             "T20.1",
