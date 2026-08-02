@@ -20,6 +20,9 @@ cases:
     method: GET
     path: /api/2.0/mlflow/experiments/get
     query: {experiment_id: "${exp_alpha}"}
+    # Control proving compact trace responses do not change the default proto
+    # response formatter used by all other endpoints.
+    response_json_format: pretty
 
   - name: experiment_get_by_name
     method: GET
@@ -49,6 +52,78 @@ cases:
     method: POST
     path: /api/2.0/mlflow/experiments/set-experiment-tag
     body: {experiment_id: "${exp_alpha}", key: phase, value: prod}
+
+  - name: experiment_set_saved_view_envelope
+    method: POST
+    path: /api/2.0/mlflow/experiments/set-experiment-tag
+    body:
+      experiment_id: "${exp_alpha}"
+      key: mlflow.sharedViewState.realistic-20260802
+      # A real zlib+base64 UI-state payload using the UI's `deflate;` prefix.
+      value: '{"name":"High-accuracy validation runs","createdAt":1785686400000,"state":"deflate;eJxt1sFq20AQBuBXEXvJxQ2eGe+uJWghaemlUAo99FBKvEibRCDLQZILJvjdu5PgTMmMLx79gp39LI2lZzfnNLWPX1Obl9k1z5fjfljy5Bq3z8vUt/P1LrXtcUrtaVd9qtbXNVY3379UT2lK+3KyS0ua87KrPlZXf9PQl+P+MF65lTtMXZ5uT9/y6b/FLmvJ+Zu5dc19GuZ8Xrlj/3NJS37dzZDbJXefD8NxP5YN/n5b5PX7bl0WeReBjlBHpKONjryOgo6ijrY6qo2tWts39g8GAAwBGAQwDGAgwFCAwQDDgYYDretgONBwoOFAw4GGAw0HGg40HGQ4yHCQdUMZDjIcZDjIcJDhIMNBtfuzcu3LhPzqu+XxZY7VmDSwWRujUmIwxqXEaIxMickYmxJvjNEpsTfGp8TBGKESR2OMSrw1RqnEtTVODXiDyU6vncBQr6HAUq+lwFSvqcBWr63AWK+xwFqvtcBcr7nAXq+9yN6gvcjeYFxX9gbtRfYG7UX2Bu1F9gbtRfYG7UX2Bu1F9gbtRfYG7SX2Ru0l9kbtJfZG40Zmb9ReYm/UXmJv1F5ib9ReYm/UXmJv1F5ib6zLs286jvOPfhxzx8+6cvRhXT5udSlBSpSSpNxI6aUMUkYpt1LWbyVIN5BuIN1AuoF0A+kG0g2kG0g3kG4o3VC6oXRD6VbuxvJH9zAdjk+3/DqxpIfyCx66PNzdp30/nNz5/A89Xdy/"}'
+    expect_status: 200
+
+  - name: experiment_get_saved_view_envelope
+    method: GET
+    path: /api/2.0/mlflow/experiments/get
+    query: {experiment_id: "${exp_alpha}"}
+    expect_status: 200
+
+  - name: experiment_set_saved_view_boundary
+    method: POST
+    path: /api/2.0/mlflow/experiments/set-experiment-tag
+    body:
+      experiment_id: "${exp_alpha}"
+      key: mlflow.sharedViewState.boundary-20260802
+      value:
+        $repeat:
+          prefix: '{"name":"Boundary saved view","createdAt":1785686400000,"state":"deflate;'
+          value: A
+          suffix: '"}'
+          total_length: 5000
+    expect_status: 200
+
+  - name: experiment_get_saved_view_boundary
+    method: GET
+    path: /api/2.0/mlflow/experiments/get
+    query: {experiment_id: "${exp_alpha}"}
+    expect_status: 200
+
+  - name: experiment_set_saved_view_over_limit
+    method: POST
+    path: /api/2.0/mlflow/experiments/set-experiment-tag
+    body:
+      experiment_id: "${exp_alpha}"
+      key: mlflow.sharedViewState.over-limit-20260802
+      value:
+        $repeat:
+          prefix: '{"name":"Over-limit saved view","createdAt":1785686400000,"state":"deflate;'
+          value: A
+          suffix: '"}'
+          total_length: 5001
+    expect_status: 400
+
+  - name: experiment_delete_saved_view_envelope
+    method: POST
+    path: /api/2.0/mlflow/experiments/delete-experiment-tag
+    body:
+      experiment_id: "${exp_alpha}"
+      key: mlflow.sharedViewState.realistic-20260802
+    expect_status: 200
+
+  - name: experiment_delete_saved_view_boundary
+    method: POST
+    path: /api/2.0/mlflow/experiments/delete-experiment-tag
+    body:
+      experiment_id: "${exp_alpha}"
+      key: mlflow.sharedViewState.boundary-20260802
+    expect_status: 200
+
+  - name: experiment_get_after_saved_view_delete
+    method: GET
+    path: /api/2.0/mlflow/experiments/get
+    query: {experiment_id: "${exp_alpha}"}
+    expect_status: 200
 
   - name: experiment_get_after_tag
     method: GET

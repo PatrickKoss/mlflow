@@ -46935,6 +46935,25 @@
       "chat_transform_present": false,
       "embedding_transform": null,
       "embedding_transform_present": false,
+      "limits_present": false,
+      "litellm_fallback_reachable": false,
+      "mlflow_native_adapter": true,
+      "model_entry_count": 0,
+      "name": "sap-ai-core",
+      "owner_task": "T18.4",
+      "price_present": false,
+      "source_membership": {
+        "litellm_price_snapshot": false,
+        "litellm_provider_list": false,
+        "mlflow_gateway_registry": true
+      },
+      "tokenizer_metadata_present": false
+    },
+    {
+      "chat_transform": null,
+      "chat_transform_present": false,
+      "embedding_transform": null,
+      "embedding_transform_present": false,
       "limits_present": true,
       "litellm_fallback_reachable": true,
       "mlflow_native_adapter": false,
@@ -47955,6 +47974,7 @@
     "sagemaker_chat",
     "sagemaker_nova",
     "sap",
+    "sap-ai-core",
     "synthetic",
     "togetherai",
     "topaz",

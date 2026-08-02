@@ -26,9 +26,11 @@
 //! * **bytes → standard base64**.
 //! * **well-known types**: `Timestamp` → RFC3339 (`"...Z"`), `Duration` →
 //!   `"1.500s"`, mirroring `MessageToJson`.
-//! * **pretty-printed, `indent=2`**, no trailing newline, `ensure_ascii=True`
-//!   (non-ASCII escaped as `\uXXXX`, astral chars as surrogate pairs), and
-//!   Python `repr`-style float formatting (`1e+20`, `1.0`, `-0.0`).
+//! * **pretty-printed (`indent=2`) by default**, with an explicit compact mode
+//!   matching `json.dumps(..., separators=(",", ":"))`; neither mode appends a
+//!   newline. Both use `ensure_ascii=True` (non-ASCII escaped as `\uXXXX`, astral
+//!   chars as surrogate pairs) and Python `repr`-style float formatting
+//!   (`1e+20`, `1.0`, `-0.0`).
 //!
 //! ## Map key ordering — the one intentional deviation
 //!
@@ -102,6 +104,22 @@ pub fn to_mlflow_json<M: prost::Message>(
     let value = message_to_json_value(&dynamic);
     let mut out = String::new();
     write_pretty(&mut out, &value, 0);
+    Ok(out)
+}
+
+/// Serialize a prost message to MLflow-compatible compact JSON.
+///
+/// This is the `pretty=False` form of Python's `message_to_json`: field names,
+/// numeric int64 representation, escaping, and ordering are identical to
+/// [`to_mlflow_json`], with `json.dumps(..., separators=(",", ":"))` whitespace.
+pub fn to_mlflow_json_compact<M: prost::Message>(
+    message: &M,
+    type_name: &str,
+) -> Result<String, JsonCodecError> {
+    let dynamic = to_dynamic(message, type_name)?;
+    let value = message_to_json_value(&dynamic);
+    let mut out = String::new();
+    write_compact(&mut out, &value);
     Ok(out)
 }
 
@@ -542,6 +560,42 @@ fn write_pretty(out: &mut String, value: &JsonValue, indent: usize) {
     }
 }
 
+/// Serialize our JSON tree with Python
+/// `json.dumps(..., separators=(",", ":"))` formatting.
+fn write_compact(out: &mut String, value: &JsonValue) {
+    match value {
+        JsonValue::Null => out.push_str("null"),
+        JsonValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        JsonValue::Int(v) => out.push_str(&v.to_string()),
+        JsonValue::Uint(v) => out.push_str(&v.to_string()),
+        JsonValue::Double(v) => out.push_str(&proto_float_repr(*v)),
+        JsonValue::Float(v) => out.push_str(&proto_float_repr(*v as f64)),
+        JsonValue::Str(s) => out.push_str(s),
+        JsonValue::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_compact(out, item);
+            }
+            out.push(']');
+        }
+        JsonValue::Object(entries) => {
+            out.push('{');
+            for (i, (key, val)) in entries.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&quote_json_string(key));
+                out.push(':');
+                write_compact(out, val);
+            }
+            out.push('}');
+        }
+    }
+}
+
 fn push_indent(out: &mut String, indent: usize) {
     for _ in 0..indent * 2 {
         out.push(' ');
@@ -742,6 +796,29 @@ mod tests {
         assert_eq!(
             quote_json_string(input),
             "\"h\\u00e9llo \\u4e16\\u754c \\ud83d\\ude00 \\\"q\\\" \\\\b / \\n\\t\""
+        );
+    }
+
+    #[test]
+    fn compact_writer_matches_python_separators() {
+        let value = JsonValue::Object(vec![
+            ("empty".to_string(), JsonValue::Array(Vec::new())),
+            (
+                "nested".to_string(),
+                JsonValue::Object(vec![
+                    ("int64".to_string(), JsonValue::Int(9_007_199_254_740_993)),
+                    (
+                        "text".to_string(),
+                        JsonValue::Str(quote_json_string("héllo")),
+                    ),
+                ]),
+            ),
+        ]);
+        let mut out = String::new();
+        write_compact(&mut out, &value);
+        assert_eq!(
+            out,
+            r#"{"empty":[],"nested":{"int64":9007199254740993,"text":"h\u00e9llo"}}"#
         );
     }
 

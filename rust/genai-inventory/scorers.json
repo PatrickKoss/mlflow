@@ -43,6 +43,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -50,7 +57,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "completeness",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:2973"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:3007"
     },
     {
       "execution": "llm",
@@ -95,6 +102,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -102,7 +116,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "conversation_completeness",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:2337"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:2358"
     },
     {
       "execution": "llm",
@@ -145,6 +159,13 @@
           "type": "dict[str, typing.Any] | None"
         },
         {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
           "default": null,
           "kind": "KEYWORD_ONLY",
           "name": "guidelines",
@@ -161,7 +182,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "conversational_guidelines",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:2652"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:2677"
     },
     {
       "execution": "llm",
@@ -206,6 +227,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -213,7 +241,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "conversational_role_adherence",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:2575"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:2599"
     },
     {
       "execution": "llm",
@@ -258,6 +286,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -265,7 +300,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "conversational_safety",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:2416"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:2438"
     },
     {
       "execution": "llm",
@@ -310,6 +345,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -317,7 +359,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "conversational_tool_call_efficiency",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:2497"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:2520"
     },
     {
       "execution": "llm",
@@ -362,6 +404,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -369,7 +418,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "correctness",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:1698"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:1712"
     },
     {
       "execution": "llm",
@@ -414,6 +463,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -421,7 +477,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "equivalence",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:1977"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:1993"
     },
     {
       "execution": "llm",
@@ -466,6 +522,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -473,7 +536,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "expectations_guidelines",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:1311"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:1319"
     },
     {
       "execution": "llm",
@@ -518,6 +581,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -525,7 +595,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "fluency",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:1894"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:1909"
     },
     {
       "execution": "llm",
@@ -568,6 +638,13 @@
           "type": "dict[str, typing.Any] | None"
         },
         {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
           "default": null,
           "kind": "KEYWORD_ONLY",
           "name": "guidelines",
@@ -584,7 +661,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "guidelines",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:1155"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:1162"
     },
     {
       "execution": "llm",
@@ -629,6 +706,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -643,7 +727,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "knowledge_retention",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:2787"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:2815"
     },
     {
       "execution": "deterministic",
@@ -688,6 +772,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "pii_types",
           "required": false,
           "type": "list[typing.Literal['email', 'phone', 'ssn', 'credit_card', 'ip_address']] | None"
@@ -695,7 +786,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "pii_detection",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:3337"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:3373"
     },
     {
       "execution": "deterministic",
@@ -738,6 +829,13 @@
           "type": "dict[str, typing.Any] | None"
         },
         {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
           "default": null,
           "kind": "KEYWORD_ONLY",
           "name": "pattern",
@@ -761,7 +859,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "regex_match",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:3228"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:3264"
     },
     {
       "execution": "llm",
@@ -806,6 +904,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -813,7 +918,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "relevance_to_query",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:1474"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:1483"
     },
     {
       "execution": "deterministic",
@@ -858,6 +963,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "min_length",
           "required": false,
           "type": "int | None"
@@ -879,7 +991,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "response_length",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:3446"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:3482"
     },
     {
       "execution": "llm",
@@ -924,6 +1036,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -931,7 +1050,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "retrieval_groundedness",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:686"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:689"
     },
     {
       "execution": "llm",
@@ -976,6 +1095,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -983,7 +1109,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "retrieval_relevance",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:392"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:393"
     },
     {
       "execution": "llm",
@@ -1028,6 +1154,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -1035,7 +1168,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "retrieval_sufficiency",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:550"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:552"
     },
     {
       "execution": "llm",
@@ -1080,6 +1213,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -1087,7 +1227,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "safety",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:1592"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:1605"
     },
     {
       "execution": "llm",
@@ -1132,6 +1272,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -1139,7 +1286,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "summarization",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:3082"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:3117"
     },
     {
       "execution": "hybrid",
@@ -1184,6 +1331,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -1205,7 +1359,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "tool_call_correctness",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:873"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:878"
     },
     {
       "execution": "llm",
@@ -1250,6 +1404,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -1257,7 +1418,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "tool_call_efficiency",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:792"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:796"
     },
     {
       "execution": "llm",
@@ -1302,6 +1463,13 @@
         {
           "default": "None",
           "kind": "KEYWORD_ONLY",
+          "name": "extra_headers",
+          "required": false,
+          "type": "dict[str, str] | None"
+        },
+        {
+          "default": "None",
+          "kind": "KEYWORD_ONLY",
           "name": "model",
           "required": false,
           "type": "str | None"
@@ -1309,7 +1477,7 @@
       ],
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
       "serialized_name_default": "user_frustration",
-      "source": "mlflow/genai/scorers/builtin_scorers.py:2258"
+      "source": "mlflow/genai/scorers/builtin_scorers.py:2278"
     }
   ],
   "reference": {

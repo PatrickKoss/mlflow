@@ -24,12 +24,14 @@ cases:
     normalize:
       # artifactLocation tag holds an absolute per-server path.
       drop_paths: ["$.trace.trace_info.tags"]
+    response_json_format: compact
 
   - name: trace_get_info_v3
     method: GET
-    path: /api/3.0/mlflow/traces/tr-compliance-1/info
+    path: /api/3.0/mlflow/traces/tr-compliance-1
     normalize:
       drop_paths: ["$.trace.trace_info.tags", "$.trace_info.tags"]
+    response_json_format: compact
 
   - name: trace_start_v3_with_assessment
     method: POST
@@ -53,12 +55,14 @@ cases:
               metadata: {suite: traces}
     normalize:
       drop_paths: ["$.trace.trace_info.tags"]
+    response_json_format: compact
 
   - name: trace_get_info_v3_with_assessment
     method: GET
     path: /api/3.0/mlflow/traces/tr-compliance-assessment
     normalize:
       drop_paths: ["$.trace.trace_info.tags", "$.trace_info.tags"]
+    response_json_format: compact
 
   - name: trace_otlp_rollup_parent_token_usage
     method: POST
@@ -81,6 +85,31 @@ cases:
     path: /api/3.0/mlflow/traces/tr-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     normalize:
       drop_paths: ["$.trace.trace_info.tags", "$.trace_info.tags"]
+    response_json_format: compact
+
+  - name: trace_get_compact_with_fixed64_span_times
+    method: GET
+    path: /api/3.0/mlflow/traces/get
+    body: {trace_id: tr-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, allow_partial: true}
+    normalize:
+      drop_paths: ["$.trace.trace_info.tags"]
+    response_json_format: compact
+
+  - name: trace_batch_get_compact_with_fixed64_span_times
+    method: GET
+    path: /api/3.0/mlflow/traces/batchGet
+    body: {trace_ids: [tr-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa]}
+    normalize:
+      drop_paths: ["$.traces[0].trace_info.tags"]
+    response_json_format: compact
+
+  - name: trace_batch_get_infos_compact
+    method: POST
+    path: /api/3.0/mlflow/traces/batchGetInfos
+    body: {trace_ids: [tr-compliance-1, tr-compliance-assessment]}
+    normalize:
+      drop_paths: ["$.trace_infos[0].tags", "$.trace_infos[1].tags"]
+    response_json_format: compact
 
   - name: trace_set_tag_v3
     method: POST
@@ -95,6 +124,7 @@ cases:
       max_results: 100
     normalize:
       drop_paths: ["$.traces"]
+    response_json_format: compact
 
   - name: trace_start_v3_second
     method: POST
@@ -111,6 +141,7 @@ cases:
           state: OK
     normalize:
       drop_paths: ["$.trace.trace_info.tags"]
+    response_json_format: compact
 
   - name: trace_otlp_span_search_skew_edges
     method: POST
@@ -176,5 +207,5 @@ cases:
   # ---- Errors ----
   - name: trace_get_info_missing
     method: GET
-    path: /api/3.0/mlflow/traces/tr-does-not-exist/info
+    path: /api/3.0/mlflow/traces/tr-does-not-exist
     expect_status: 404

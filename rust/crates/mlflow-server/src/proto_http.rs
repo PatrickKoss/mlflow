@@ -14,8 +14,9 @@
 //! 2. **Store invocation**: the handler calls the store, which returns
 //!    `Result<_, mlflow_error::MlflowError>`.
 //! 3. **Response serialization** ([`proto_response`]): the response proto is
-//!    serialized with the MLflow JSON codec (indent=2 wire parity) and returned
-//!    with `Content-Type: application/json`, mirroring
+//!    serialized with the MLflow JSON codec (indent=2 wire parity by default,
+//!    with [`proto_response_compact`] for explicitly compact endpoints) and
+//!    returned with `Content-Type: application/json`, mirroring
 //!    `Response(mimetype="application/json"); response.set_data(message_to_json(...))`.
 //!
 //! Errors from any stage are `MlflowError`, whose `IntoResponse` emits the
@@ -251,6 +252,20 @@ where
     M: prost::Message,
 {
     let body = mlflow_proto::to_mlflow_json(message, type_name).map_err(codec_err)?;
+    Ok(Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body))
+        .expect("valid response"))
+}
+
+/// Build a `200 application/json` response using Python's compact protobuf
+/// JSON form (`json.dumps(..., separators=(",", ":"))`).
+pub fn proto_response_compact<M>(message: &M, type_name: &str) -> Result<Response, MlflowError>
+where
+    M: prost::Message,
+{
+    let body = mlflow_proto::to_mlflow_json_compact(message, type_name).map_err(codec_err)?;
     Ok(Response::builder()
         .status(axum::http::StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json")

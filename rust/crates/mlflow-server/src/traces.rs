@@ -33,6 +33,7 @@ use mlflow_store::{
 
 use crate::proto_http::{
     parse_request, parse_request_lenient, parse_request_with_path_params, proto_response,
+    proto_response_compact,
 };
 use crate::schema_validation::{SchemaEntry, Validator};
 use crate::state::AppState;
@@ -80,7 +81,7 @@ pub async fn start_trace_v3(
             spans: Vec::new(),
         }),
     };
-    proto_response(&resp, "mlflow.StartTraceV3.Response")
+    proto_response_compact(&resp, "mlflow.StartTraceV3.Response")
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +106,7 @@ pub async fn get_trace_info_v3(
             spans: Vec::new(),
         }),
     };
-    proto_response(&resp, "mlflow.GetTraceInfoV3.Response")
+    proto_response_compact(&resp, "mlflow.GetTraceInfoV3.Response")
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +144,7 @@ pub async fn get_trace(
         to_proto_trace(&trace)?
     };
     let resp = pb::get_trace::Response { trace: Some(trace) };
-    proto_response(&resp, "mlflow.GetTrace.Response")
+    proto_response_compact(&resp, "mlflow.GetTrace.Response")
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +174,7 @@ pub async fn batch_get_traces(
     let resp = pb::batch_get_traces::Response {
         traces: proto_traces,
     };
-    proto_response(&resp, "mlflow.BatchGetTraces.Response")
+    proto_response_compact(&resp, "mlflow.BatchGetTraces.Response")
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +200,7 @@ pub async fn batch_get_trace_infos(
     let resp = pb::batch_get_trace_infos::Response {
         trace_infos: infos.iter().map(to_proto_trace_info).collect(),
     };
-    proto_response(&resp, "mlflow.BatchGetTraceInfos.Response")
+    proto_response_compact(&resp, "mlflow.BatchGetTraceInfos.Response")
 }
 
 // ---------------------------------------------------------------------------
@@ -261,7 +262,7 @@ pub async fn search_traces_v3(
         traces: page.trace_infos.iter().map(to_proto_trace_info).collect(),
         next_page_token: page.next_page_token,
     };
-    proto_response(&resp, "mlflow.SearchTracesV3.Response")
+    proto_response_compact(&resp, "mlflow.SearchTracesV3.Response")
 }
 
 // ---------------------------------------------------------------------------

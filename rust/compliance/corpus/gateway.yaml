@@ -30,6 +30,15 @@ cases:
     query: {provider: fireworks_ai}
     expect_status: 200
 
+  - name: gateway_supported_models_azure_ai
+    method: GET
+    path: /ajax-api/3.0/mlflow/gateway/supported-models
+    query: {provider: azure_ai}
+    # Full-response parity covers b1e5ef1d91's azure_ai removals. In the merged
+    # source those are `long_context` pricing subentries on the mini/nano rows;
+    # no model key is removed by that commit.
+    expect_status: 200
+
   - name: gateway_supported_models_empty_filter
     method: GET
     path: /ajax-api/3.0/mlflow/gateway/supported-models

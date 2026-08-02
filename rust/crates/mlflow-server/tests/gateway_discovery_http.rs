@@ -259,28 +259,33 @@ async fn discovery_json_matches_python_with_empty_and_populated_gateway_stores()
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/supported-models?provider=openai",
-                40659,
-                "df682c8f907d32c553dd3044730a3c9c0e5c4323adf35b0c72e610842130bac1",
+                40672,
+                "d33f238fef3f8040dcbe84e199d0744868472dbd37394c25e1a8ce2286cf70c2",
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/supported-models",
-                1021913,
-                "f0b63d237434b89a0c19353df96a2c51f9762d98d2c05cef4f2f955976711e39",
+                1028311,
+                "fa5371febc0966faecc472cc99597bb8c7bf8c3792c72b3403ce2cd931f42937",
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/supported-models?provider=gemini",
-                17656,
-                "bf296d2dd1875507aa3ac20c90f987382c0c0503e15803278a4d24e38186e660",
+                18449,
+                "70bab462807ed2637878cfe0d04dd1b71b4b9431abd3e1b48dd30ea887b22792",
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/supported-models?provider=vertex_ai",
-                51670,
-                "9b0304fffe90f94204fdd87ac4091cb6d226605e2ae3e48bdf44a3300bed10c1",
+                53265,
+                "ba0f78f5b94d7dbbc238b94e54ac2ce7cd5910ec637bf602e41da886721be031",
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/supported-models?provider=fireworks_ai",
-                123166,
-                "581a231253505376fa30740a8da58002c8ad369d204710522cf4a752ec359ff9",
+                123156,
+                "82491d8a53907096319f9e15b929be9d3e82c86757dccaaba0f9eb80f037a7ad",
+            ),
+            (
+                "/ajax-api/3.0/mlflow/gateway/supported-models?provider=azure_ai",
+                31959,
+                "b64dcf3d4658fe30d93c650bafdaf9c96137d3379da9ece35613805d9192db81",
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/provider-config?provider=openai",

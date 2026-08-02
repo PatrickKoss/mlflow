@@ -259,6 +259,7 @@ class Case:
     walk: dict[str, Any] | None = None  # walk_pages descriptor
     compare_body: bool = True
     raw_body: str | None = None  # raw (non-JSON) request body, e.g. artifact upload
+    response_json_format: str | None = None  # "pretty" or "compact", checked byte-for-byte
 
 
 @dataclass
@@ -301,6 +302,7 @@ def _parse_case(raw: dict[str, Any], section: str) -> Case:
         walk=raw.get("walk"),
         compare_body=raw.get("compare_body", True),
         raw_body=raw.get("raw_body"),
+        response_json_format=raw.get("response_json_format"),
     )
 
 
@@ -375,11 +377,13 @@ def _do_request(
     creds: dict[str, tuple[str, str]],
     path_override: str | None = None,
     query_override: dict[str, Any] | None = None,
-) -> tuple[int, Any, dict[str, str]]:
+) -> tuple[int, Any, dict[str, str], str]:
     path = substitute(path_override or case.path, bindings)
     query = substitute(query_override if query_override is not None else case.query, bindings)
     headers = substitute(case.headers, bindings)
-    body = substitute(case.body, bindings) if case.body is not None else None
+    body = (
+        _materialize_directives(substitute(case.body, bindings)) if case.body is not None else None
+    )
     url = handle.url + path
     kwargs: dict[str, Any] = {"timeout": 30}
     if query:
@@ -398,7 +402,58 @@ def _do_request(
         decoded = resp.json()
     except ValueError:
         decoded = {"__raw_text__": resp.text}
-    return resp.status_code, decoded, dict(resp.headers)
+    return resp.status_code, decoded, dict(resp.headers), resp.text
+
+
+def _materialize_directives(value: Any) -> Any:
+    """Expand compact corpus-only constructors before sending a JSON body.
+
+    ``{"$repeat": {"prefix": "...", "value": "x", "suffix": "...",
+    "total_length": 5000}}`` builds a boundary-sized string without committing
+    thousands of filler characters to a corpus YAML file. The result, not the
+    directive, is sent to both servers.
+    """
+    if isinstance(value, dict):
+        if set(value) == {"$repeat"}:
+            spec = value["$repeat"]
+            prefix = str(spec.get("prefix", ""))
+            repeated = str(spec.get("value", ""))
+            suffix = str(spec.get("suffix", ""))
+            if not repeated:
+                raise ValueError("$repeat.value must not be empty")
+            if "total_length" in spec:
+                remaining = int(spec["total_length"]) - len(prefix) - len(suffix)
+                if remaining < 0 or remaining % len(repeated) != 0:
+                    raise ValueError("$repeat total_length cannot be satisfied exactly")
+                count = remaining // len(repeated)
+            else:
+                count = int(spec["count"])
+            return prefix + repeated * count + suffix
+        return {key: _materialize_directives(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_materialize_directives(item) for item in value]
+    return value
+
+
+def _json_format_diff(case: Case, server: str, decoded: Any, raw_text: str) -> Diff | None:
+    if case.response_json_format is None or (
+        isinstance(decoded, dict) and "__raw_text__" in decoded
+    ):
+        return None
+    if case.response_json_format == "pretty":
+        expected = json.dumps(decoded, indent=2)
+    elif case.response_json_format == "compact":
+        expected = json.dumps(decoded, separators=(",", ":"))
+    else:
+        raise ValueError(f"unknown response_json_format: {case.response_json_format}")
+    if raw_text == expected:
+        return None
+    return Diff(
+        f"/__json_format__/{server}",
+        case.response_json_format,
+        "byte mismatch",
+        "format",
+    )
 
 
 def _apply_bindings(case: Case, body: Any, bindings: dict[str, Any]) -> None:
@@ -431,7 +486,7 @@ def _walk_pages(
     pages: list[Any] = []
     query = dict(substitute(case.query, bindings))
     for _ in range(max_pages):
-        status, body, _ = _do_request(handle, case, bindings, creds, query_override=query)
+        status, body, _, _ = _do_request(handle, case, bindings, creds, query_override=query)
         pages.append((status, normalize(body, case.normalize_opts)))
         token = body.get(token_field) if isinstance(body, dict) else None
         if not token:
@@ -466,8 +521,10 @@ def run_case(
             for i, (pp, rp) in enumerate(zip(py_pages, rust_pages)):
                 diffs.extend(diff_normalized(pp[1], rp[1], f"/page{i}"))
         else:
-            py_status, py_body, _ = _do_request(servers.python, case, py_bindings, creds)
-            rust_status, rust_body, _ = _do_request(servers.rust, case, rust_bindings, creds)
+            py_status, py_body, _, py_text = _do_request(servers.python, case, py_bindings, creds)
+            rust_status, rust_body, _, rust_text = _do_request(
+                servers.rust, case, rust_bindings, creds
+            )
             _apply_bindings(case, py_body, py_bindings)
             _apply_bindings(case, rust_body, rust_bindings)
             diffs = []
@@ -475,6 +532,12 @@ def run_case(
                 py_norm = normalize(py_body, case.normalize_opts)
                 rust_norm = normalize(rust_body, case.normalize_opts)
                 diffs = diff_normalized(py_norm, rust_norm)
+            for server, decoded, raw_text in (
+                ("python", py_body, py_text),
+                ("rust", rust_body, rust_text),
+            ):
+                if format_diff := _json_format_diff(case, server, decoded, raw_text):
+                    diffs.append(format_diff)
     except Exception as exc:
         return CaseResult(
             name=case.name,
