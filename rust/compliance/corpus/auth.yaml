@@ -197,7 +197,10 @@ cases:
     compare_body: false
     expect_status: 403
 
-  - name: auth_online_config_deny_experiment_b
+  # Concrete-resource NO_PERMISSIONS grants were removed from the upstream
+  # role model. With default_permission=READ, rejecting this request leaves
+  # alice's default read access unchanged.
+  - name: auth_online_config_no_permissions_grant_rejected
     method: POST
     path: /api/3.0/mlflow/users/permissions/grant
     body:
@@ -207,16 +210,16 @@ cases:
       permission: NO_PERMISSIONS
     auth: admin
     compare_body: false
-    expect_status: 200
+    expect_status: 400
 
-  - name: auth_online_configs_every_experiment_required
+  - name: auth_online_configs_default_read_remains
     method: GET
     path: /api/3.0/mlflow/scorers/online-configs
     query:
       scorer_ids: ["${auth_online_scorer_a}", "${auth_online_scorer_b}"]
     auth: user
     compare_body: false
-    expect_status: 403
+    expect_status: 200
 
   - name: auth_online_config_grant_edit_a
     method: POST
@@ -229,6 +232,10 @@ cases:
     auth: admin
     compare_body: false
     expect_status: 200
+    shared_db_rust_second_write:
+      expect_status: 400
+      expect_error_code: RESOURCE_ALREADY_EXISTS
+      reason: Python inserts first into the auth DB shared by both servers; Rust observes that exact grant as a duplicate.
 
   - name: auth_online_config_put_edit_allowed
     method: PUT
@@ -262,7 +269,9 @@ cases:
       - {bind: auth_presigned_run_id, from: $.run.info.run_id}
     expect_status: 200
 
-  - name: auth_user_presigned_rpc_read_granted
+  # Presigned URL generation is not implemented for the local artifact
+  # configuration. Upstream returns 501 after the default READ auth gate.
+  - name: auth_user_presigned_rpc_default_read_not_implemented
     method: POST
     path: /api/2.0/mlflow/artifacts/presigned-download-url
     body: {run_id: "${auth_presigned_run_id}", path: missing.txt}
@@ -270,14 +279,16 @@ cases:
     compare_body: false
     expect_status: 501
 
-  - name: auth_user_presigned_proxy_read_granted
+  - name: auth_user_presigned_proxy_default_read_not_implemented
     method: GET
     path: /ajax-api/2.0/mlflow-artifacts/presigned/${auth_presigned_experiment_id}/missing.txt
     auth: user
     compare_body: false
     expect_status: 501
 
-  - name: auth_admin_revoke_experiment_read
+  # No explicit grant exists: alice can read only through default_permission,
+  # so the create/delete-only revoke API reports RESOURCE_DOES_NOT_EXIST.
+  - name: auth_admin_revoke_missing_experiment_grant
     method: POST
     path: /api/3.0/mlflow/users/permissions/revoke
     body:
@@ -286,24 +297,24 @@ cases:
       resource_id: "${auth_presigned_experiment_id}"
     auth: admin
     compare_body: false
-    expect_status: 200
+    expect_status: 404
 
-  - name: auth_user_presigned_rpc_read_denied
+  - name: auth_user_presigned_rpc_after_missing_revoke_not_implemented
     method: POST
     path: /ajax-api/2.0/mlflow/artifacts/presigned-download-url
     body: {run_id: "${auth_presigned_run_id}", path: missing.txt}
     auth: user
     compare_body: false
-    expect_status: 403
+    expect_status: 501
 
-  - name: auth_user_presigned_proxy_read_denied
+  - name: auth_user_presigned_proxy_after_missing_revoke_not_implemented
     method: GET
     path: /api/2.0/mlflow-artifacts/presigned/${auth_presigned_experiment_id}/missing.txt
     auth: user
     compare_body: false
-    expect_status: 403
+    expect_status: 501
 
-  - name: auth_admin_restore_experiment_read
+  - name: auth_admin_grant_explicit_experiment_read
     method: POST
     path: /api/3.0/mlflow/users/permissions/grant
     body:
@@ -314,8 +325,12 @@ cases:
     auth: admin
     compare_body: false
     expect_status: 200
+    shared_db_rust_second_write:
+      expect_status: 400
+      expect_error_code: RESOURCE_ALREADY_EXISTS
+      reason: Python inserts first into the auth DB shared by both servers; Rust observes that exact grant as a duplicate.
 
-  - name: auth_user_presigned_rpc_read_restored
+  - name: auth_user_presigned_rpc_explicit_read_not_implemented
     method: POST
     path: /api/2.0/mlflow/artifacts/presigned-download-url
     body: {run_id: "${auth_presigned_run_id}", path: missing.txt}
@@ -323,7 +338,7 @@ cases:
     compare_body: false
     expect_status: 501
 
-  - name: auth_user_presigned_proxy_read_restored
+  - name: auth_user_presigned_proxy_explicit_read_not_implemented
     method: GET
     path: /api/2.0/mlflow-artifacts/presigned/${auth_presigned_experiment_id}/missing.txt
     auth: user

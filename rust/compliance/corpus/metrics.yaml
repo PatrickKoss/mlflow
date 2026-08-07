@@ -105,7 +105,9 @@ cases:
     method: GET
     path: /api/2.0/mlflow/metrics/get-history
     query: {run_id: "nonexistent", metric_key: loss}
-    expect_status: 404
+    # The single-tenant SQLAlchemy store deliberately treats an unknown run as
+    # an empty metric history. Workspace-aware stores still validate the run.
+    expect_status: 200
 
   - name: metric_get_history_bulk_interval_lone_start_step
     method: GET

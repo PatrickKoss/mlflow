@@ -134,6 +134,7 @@ ID_FIELDS = frozenset({
     "job_id",
     "dataset_record_id",
     "scorer_id",
+    "online_scoring_config_id",
     "issue_id",
     "schema_id",
     "queue_id",

@@ -289,6 +289,7 @@ class Case:
     expect_headers: dict[str, Any] = field(default_factory=dict)
     raw_body: str | None = None  # raw (non-JSON) request body, e.g. artifact upload
     response_json_format: str | None = None  # "pretty" or "compact", checked byte-for-byte
+    shared_db_rust_second_write: dict[str, Any] | None = None
 
 
 @dataclass
@@ -334,6 +335,7 @@ def _parse_case(raw: dict[str, Any], section: str) -> Case:
         expect_headers=raw.get("expect_headers", {}) or {},
         raw_body=raw.get("raw_body"),
         response_json_format=raw.get("response_json_format"),
+        shared_db_rust_second_write=raw.get("shared_db_rust_second_write"),
     )
 
 
@@ -628,14 +630,44 @@ def run_case(
             error=f"{type(exc).__name__}: {exc}",
         )
 
+    second_write = case.shared_db_rust_second_write
     status_match = py_status == rust_status
+    if second_write is not None:
+        if case.expect_status is None:
+            raise ValueError(f"{case.name}: shared_db_rust_second_write requires expect_status")
+        if not second_write.get("reason"):
+            raise ValueError(
+                f"{case.name}: shared_db_rust_second_write requires a non-empty reason"
+            )
+        rust_second_status = int(second_write["expect_status"])
+        status_match = py_status == case.expect_status and rust_status == rust_second_status
+        expected_error_code = second_write.get("expect_error_code")
+        if expected_error_code is not None:
+            actual_error_code = rust_body.get("error_code") if isinstance(rust_body, dict) else None
+            if actual_error_code != expected_error_code:
+                diffs.append(
+                    Diff(
+                        "/__shared_db_rust_second_write__/error_code",
+                        expected_error_code,
+                        actual_error_code,
+                        "shared_db_second_write",
+                    )
+                )
     if case.expect_status is not None:
+        expected_statuses = {
+            "python": case.expect_status,
+            "rust": (
+                int(second_write["expect_status"])
+                if second_write is not None
+                else case.expect_status
+            ),
+        }
         for server, actual in (("python", py_status), ("rust", rust_status)):
-            if actual != case.expect_status:
+            if actual != expected_statuses[server]:
                 diffs.append(
                     Diff(
                         f"/__expected_status__/{server}",
-                        case.expect_status,
+                        expected_statuses[server],
                         actual,
                         "status_expectation",
                     )
@@ -669,7 +701,11 @@ def run_case(
         else:
             real_diffs.append(rec)
 
-    note = None
+    note = (
+        f"shared auth DB second write: {second_write['reason']}"
+        if second_write is not None
+        else None
+    )
     if case.expect_status is not None and py_status != case.expect_status:
         note = f"python status {py_status} != expected {case.expect_status}"
 

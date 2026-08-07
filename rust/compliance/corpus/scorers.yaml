@@ -72,7 +72,9 @@ cases:
     body:
       experiment_id: "0"
       name: corpus-length
-      sample_rate: 0.75
+      # Activating a non-gateway scorer is rejected by upstream. A zero rate
+      # persists the config while keeping this ResponseLength scorer inactive.
+      sample_rate: 0.0
       filter_string: "status = 'OK'"
     expect_status: 200
 
