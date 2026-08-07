@@ -70,7 +70,12 @@ kept both sides' new tests). Production UI rebuilt post-merge (`yarn build` rc=0
   - **AC:** Match merged Python `OnlineTraceCheckpointManager.calculate_time_window` + `OnlineTraceScoringProcessor.process_traces`: (1) new env var `MLFLOW_ONLINE_SCORING_DEFAULT_TRACE_COMPLETION_BUFFER_SECONDS` (int, default 300, negative clamped to 0) read server-side; (2) window upper bound = now − buffer; lower bound = max(checkpoint, upper − MAX_LOOKBACK_MS) (lookback measured from the buffered upper bound, not now); (3) a checkpoint ahead of the current server time is reset to `{timestamp_ms: now, trace_id: None}` and the cycle returns without scoring; (4) a checkpoint at/after the buffered upper bound (non-future) → skip the cycle without querying or overwriting the checkpoint's trace-id tie-breaker; (5) checkpoint written after scoring uses the search-derived task timestamp for the latest trace (max over `(task.timestamp_ms, trace_id)`), not a re-read trace-info timestamp; (6) trace search filters use the buffered upper bound as the max-timestamp constraint.
   - **VER:** Rust unit tests mirroring upstream's new `test_trace_checkpointer.py`/`test_trace_processor.py` cases (buffer window math incl. buffer > lookback interplay, future-checkpoint reset, non-advancing window skip, checkpoint tie-breaker preservation) via `cargo test -p mlflow-genai` / `-p mlflow-server --test online_scoring_scheduler`; conformance `uv run --no-sync python rust/genai-inventory/run_conformance.py --profile required` green.
 
-- [ ] T-S7 Workspace names: allow consecutive hyphens
+- [x] T-S7 Workspace names: allow consecutive hyphens
+  - **DONE 2026-08-07:** commit `0f5df9725` (executor: Codex, rebased onto post-T-S5 head;
+    coordinator-verified). `PATTERN` lookahead dropped and the manual `--` rejection removed in
+    `mlflow-store/src/store/workspaces.rs`; corpus gained a `team--a` create/get round-trip.
+    Independent VER rerun after rebase: `cargo test -p mlflow-store` green, replay `-k workspaces`
+    19 cases / 0 diffs / 0 status mismatches / 0 errors, RC=0. Integrated ff-only.
   - **Upstream refs:** `deb75c8f48` Allow valid Kubernetes workspace names with consecutive hyphens (#24229)
   - **Rust target:** `rust/crates/mlflow-store/src/store/workspaces.rs` (`PATTERN` and its emulation of Python's lookahead)
   - **AC:** Workspace name validation accepts names matching `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` (length 2–63, reserved names unchanged) — i.e. `team--a` is now valid; all previously-invalid cases (uppercase, leading/trailing hyphen, too short/long, reserved) still rejected with unchanged error messages. Rust regex and any duplicated validation (auth/workspace API layer) updated together; UI-side validation comes free from the merged JS build.
