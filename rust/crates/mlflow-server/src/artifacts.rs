@@ -36,7 +36,7 @@ use std::collections::HashMap;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{MatchedPath, Path, State};
-use axum::http::header::{self, HeaderValue};
+use axum::http::header::{self, HeaderMap, HeaderValue};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -120,7 +120,9 @@ pub async fn get_artifact(
     .await;
 
     match result {
-        Ok((repo, path)) => mlflow_artifacts::send_artifact_response(repo.as_ref(), &path).await,
+        Ok((repo, path)) => {
+            artifact_file_response(repo.as_ref(), &path, &path, &parts.headers).await
+        }
         Err(e) => e.into_response(),
     }
 }
@@ -228,7 +230,9 @@ pub async fn get_model_version_artifact(
     .await;
 
     match result {
-        Ok((repo, path)) => mlflow_artifacts::send_artifact_response(repo.as_ref(), &path).await,
+        Ok((repo, path)) => {
+            artifact_file_response(repo.as_ref(), &path, &path, &parts.headers).await
+        }
         Err(e) => e.into_response(),
     }
 }
@@ -337,7 +341,9 @@ pub async fn get_logged_model_artifact(
     .await;
 
     match result {
-        Ok((repo, path)) => mlflow_artifacts::send_artifact_response(repo.as_ref(), &path).await,
+        Ok((repo, path)) => {
+            artifact_file_response(repo.as_ref(), &path, &path, &parts.headers).await
+        }
         Err(e) => e.into_response(),
     }
 }
@@ -652,18 +658,7 @@ pub async fn proxy_download(
         Ok(path) => path,
         Err(error) => return error.into_response(),
     };
-    if let Some(local_path) = repo.local_path(&safe_path) {
-        return local_file_response(
-            &local_path,
-            &safe_path,
-            parts
-                .headers
-                .get(header::RANGE)
-                .and_then(|value| value.to_str().ok()),
-        )
-        .await;
-    }
-    mlflow_artifacts::send_artifact_response(repo.as_ref(), &safe_path).await
+    artifact_file_response(repo.as_ref(), &safe_path, &safe_path, &parts.headers).await
 }
 
 /// PUT `/mlflow-artifacts/artifacts/{*artifact_path}` — `_upload_artifact`
@@ -988,10 +983,79 @@ fn fastapi_detail(status: StatusCode, detail: &str) -> Response {
         .expect("valid response")
 }
 
+/// Serve an artifact through Werkzeug-compatible file response semantics.
+/// Local repositories use their source file directly; remote repositories are
+/// streamed to a temporary file first, matching Python's `_send_artifact` and
+/// `_download_artifact` fallback paths.
+pub(crate) async fn artifact_file_response(
+    repo: &dyn mlflow_artifacts::ArtifactRepo,
+    repo_path: &str,
+    artifact_name: &str,
+    request_headers: &HeaderMap,
+) -> Response {
+    use tokio::io::AsyncWriteExt;
+
+    if let Some(local_path) = repo.local_path(repo_path) {
+        return local_file_response(&local_path, artifact_name, request_headers).await;
+    }
+
+    let download = match repo.get(repo_path).await {
+        Ok(download) => download,
+        Err(error) => return error.into_response(),
+    };
+    let temp_dir = match tempfile::tempdir() {
+        Ok(temp_dir) => temp_dir,
+        Err(error) => {
+            return MlflowError::internal_error(format!(
+                "Failed to create temporary artifact directory: {error}"
+            ))
+            .into_response();
+        }
+    };
+    let temp_path = temp_dir.path().join("artifact-download");
+    let mut file = match tokio::fs::File::create(&temp_path).await {
+        Ok(file) => file,
+        Err(error) => {
+            return MlflowError::internal_error(format!(
+                "Failed to create temporary artifact file: {error}"
+            ))
+            .into_response();
+        }
+    };
+    let mut stream = download.stream;
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => return error.into_response(),
+        };
+        if let Err(error) = file.write_all(&chunk).await {
+            return MlflowError::internal_error(format!(
+                "Failed to write temporary artifact file: {error}"
+            ))
+            .into_response();
+        }
+    }
+    if let Err(error) = file.flush().await {
+        return MlflowError::internal_error(format!(
+            "Failed to flush temporary artifact file: {error}"
+        ))
+        .into_response();
+    }
+    drop(file);
+
+    // `local_file_response` opens the file before returning and its body owns
+    // that handle. Dropping the directory here unlinks the temporary pathname
+    // while allowing the already-open stream to finish, which is the same
+    // close-triggered cleanup lifetime as Python's temporary response wrapper.
+    let response = local_file_response(&temp_path, artifact_name, request_headers).await;
+    drop(temp_dir);
+    response
+}
+
 async fn local_file_response(
     path: &std::path::Path,
     artifact_path: &str,
-    range_header: Option<&str>,
+    request_headers: &HeaderMap,
 ) -> Response {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -1019,22 +1083,33 @@ async fn local_file_response(
     }
 
     let size = metadata.len();
+    let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+    let etag = file_etag(path, modified, size);
+    let last_modified = http_date(modified);
+
+    if is_not_modified(request_headers, &etag, modified) {
+        let filename = artifact_path.rsplit('/').next().unwrap_or(artifact_path);
+        return Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(
+                header::CONTENT_DISPOSITION,
+                mlflow_artifacts::mime::content_disposition_attachment(filename),
+            )
+            .header(header::CACHE_CONTROL, "no-cache")
+            .header(header::LAST_MODIFIED, last_modified)
+            .header(header::ETAG, &etag)
+            .header(header::ACCEPT_RANGES, "bytes")
+            .header("X-Content-Type-Options", "nosniff")
+            .body(Body::empty())
+            .expect("valid response");
+    }
+
+    let range_header = effective_range_header(request_headers, &etag, modified);
     let (status, start, end) = match parse_single_range(range_header, size) {
         Ok(Some((start, end))) => (StatusCode::PARTIAL_CONTENT, start, end),
         Ok(None) => (StatusCode::OK, 0, size.saturating_sub(1)),
-        Err(RangeError::Malformed) => {
-            return fastapi_detail(StatusCode::BAD_REQUEST, "Malformed Range header.");
-        }
-        Err(RangeError::Unsatisfiable) => {
-            let mut response = fastapi_detail(
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                "Requested Range Not Satisfiable",
-            );
-            response.headers_mut().insert(
-                header::CONTENT_RANGE,
-                HeaderValue::from_str(&format!("bytes */{size}")).expect("valid range header"),
-            );
-            return response;
+        Err(RangeError::Malformed | RangeError::Unsatisfiable) => {
+            return range_not_satisfiable_response(size);
         }
     };
     let length = if size == 0 { 0 } else { end - start + 1 };
@@ -1081,6 +1156,9 @@ async fn local_file_response(
         .header("X-Content-Type-Options", "nosniff")
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_LENGTH, length)
+        .header(header::LAST_MODIFIED, last_modified)
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::ETAG, etag)
         .body(Body::from_stream(stream))
         .expect("valid response");
     if status == StatusCode::PARTIAL_CONTENT {
@@ -1091,6 +1169,95 @@ async fn local_file_response(
         );
     }
     response
+}
+
+fn range_not_satisfiable_response(size: u64) -> Response {
+    const BODY: &str = "<!doctype html>\n<html lang=en>\n<title>416 Requested Range Not Satisfiable</title>\n<h1>Requested Range Not Satisfiable</h1>\n<p>The server cannot provide the requested range.</p>\n";
+    Response::builder()
+        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CONTENT_RANGE, format!("bytes */{size}"))
+        .header(header::CONTENT_LENGTH, BODY.len())
+        .body(Body::from(BODY))
+        .expect("valid response")
+}
+
+fn file_etag(path: &std::path::Path, modified: std::time::SystemTime, size: u64) -> String {
+    let duration = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let mut mtime = duration.as_secs_f64().to_string();
+    if !mtime.contains('.') {
+        mtime.push_str(".0");
+    }
+    let checksum = adler32(path.to_string_lossy().as_bytes());
+    format!("\"{mtime}-{size}-{checksum}\"")
+}
+
+fn adler32(bytes: &[u8]) -> u32 {
+    const MOD_ADLER: u32 = 65_521;
+    let mut a = 1_u32;
+    let mut b = 0_u32;
+    for byte in bytes {
+        a = (a + u32::from(*byte)) % MOD_ADLER;
+        b = (b + a) % MOD_ADLER;
+    }
+    (b << 16) | a
+}
+
+fn http_date(time: std::time::SystemTime) -> String {
+    let datetime: chrono::DateTime<chrono::Utc> = time.into();
+    datetime.format("%a, %d %b %Y %H:%M:%S GMT").to_string()
+}
+
+fn parse_http_date(value: &HeaderValue) -> Option<std::time::SystemTime> {
+    let parsed = chrono::DateTime::parse_from_rfc2822(value.to_str().ok()?).ok()?;
+    let seconds = parsed.timestamp();
+    (seconds >= 0).then(|| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds as u64))
+}
+
+fn weak_etag_matches(value: &str, etag: &str) -> bool {
+    value.split(',').any(|candidate| {
+        let candidate = candidate.trim();
+        candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
+    })
+}
+
+fn is_not_modified(headers: &HeaderMap, etag: &str, modified: std::time::SystemTime) -> bool {
+    if let Some(value) = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+    {
+        return weak_etag_matches(value, etag);
+    }
+    headers
+        .get(header::IF_MODIFIED_SINCE)
+        .and_then(parse_http_date)
+        .is_some_and(|since| modified <= since + std::time::Duration::from_secs(1))
+}
+
+fn effective_range_header<'a>(
+    headers: &'a HeaderMap,
+    etag: &str,
+    modified: std::time::SystemTime,
+) -> Option<&'a str> {
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())?;
+    let Some(if_range) = headers.get(header::IF_RANGE) else {
+        return Some(range);
+    };
+    let matches = if let Ok(value) = if_range.to_str() {
+        if value.starts_with('"') {
+            value == etag
+        } else {
+            parse_http_date(if_range)
+                .is_some_and(|date| modified <= date + std::time::Duration::from_secs(1))
+        }
+    } else {
+        false
+    };
+    matches.then_some(range)
 }
 
 enum RangeError {
@@ -1113,7 +1280,7 @@ fn parse_single_range(value: Option<&str>, size: u64) -> Result<Option<(u64, u64
     if start.is_empty() {
         let suffix: u64 = end.parse().map_err(|_| RangeError::Malformed)?;
         if suffix == 0 {
-            return Err(RangeError::Unsatisfiable);
+            return Ok(Some((0, size - 1)));
         }
         let start = size.saturating_sub(suffix);
         return Ok(Some((start, size - 1)));

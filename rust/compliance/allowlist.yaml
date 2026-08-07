@@ -16,6 +16,35 @@
 # Python's exact "Invalid value 123 for parameter 'name' supplied:  Hint: ..."
 # message, so its entry is gone.)
 entries:
+  # File-response ETags intentionally include adler32(server-local file_path),
+  # so the Python and Rust processes cannot produce the same value. Corpus
+  # expectations still assert Werkzeug's quoted mtime-size-checksum shape on
+  # each response; only the exact volatile header value is allowlisted here.
+  - case_or_path: artifact_contract_download
+    json_pointer: /__headers__/etag
+    reason: ETag includes adler32 of a different server-local artifact path; shape is asserted per server.
+    link: upstream/fcb20c33a78403724c373707107cc121adc0f4df
+  - case_or_path: artifact_contract_download_range
+    json_pointer: /__headers__/etag
+    reason: ETag includes adler32 of a different server-local artifact path; shape is asserted per server.
+    link: upstream/fcb20c33a78403724c373707107cc121adc0f4df
+  - case_or_path: artifact_contract_download_if_none_match
+    json_pointer: /__headers__/etag
+    reason: ETag includes adler32 of a different server-local artifact path; shape is asserted per server.
+    link: upstream/fcb20c33a78403724c373707107cc121adc0f4df
+  - case_or_path: trace_attachment_download
+    json_pointer: /__headers__/etag
+    reason: ETag includes adler32 of a different server-local attachment path; shape is asserted per server.
+    link: upstream/fcb20c33a78403724c373707107cc121adc0f4df
+  - case_or_path: trace_attachment_download_range
+    json_pointer: /__headers__/etag
+    reason: ETag includes adler32 of a different server-local attachment path; shape is asserted per server.
+    link: upstream/fcb20c33a78403724c373707107cc121adc0f4df
+  - case_or_path: trace_attachment_download_if_none_match
+    json_pointer: /__headers__/etag
+    reason: ETag includes adler32 of a different server-local attachment path; shape is asserted per server.
+    link: upstream/fcb20c33a78403724c373707107cc121adc0f4df
+
   # ---- Framework-default error pages on route misses ---------------------
   # Flask serves its default HTML 404/405 page for a path/method that matches
   # no route; axum serves an empty body. Status codes match; the body is

@@ -15,10 +15,11 @@
 //! through to the artifact repo* in that case)
 //!
 //! * `request_id` missing → 400 `BAD_REQUEST`.
-//! * `path` present (attachment fetch) → `validate_path_is_safe`, then
-//!   ALWAYS through the artifact repo (`_get_trace_artifact_repo`,
-//!   regardless of `spansLocation`) — `download_trace_attachment` further
-//!   requires `path` be a canonical UUID.
+//! * `path` present (attachment fetch) → `validate_path_is_safe`, then strict
+//!   canonical-UUID validation, then ALWAYS through the artifact repo
+//!   (`_get_trace_artifact_repo`, regardless of `spansLocation`). Local
+//!   repositories serve the source file directly; remote repositories stage a
+//!   streaming temporary file.
 //! * No `path`: dispatch on the trace's `mlflow.trace.spansLocation` tag:
 //!   - `TRACKING_STORE` → build `{"spans": [...]}` from the DB-backed spans
 //!     (`Trace.data.to_dict()`).
@@ -28,15 +29,18 @@
 //!
 //! ## Response shape
 //!
-//! Both the spans-JSON and attachment responses are `send_file(..., mimetype=
+//! Generated spans-JSON responses are `send_file(..., mimetype=
 //! "application/octet-stream", as_attachment=True, ...)` immediately
 //! overwritten by `_response_with_file_attachment_headers`, which re-guesses
 //! the content type from the *download filename* (`_guess_mime_type`) and
 //! always sets `Content-Disposition: attachment` + `X-Content-Type-Options:
 //! nosniff`. For the spans-JSON path the filename is the constant
 //! `TRACE_DATA_FILE_NAME` (`"traces.json"`, extension `json` →
-//! `text/plain`); for the attachment path the filename is the (UUID) `path`
-//! itself (no extension → `application/octet-stream`).
+//! `text/plain`). Attachments additionally carry `Content-Length`,
+//! `Last-Modified`, `Cache-Control: no-cache`, a Werkzeug-shaped ETag,
+//! byte-range support, and conditional responses. An attachment's filename is
+//! its UUID path (no extension →
+//! `application/octet-stream`).
 //!
 //! The spans-JSON body is `json.dumps(trace_data)` — Python's *default*
 //! separators (`", "` / `": "`), NOT the `indent=2` pretty-printer
@@ -82,15 +86,19 @@ pub async fn get_trace_artifact(
 
     if let Some(path) = path {
         let safe_path = mlflow_artifacts::validate_path_is_safe(&path)?;
-        let trace_info = store.get_trace_info(workspace.name(), &request_id).await?;
         validate_attachment_path(&safe_path)?;
+        let trace_info = store.get_trace_info(workspace.name(), &request_id).await?;
         let resolved = state.resolve_artifact(
             trace_artifact_uri(&trace_info)?,
             &format!("attachments/{safe_path}"),
         )?;
-        let content_bytes =
-            download_trace_attachment(resolved.repo.as_ref(), &resolved.path, &safe_path).await?;
-        return Ok(attachment_response(&safe_path, content_bytes));
+        return Ok(crate::artifacts::artifact_file_response(
+            resolved.repo.as_ref(),
+            &resolved.path,
+            &safe_path,
+            &parts.headers,
+        )
+        .await);
     }
 
     let trace_data = fetch_trace_data_from_store(store, &workspace, &request_id).await?;
@@ -181,30 +189,18 @@ fn trace_artifact_uri(trace_info: &TraceInfo) -> Result<&str, MlflowError> {
     })
 }
 
-/// `ArtifactRepositoryBase.download_trace_data` as overridden by
-/// `LocalArtifactRepository.download_trace_data` (`local_artifact_repo.py:238`),
-/// which delegates to `try_read_trace_data` (`artifact_repo.py:525`): read
-/// `traces.json`, erroring `NOT_FOUND` (missing/empty) or `INVALID_STATE`
-/// (bad JSON).
-///
-/// Deviation: Python's message embeds the *absolute local filesystem path* to
-/// the temp/artifact-dir copy of `traces.json`, which is either a fresh temp
-/// directory per call (the generic `ArtifactRepositoryBase` path) or the
-/// artifact directory (the `LocalArtifactRepository` override) — neither is a
-/// stable, backend-agnostic value the [`mlflow_artifacts::ArtifactRepo`]
-/// trait exposes (it is generic over `object_store` backends, not just local
-/// FS). We use the repo-relative artifact path (`"traces.json"`) instead,
-/// matching the style `send_artifact`'s own not-found message already uses.
+/// Download and parse artifact-repository trace data while preserving the
+/// established `MlflowTraceDataNotFound` and corruption error mappings.
 async fn download_trace_data(
     repo: &dyn mlflow_artifacts::ArtifactRepo,
     path: &str,
 ) -> Result<serde_json::Value, MlflowError> {
     let bytes = match repo.get(path).await {
-        Ok(dl) => collect(dl).await?,
-        Err(e) if e.error_code == ErrorCode::ResourceDoesNotExist => {
+        Ok(download) => collect(download).await?,
+        Err(error) if error.error_code == ErrorCode::ResourceDoesNotExist => {
             return Err(trace_data_not_found());
         }
-        Err(e) => return Err(e),
+        Err(error) => return Err(error),
     };
     if bytes.is_empty() {
         return Err(trace_data_not_found());
@@ -224,42 +220,23 @@ fn trace_data_not_found() -> MlflowError {
     )
 }
 
-/// `ArtifactRepositoryBase.download_trace_attachment`
-/// (`artifact_repo.py:450`) + `_validate_attachment_path` (`artifact_repo.py:684`):
-/// the attachment lives at `attachments/{path}` within the repo, and `path`
-/// must be a canonical (lowercase, hyphenated) UUID string.
-async fn download_trace_attachment(
-    repo: &dyn mlflow_artifacts::ArtifactRepo,
-    resolved_path: &str,
-    display_path: &str,
-) -> Result<Vec<u8>, MlflowError> {
-    let dl = repo.get(resolved_path).await.map_err(|e| {
-        // Mirrors the handler's `except Exception` catch-all around
-        // `download_trace_attachment` (any non-`MlflowException` failure is
-        // wrapped); a repo miss IS an `MlflowException`
-        // (`RESOURCE_DOES_NOT_EXIST`) in Python too (`_download_file`), so it
-        // passes through unchanged, matching `except MlflowException: raise`.
-        if e.error_code == ErrorCode::ResourceDoesNotExist {
-            e
-        } else {
-            MlflowError::internal_error(format!(
-                "Failed to download attachment '{display_path}' for trace."
-            ))
-        }
-    })?;
-    collect(dl).await
-}
-
 /// Port of `_validate_attachment_path`: `path` must round-trip through
 /// `uuid.UUID(path)` to the identical canonical string (rejects uppercase,
 /// braces, missing hyphens, etc. — anything `str(UUID(path)) != path`).
 fn validate_attachment_path(path: &str) -> Result<(), MlflowError> {
     match uuid::Uuid::parse_str(path) {
         Ok(parsed) if hyphenated_lowercase(&parsed) == path => Ok(()),
-        _ => Err(MlflowError::new(
-            format!("Invalid attachment path: '{path}'. Attachment path must be a valid UUID."),
-            ErrorCode::InvalidParameterValue,
-        )),
+        _ => {
+            let mut error = MlflowError::new(
+                format!("Invalid attachment path: '{path}'. Attachment path must be a valid UUID."),
+                ErrorCode::InvalidParameterValue,
+            );
+            // `_validate_attachment_path` explicitly overrides the generic
+            // INVALID_PARAMETER_VALUE classification.
+            error.error_class = Some("ATTRIBUTE_NOT_FOUND");
+            error.sqlstate = Some("KAM04");
+            Err(error)
+        }
     }
 }
 
@@ -267,14 +244,15 @@ fn hyphenated_lowercase(id: &uuid::Uuid) -> String {
     id.hyphenated().to_string()
 }
 
-async fn collect(dl: mlflow_artifacts::ArtifactDownload) -> Result<Vec<u8>, MlflowError> {
+async fn collect(download: mlflow_artifacts::ArtifactDownload) -> Result<Vec<u8>, MlflowError> {
     use futures::stream::StreamExt;
-    let mut out = Vec::with_capacity(dl.size.max(0) as usize);
-    let mut stream = dl.stream;
+
+    let mut output = Vec::with_capacity(download.size.max(0) as usize);
+    let mut stream = download.stream;
     while let Some(chunk) = stream.next().await {
-        out.extend_from_slice(&chunk?);
+        output.extend_from_slice(&chunk?);
     }
-    Ok(out)
+    Ok(output)
 }
 
 /// Build the `traces.json` response: `send_file(..., mimetype=
@@ -296,12 +274,6 @@ fn spans_json_response(trace_data: &serde_json::Value) -> Response {
 /// filename (and therefore the guessed mime type / Content-Disposition) is
 /// the requested `path` (`download_name=path`,
 /// `_response_with_file_attachment_headers(path, ...)`).
-fn attachment_response(path: &str, content_bytes: Vec<u8>) -> Response {
-    let mime = mlflow_artifacts::mime::guess_mime_type(path);
-    let content_disposition = mlflow_artifacts::mime::content_disposition_attachment(path);
-    build_attachment_response(content_bytes, &mime, &content_disposition)
-}
-
 fn build_attachment_response(body: Vec<u8>, mime: &str, content_disposition: &str) -> Response {
     let len = body.len() as u64;
     let mut response = Response::builder()

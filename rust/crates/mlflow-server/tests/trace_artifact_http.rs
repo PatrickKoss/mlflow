@@ -177,13 +177,22 @@ impl HttpResponse {
 }
 
 async fn get(server: &TestServer, prefix: &str, query: &str) -> HttpResponse {
+    get_with_headers(server, prefix, query, &[]).await
+}
+
+async fn get_with_headers(
+    server: &TestServer,
+    prefix: &str,
+    query: &str,
+    headers: &[(&str, &str)],
+) -> HttpResponse {
     let client = Client::builder(TokioExecutor::new()).build_http();
     let url = format!("{}{prefix}/mlflow/get-trace-artifact?{query}", server.base);
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri(&url)
-        .body(Full::<Bytes>::new(Bytes::new()))
-        .unwrap();
+    let mut request = Request::builder().method(Method::GET).uri(&url);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let request = request.body(Full::<Bytes>::new(Bytes::new())).unwrap();
 
     let mut last = None;
     for _ in 0..50 {
@@ -562,6 +571,78 @@ async fn attachment_fetch_via_path_uuid() {
 }
 
 #[tokio::test]
+async fn attachment_supports_conditional_and_range_downloads() {
+    let server = TestServer::start("attachment_conditionals").await;
+    let trace_id = "tr-attachment-conditionals";
+    start_trace(&server.store, trace_id).await;
+
+    let dir = tempfile::TempDir::new().unwrap();
+    server
+        .store
+        .set_trace_tag(
+            "default",
+            trace_id,
+            "mlflow.artifactLocation",
+            &dir.path().display().to_string(),
+        )
+        .await
+        .unwrap();
+    std::fs::create_dir_all(dir.path().join("attachments")).unwrap();
+    let attachment_id = "550e8400-e29b-41d4-a716-446655440000";
+    std::fs::write(
+        dir.path().join("attachments").join(attachment_id),
+        b"0123456789",
+    )
+    .unwrap();
+    let query = format!("request_id={trace_id}&path={attachment_id}");
+
+    let full = get(&server, "/ajax-api/2.0", &query).await;
+    assert_eq!(full.status, StatusCode::OK, "{}", full.body_str());
+    assert_eq!(full.body, b"0123456789");
+    assert_eq!(full.header("content-length").as_deref(), Some("10"));
+    assert_eq!(full.header("cache-control").as_deref(), Some("no-cache"));
+    assert_eq!(full.header("accept-ranges").as_deref(), Some("bytes"));
+    assert!(full.header("last-modified").unwrap().ends_with(" GMT"));
+    let etag = full.header("etag").unwrap();
+    assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+
+    let ranged =
+        get_with_headers(&server, "/ajax-api/2.0", &query, &[("range", "bytes=0-3")]).await;
+    assert_eq!(ranged.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(ranged.body, b"0123");
+    assert_eq!(
+        ranged.header("content-range").as_deref(),
+        Some("bytes 0-3/10")
+    );
+    assert_eq!(ranged.header("accept-ranges").as_deref(), Some("bytes"));
+
+    let not_modified = get_with_headers(
+        &server,
+        "/ajax-api/2.0",
+        &query,
+        &[("if-none-match", &etag)],
+    )
+    .await;
+    assert_eq!(not_modified.status, StatusCode::NOT_MODIFIED);
+    assert!(not_modified.body.is_empty());
+    assert_eq!(not_modified.header("etag").as_deref(), Some(etag.as_str()));
+    assert!(not_modified.header("last-modified").is_some());
+
+    let unsatisfiable = get_with_headers(
+        &server,
+        "/ajax-api/2.0",
+        &query,
+        &[("range", "bytes=20-30")],
+    )
+    .await;
+    assert_eq!(unsatisfiable.status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        unsatisfiable.header("content-range").as_deref(),
+        Some("bytes */10")
+    );
+}
+
+#[tokio::test]
 async fn attachment_non_uuid_path_is_400() {
     let server = TestServer::start("attachment_bad_uuid").await;
     let trace_id = "tr-attachment-bad-uuid";
@@ -586,6 +667,8 @@ async fn attachment_non_uuid_path_is_400() {
     .await;
     assert_eq!(res.status, StatusCode::BAD_REQUEST, "{}", res.body_str());
     assert_eq!(res.json()["error_code"], "INVALID_PARAMETER_VALUE");
+    assert_eq!(res.json()["sqlstate"], "KAM04");
+    assert_eq!(res.json()["error_class"], "ATTRIBUTE_NOT_FOUND");
 }
 
 #[tokio::test]

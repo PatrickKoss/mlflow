@@ -404,6 +404,87 @@ fn write_run_artifact(artifact_uri: &str, rel: &str, contents: &[u8]) {
     std::fs::write(full, contents).unwrap();
 }
 
+fn assert_werkzeug_file_headers(headers: &reqwest::header::HeaderMap, size: u64) -> String {
+    assert_eq!(headers[reqwest::header::CONTENT_LENGTH], size.to_string());
+    assert_eq!(headers[reqwest::header::CACHE_CONTROL], "no-cache");
+    assert_eq!(headers[reqwest::header::ACCEPT_RANGES], "bytes");
+    let last_modified = headers[reqwest::header::LAST_MODIFIED].to_str().unwrap();
+    assert!(last_modified.ends_with(" GMT"), "{last_modified}");
+
+    let etag = headers[reqwest::header::ETAG].to_str().unwrap().to_string();
+    assert!(etag.starts_with('"') && etag.ends_with('"'), "{etag}");
+    let fields: Vec<_> = etag.trim_matches('"').split('-').collect();
+    assert_eq!(fields.len(), 3, "{etag}");
+    fields[0].parse::<f64>().expect("mtime in ETag");
+    assert_eq!(fields[1].parse::<u64>().unwrap(), size);
+    fields[2].parse::<u32>().expect("adler32 in ETag");
+    etag
+}
+
+async fn assert_conditional_download_contract(url: String) {
+    let client = reqwest::Client::new();
+    let response = client.get(&url).send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let etag = assert_werkzeug_file_headers(response.headers(), 10);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"0123456789");
+
+    let response = client
+        .get(&url)
+        .header(reqwest::header::RANGE, "bytes=0-3")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers()[reqwest::header::CONTENT_LENGTH], "4");
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_RANGE],
+        "bytes 0-3/10"
+    );
+    assert_eq!(
+        response.headers()[reqwest::header::CACHE_CONTROL],
+        "no-cache"
+    );
+    assert_eq!(response.headers()[reqwest::header::ACCEPT_RANGES], "bytes");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"0123");
+
+    let response = client
+        .get(&url)
+        .header(reqwest::header::IF_NONE_MATCH, &etag)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_MODIFIED);
+    assert_eq!(response.headers()[reqwest::header::ETAG], etag);
+    assert!(response
+        .headers()
+        .contains_key(reqwest::header::LAST_MODIFIED));
+    assert_eq!(
+        response.headers()[reqwest::header::CACHE_CONTROL],
+        "no-cache"
+    );
+    assert_eq!(response.headers()[reqwest::header::ACCEPT_RANGES], "bytes");
+    assert!(response.bytes().await.unwrap().is_empty());
+
+    let response = client
+        .get(&url)
+        .header(reqwest::header::RANGE, "bytes=20-30")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::RANGE_NOT_SATISFIABLE
+    );
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_RANGE],
+        "bytes */10"
+    );
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        b"<!doctype html>\n<html lang=en>\n<title>416 Requested Range Not Satisfiable</title>\n<h1>Requested Range Not Satisfiable</h1>\n<p>The server cannot provide the requested range.</p>\n"
+    );
+}
+
 // ===========================================================================
 // T5.1 — /get-artifact
 // ===========================================================================
@@ -426,6 +507,19 @@ async fn get_artifact_streams_run_file() {
         res.content_disposition.as_deref(),
         Some("attachment; filename=output.txt")
     );
+}
+
+#[tokio::test]
+async fn get_artifact_supports_conditional_and_range_downloads() {
+    let server = TestServer::start("get_conditionals", true).await;
+    let (run_id, artifact_uri) = create_run(&server).await;
+    write_run_artifact(&artifact_uri, "data.txt", b"0123456789");
+
+    assert_conditional_download_contract(format!(
+        "{}/get-artifact?run_id={run_id}&path=data.txt",
+        server.base
+    ))
+    .await;
 }
 
 #[tokio::test]
@@ -928,6 +1022,20 @@ async fn native_proxy_local_download_supports_byte_ranges() {
     );
     assert_eq!(response.headers()["x-content-type-options"], "nosniff");
     assert_eq!(response.bytes().await.unwrap().as_ref(), b"2345");
+}
+
+#[tokio::test]
+async fn native_proxy_download_supports_conditional_and_range_contract() {
+    let server = TestServer::start("native_conditionals", true).await;
+    let path = server.dest_file("conditionals/data.txt");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"0123456789").unwrap();
+
+    assert_conditional_download_contract(format!(
+        "{}/api/2.0/mlflow-artifacts/artifacts/conditionals/data.txt",
+        server.base
+    ))
+    .await;
 }
 
 #[tokio::test]

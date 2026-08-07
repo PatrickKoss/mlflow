@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -284,6 +285,8 @@ class Case:
     expect_status: int | None = None  # optional exact-status assertion (both servers)
     walk: dict[str, Any] | None = None  # walk_pages descriptor
     compare_body: bool = True
+    compare_headers: list[str] = field(default_factory=list)
+    expect_headers: dict[str, Any] = field(default_factory=dict)
     raw_body: str | None = None  # raw (non-JSON) request body, e.g. artifact upload
     response_json_format: str | None = None  # "pretty" or "compact", checked byte-for-byte
 
@@ -327,6 +330,8 @@ def _parse_case(raw: dict[str, Any], section: str) -> Case:
         expect_status=raw.get("expect_status"),
         walk=raw.get("walk"),
         compare_body=raw.get("compare_body", True),
+        compare_headers=raw.get("compare_headers", []) or [],
+        expect_headers=raw.get("expect_headers", {}) or {},
         raw_body=raw.get("raw_body"),
         response_json_format=raw.get("response_json_format"),
     )
@@ -482,10 +487,53 @@ def _json_format_diff(case: Case, server: str, decoded: Any, raw_text: str) -> D
     )
 
 
-def _apply_bindings(case: Case, body: Any, bindings: dict[str, Any]) -> None:
+def _header_value(headers: dict[str, str], name: str) -> str | None:
+    lowered = name.lower()
+    return next((value for key, value in headers.items() if key.lower() == lowered), None)
+
+
+def _apply_bindings(
+    case: Case, body: Any, headers: dict[str, str], bindings: dict[str, Any]
+) -> None:
     for b in case.bind:
-        val = json_path_get(body, b["from"])
+        if header := b.get("from_header"):
+            val = _header_value(headers, header)
+        else:
+            val = json_path_get(body, b["from"])
         bindings[b["bind"]] = val
+
+
+def _header_diffs(
+    case: Case,
+    py_headers: dict[str, str],
+    rust_headers: dict[str, str],
+) -> list[Diff]:
+    diffs = []
+    for name in case.compare_headers:
+        py_value = _header_value(py_headers, name)
+        rust_value = _header_value(rust_headers, name)
+        if py_value != rust_value:
+            diffs.append(Diff(f"/__headers__/{name.lower()}", py_value, rust_value, "header"))
+
+    for server, headers in (("python", py_headers), ("rust", rust_headers)):
+        for name, expectation in case.expect_headers.items():
+            actual = _header_value(headers, name)
+            matches = (
+                actual == str(expectation)
+                if not isinstance(expectation, dict)
+                else actual is not None
+                and re.fullmatch(str(expectation["matches"]), actual) is not None
+            )
+            if not matches:
+                diffs.append(
+                    Diff(
+                        f"/__header_expectations__/{server}/{name.lower()}",
+                        expectation,
+                        actual,
+                        "header_expectation",
+                    )
+                )
+    return diffs
 
 
 # ---------------------------------------------------------------------------
@@ -547,17 +595,19 @@ def run_case(
             for i, (pp, rp) in enumerate(zip(py_pages, rust_pages)):
                 diffs.extend(diff_normalized(pp[1], rp[1], f"/page{i}"))
         else:
-            py_status, py_body, _, py_text = _do_request(servers.python, case, py_bindings, creds)
-            rust_status, rust_body, _, rust_text = _do_request(
+            py_status, py_body, py_headers, py_text = _do_request(
+                servers.python, case, py_bindings, creds
+            )
+            rust_status, rust_body, rust_headers, rust_text = _do_request(
                 servers.rust, case, rust_bindings, creds
             )
-            _apply_bindings(case, py_body, py_bindings)
-            _apply_bindings(case, rust_body, rust_bindings)
-            diffs = []
+            _apply_bindings(case, py_body, py_headers, py_bindings)
+            _apply_bindings(case, rust_body, rust_headers, rust_bindings)
+            diffs = _header_diffs(case, py_headers, rust_headers)
             if case.compare_body:
                 py_norm = normalize(py_body, case.normalize_opts)
                 rust_norm = normalize(rust_body, case.normalize_opts)
-                diffs = diff_normalized(py_norm, rust_norm)
+                diffs.extend(diff_normalized(py_norm, rust_norm))
             for server, decoded, raw_text in (
                 ("python", py_body, py_text),
                 ("rust", rust_body, rust_text),
@@ -579,6 +629,17 @@ def run_case(
         )
 
     status_match = py_status == rust_status
+    if case.expect_status is not None:
+        for server, actual in (("python", py_status), ("rust", rust_status)):
+            if actual != case.expect_status:
+                diffs.append(
+                    Diff(
+                        f"/__expected_status__/{server}",
+                        case.expect_status,
+                        actual,
+                        "status_expectation",
+                    )
+                )
     real_diffs: list[dict[str, Any]] = []
     allowed: list[dict[str, Any]] = []
 
@@ -753,8 +814,7 @@ Corpus sections map to plan section 3 as follows:
 - gateway_proxy_validation -> 12.8 (GET/POST validation before a closed local target)
 
 Deliberately deferred to follow-up (documented, not covered here): assessments
-FieldMask update paths (3.9) beyond create/get; trace artifact fetch dispatch
-on spansLocation (3.10); tracing V2 deprecated adapters (3.7) beyond the search
+FieldMask update paths (3.9) beyond create/get; tracing V2 deprecated adapters (3.7) beyond the search
 smoke; queryTraceMetrics / calculateTraceFilterCorrelation aggregations (3.6);
 multipart artifact create/complete/abort (3.11); full RBAC
 role/permission matrix and after-request search filtering (3.16); workspace
@@ -781,6 +841,15 @@ def _run_sqlite_sections(
     _seed_tracking_db(seed_db)
     artifact_root = workroot / "artifacts"
     artifact_root.mkdir(parents=True, exist_ok=True)
+    if "traces" in sections:
+        attachment_id = "550e8400-e29b-41d4-a716-446655440000"
+        attachment_path = Path(
+            "trace-attachment-compliance/traces/tr-compliance-1/artifacts/attachments"
+        )
+        for side in ("python", "rust"):
+            path = artifact_root / side / attachment_path / attachment_id
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"trace attachment bytes")
 
     results: list[CaseResult] = []
     creds: dict[str, tuple[str, str]] = {}
@@ -1182,6 +1251,7 @@ def main() -> int:
     gateway_proxy_validation_cases = sections.pop("gateway_proxy_validation", [])
     mcp_server_registry_cases = sections.pop("mcp_server_registry", [])
     artifacts_cases = sections.pop("artifacts", [])
+    artifact_download_contract_cases = sections.pop("artifact_download_contract", [])
     artifacts_disabled_cases = sections.pop("artifacts_native_disabled", [])
     artifacts_unconfigured_cases = sections.pop("artifacts_native_unconfigured", [])
     server_info_no_artifacts_cases = sections.pop("server_info_no_artifacts", [])
@@ -1201,6 +1271,15 @@ def main() -> int:
                     allow,
                     Path(td),
                     python_asgi_app="mlflow.server.fastapi_app:app",
+                )
+            )
+    if artifact_download_contract_cases:
+        with tempfile.TemporaryDirectory(prefix="mlflow-t-s2-artifact-contract-") as td:
+            all_results.extend(
+                _run_deployment_section(
+                    artifact_download_contract_cases,
+                    allow,
+                    Path(td),
                 )
             )
     if artifacts_disabled_cases:
