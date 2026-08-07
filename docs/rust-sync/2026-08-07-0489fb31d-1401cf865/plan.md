@@ -42,7 +42,15 @@ kept both sides' new tests). Production UI rebuilt post-merge (`yarn build` rc=0
   - **AC:** Match merged Python's new download response contract on the three Flask surfaces (`_send_artifact` proxy get-artifact, `_download_artifact` mlflow-artifacts route, `get_trace_artifact_handler`): responses expose `Content-Length`, `Last-Modified`, `Cache-Control: no-cache`, `ETag` of the form `"{mtime}-{size}-{adler32(file_path) & 0xffffffff}"`, and honor conditional/`Range` requests (`Accept-Ranges: bytes`, 206 partial content, 304 on matching conditionals, 416 with `Content-Range: bytes */{size}` on unsatisfiable ranges) with `Content-Disposition` attachment semantics unchanged. `get-trace-artifact` additionally validates the `path` query param with `_validate_attachment_path` semantics (reject traversal/invalid attachment paths with the same 400) and serves attachments from a local file path when the artifact repo exposes one. Where Werkzeug's exact ETag/mtime values depend on server-local file state, parity means same header presence/shape and same status-code semantics, byte-identical bodies; document any allowlisted volatile headers rather than weakening body checks.
   - **VER:** New/extended unary corpus cases: full download (headers asserted), `Range: bytes=0-3` → 206 body slice, unsatisfiable range → 416 + `Content-Range`, `If-None-Match` replay → 304, invalid attachment path → 400 — for both get-trace-artifact and mlflow-artifacts download; `uv run --no-sync python rust/compliance/replay.py` green.
 
-- [ ] T-S3 Gateway endpoint-config `linkage_type` validation (400 instead of 500)
+- [x] T-S3 Gateway endpoint-config `linkage_type` validation (400 instead of 500)
+  - **DONE 2026-08-07:** commit `a252a4f13` (executor: Codex, rebased onto post-T-S1 head;
+    coordinator-verified). `linkage_name` now rejects unset/UNSPECIFIED/unmapped values with
+    Python's exact message (values `PRIMARY, FALLBACK` — plan's lowercase guess was wrong, entity
+    values are authoritative); create/update validate all `model_configs[i]` before conversion,
+    attach uses location `model_config`; corpus gained missing/UNSPECIFIED/valid cases for all
+    three routes. Independent VER rerun after rebase: gateway lib tests 31/31, replay `-k gateway`
+    RC=0 (87 cases, 0 diffs). Pre-existing supported-models golden mismatch reproduced and left
+    for T-S8 (catalog re-pin). Integrated ff-only.
   - **Upstream refs:** `8f406897e8` Reject unspecified `linkage_type` in gateway model configs instead of returning 500 (#24664)
   - **Rust target:** `rust/crates/mlflow-server/src/gateway.rs` (createGatewayEndpoint, updateGatewayEndpoint, attachModelToGatewayEndpoint handlers)
   - **AC:** For create (each `model_configs[i]`), update (each `model_configs[i]` when list non-empty), and attach-model (`model_config`): a `linkage_type` proto value with no entity counterpart (including unset/UNSPECIFIED) → 400 INVALID_PARAMETER_VALUE with message `Invalid or missing value for required parameter 'linkage_type' in model_configs[{i}]. Must be one of: primary, fallback.` (attach uses location `model_config`; valid-values list must match merged Python's `GatewayModelLinkageType` values exactly). Rust must not default-fill unspecified linkage (current `unwrap_or_default()` path) on these three routes.
