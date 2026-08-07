@@ -149,7 +149,54 @@ cases:
       updated_by: corpus-user
     expect_status: 200
 
-  - name: gateway_create_endpoint
+  - name: gateway_create_endpoint_missing_linkage_type
+    method: POST
+    path: /api/3.0/mlflow/gateway/endpoints/create
+    body:
+      name: corpus-missing-linkage-endpoint
+      model_configs:
+        - model_definition_id: "${gateway_model_definition_id}"
+          linkage_type: PRIMARY
+          weight: 1.0
+        - model_definition_id: "${gateway_model_definition_id}"
+          weight: 0.0
+      usage_tracking: false
+    expect_status: 400
+
+  - name: gateway_create_endpoint_unspecified_linkage_type
+    method: POST
+    path: /api/3.0/mlflow/gateway/endpoints/create
+    body:
+      name: corpus-unspecified-linkage-endpoint
+      model_configs:
+        - model_definition_id: "${gateway_model_definition_id}"
+          linkage_type: LINKAGE_TYPE_UNSPECIFIED
+          weight: 1.0
+      usage_tracking: false
+    expect_status: 400
+
+  - name: gateway_create_endpoint_fallback_linkage_control
+    method: POST
+    path: /api/3.0/mlflow/gateway/endpoints/create
+    body:
+      name: corpus-fallback-linkage-endpoint
+      model_configs:
+        - model_definition_id: "${gateway_model_definition_id}"
+          linkage_type: FALLBACK
+          weight: 0.0
+          fallback_order: 1
+      usage_tracking: false
+    bind:
+      - {bind: gateway_fallback_control_endpoint_id, from: "$.endpoint.endpoint_id"}
+    expect_status: 200
+
+  - name: gateway_delete_endpoint_fallback_linkage_control
+    method: DELETE
+    path: /api/3.0/mlflow/gateway/endpoints/delete
+    body: {endpoint_id: "${gateway_fallback_control_endpoint_id}"}
+    expect_status: 200
+
+  - name: gateway_create_endpoint_primary_linkage_control
     method: POST
     path: /api/3.0/mlflow/gateway/endpoints/create
     body:
@@ -171,7 +218,31 @@ cases:
     query: {endpoint_id: "${gateway_endpoint_id}"}
     expect_status: 200
 
-  - name: gateway_update_endpoint
+  - name: gateway_update_endpoint_missing_linkage_type
+    method: POST
+    path: /api/3.0/mlflow/gateway/endpoints/update
+    body:
+      endpoint_id: "${gateway_endpoint_id}"
+      model_configs:
+        - model_definition_id: "${gateway_model_definition_id}"
+          linkage_type: PRIMARY
+          weight: 1.0
+        - model_definition_id: "${gateway_model_definition_id}"
+          weight: 0.0
+    expect_status: 400
+
+  - name: gateway_update_endpoint_unspecified_linkage_type
+    method: POST
+    path: /api/3.0/mlflow/gateway/endpoints/update
+    body:
+      endpoint_id: "${gateway_endpoint_id}"
+      model_configs:
+        - model_definition_id: "${gateway_model_definition_id}"
+          linkage_type: LINKAGE_TYPE_UNSPECIFIED
+          weight: 1.0
+    expect_status: 400
+
+  - name: gateway_update_endpoint_primary_linkage_control
     method: POST
     path: /api/3.0/mlflow/gateway/endpoints/update
     body:
@@ -182,6 +253,20 @@ cases:
           linkage_type: PRIMARY
           weight: 1.0
       routing_strategy: REQUEST_BASED_TRAFFIC_SPLIT
+      usage_tracking: false
+      updated_by: corpus-user
+    expect_status: 200
+
+  - name: gateway_update_endpoint_fallback_linkage_control
+    method: POST
+    path: /api/3.0/mlflow/gateway/endpoints/update
+    body:
+      endpoint_id: "${gateway_endpoint_id}"
+      model_configs:
+        - model_definition_id: "${gateway_model_definition_id}"
+          linkage_type: FALLBACK
+          weight: 0.0
+          fallback_order: 1
       usage_tracking: false
       updated_by: corpus-user
     expect_status: 200
@@ -319,7 +404,50 @@ cases:
       - {bind: gateway_secondary_model_definition_id, from: "$.model_definition.model_definition_id"}
     expect_status: 200
 
-  - name: gateway_attach_model
+  - name: gateway_attach_model_missing_linkage_type
+    method: POST
+    path: /ajax-api/3.0/mlflow/gateway/endpoints/models/attach
+    body:
+      endpoint_id: "${gateway_endpoint_id}"
+      model_config:
+        model_definition_id: "${gateway_secondary_model_definition_id}"
+        weight: 1.0
+      created_by: corpus-user
+    expect_status: 400
+
+  - name: gateway_attach_model_unspecified_linkage_type
+    method: POST
+    path: /ajax-api/3.0/mlflow/gateway/endpoints/models/attach
+    body:
+      endpoint_id: "${gateway_endpoint_id}"
+      model_config:
+        model_definition_id: "${gateway_secondary_model_definition_id}"
+        linkage_type: LINKAGE_TYPE_UNSPECIFIED
+        weight: 1.0
+      created_by: corpus-user
+    expect_status: 400
+
+  - name: gateway_attach_model_primary_linkage_control
+    method: POST
+    path: /ajax-api/3.0/mlflow/gateway/endpoints/models/attach
+    body:
+      endpoint_id: "${gateway_endpoint_id}"
+      model_config:
+        model_definition_id: "${gateway_secondary_model_definition_id}"
+        linkage_type: PRIMARY
+        weight: 1.0
+      created_by: corpus-user
+    expect_status: 200
+
+  - name: gateway_detach_model_primary_linkage_control
+    method: POST
+    path: /api/3.0/mlflow/gateway/endpoints/models/detach
+    body:
+      endpoint_id: "${gateway_endpoint_id}"
+      model_definition_id: "${gateway_secondary_model_definition_id}"
+    expect_status: 200
+
+  - name: gateway_attach_model_fallback_linkage_control
     method: POST
     path: /ajax-api/3.0/mlflow/gateway/endpoints/models/attach
     body:
@@ -332,7 +460,7 @@ cases:
       created_by: corpus-user
     expect_status: 200
 
-  - name: gateway_detach_model
+  - name: gateway_detach_model_fallback_linkage_control
     method: POST
     path: /api/3.0/mlflow/gateway/endpoints/models/detach
     body:

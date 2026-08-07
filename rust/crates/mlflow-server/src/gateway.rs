@@ -957,11 +957,7 @@ pub async fn create_endpoint(
     );
     let name = required(req.name.as_deref(), "name")?;
     validate_endpoint_name(name)?;
-    let configs = req
-        .model_configs
-        .iter()
-        .map(config_from_proto)
-        .collect::<Result<Vec<_>, _>>()?;
+    let configs = model_configs_from_proto(&req.model_configs)?;
     let fallback = req
         .fallback_config
         .as_ref()
@@ -1062,12 +1058,7 @@ pub async fn update_endpoint(
         validate_endpoint_name(name)?;
     }
     let configs = (!req.model_configs.is_empty())
-        .then(|| {
-            req.model_configs
-                .iter()
-                .map(config_from_proto)
-                .collect::<Result<Vec<_>, _>>()
-        })
+        .then(|| model_configs_from_proto(&req.model_configs))
         .transpose()?;
     let fallback = req
         .fallback_config
@@ -1140,12 +1131,14 @@ pub async fn attach_model(
         .model_config
         .as_ref()
         .ok_or_else(|| missing("model_config"))?;
+    let linkage_type = linkage_name(config.linkage_type, "model_config")?;
+    let config = config_from_proto(config, linkage_type)?;
     let mapping = state
         .tracking_store()
         .attach_model_to_gateway_endpoint(
             workspace.name(),
             required(req.endpoint_id.as_deref(), "endpoint_id")?,
-            &config_from_proto(config)?,
+            &config,
             req.created_by.as_deref().filter(|v| !v.is_empty()),
         )
         .await?;
@@ -1816,12 +1809,19 @@ fn validate_endpoint_name(name: &str) -> Result<(), MlflowError> {
     }
 }
 
-fn linkage_name(value: i32) -> Result<&'static str, MlflowError> {
-    pb::GatewayModelLinkageType::try_from(value)
-        .ok()
-        .map(|v| v.as_str_name())
+const GATEWAY_MODEL_LINKAGE_TYPES: [&str; 2] = ["PRIMARY", "FALLBACK"];
+
+fn linkage_name(value: Option<i32>, location: &str) -> Result<&'static str, MlflowError> {
+    value
+        .and_then(|value| pb::GatewayModelLinkageType::try_from(value).ok())
+        .map(|value| value.as_str_name())
+        .filter(|value| GATEWAY_MODEL_LINKAGE_TYPES.contains(value))
         .ok_or_else(|| {
-            MlflowError::invalid_parameter_value(format!("Invalid linkage_type: {value}"))
+            MlflowError::invalid_parameter_value(format!(
+                "Invalid or missing value for required parameter 'linkage_type' in {location}. \
+                 Must be one of: {}.",
+                GATEWAY_MODEL_LINKAGE_TYPES.join(", ")
+            ))
         })
 }
 
@@ -1935,8 +1935,26 @@ fn current_user() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+fn model_configs_from_proto(
+    configs: &[pb::GatewayEndpointModelConfig],
+) -> Result<Vec<EndpointModelConfig>, MlflowError> {
+    let linkage_types = configs
+        .iter()
+        .enumerate()
+        .map(|(index, config)| {
+            linkage_name(config.linkage_type, &format!("model_configs[{index}]"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    configs
+        .iter()
+        .zip(linkage_types)
+        .map(|(config, linkage_type)| config_from_proto(config, linkage_type))
+        .collect()
+}
+
 fn config_from_proto(
     config: &pb::GatewayEndpointModelConfig,
+    linkage_type: &str,
 ) -> Result<EndpointModelConfig, MlflowError> {
     Ok(EndpointModelConfig {
         model_definition_id: required(
@@ -1944,7 +1962,7 @@ fn config_from_proto(
             "model_definition_id",
         )?
         .to_string(),
-        linkage_type: linkage_name(config.linkage_type.unwrap_or_default())?.to_string(),
+        linkage_type: linkage_type.to_string(),
         weight: f64::from(config.weight.unwrap_or_default()),
         fallback_order: config.fallback_order,
     })
@@ -2127,5 +2145,36 @@ fn guardrail_config_proto(config: GatewayGuardrailConfig) -> pb::GatewayGuardrai
         created_by: Some(config.created_by.unwrap_or_default()),
         created_at: Some(config.created_at),
         guardrail: config.guardrail.map(guardrail_proto),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linkage_name_accepts_entity_linkage_types() {
+        for name in GATEWAY_MODEL_LINKAGE_TYPES {
+            let value = pb::GatewayModelLinkageType::from_str_name(name).unwrap() as i32;
+            assert_eq!(linkage_name(Some(value), "model_config").unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn linkage_name_rejects_missing_unspecified_and_unmapped_values() {
+        let unspecified =
+            pb::GatewayModelLinkageType::from_str_name("LINKAGE_TYPE_UNSPECIFIED").unwrap() as i32;
+        for value in [None, Some(unspecified), Some(i32::MAX)] {
+            let error = linkage_name(value, "model_configs[1]").unwrap_err();
+            assert_eq!(
+                error.error_code,
+                mlflow_error::ErrorCode::InvalidParameterValue
+            );
+            assert_eq!(
+                error.message,
+                "Invalid or missing value for required parameter 'linkage_type' in \
+                 model_configs[1]. Must be one of: PRIMARY, FALLBACK."
+            );
+        }
     }
 }
