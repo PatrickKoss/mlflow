@@ -59,6 +59,7 @@ import os
 import signal
 import sys
 import time
+from pathlib import Path
 
 
 def emit(value):
@@ -72,13 +73,27 @@ def emit(value):
 
 args = sys.argv[1:]
 is_codex = bool(args and args[0] == "exec")
-stdin = sys.stdin.read() if is_codex else None
 record = {
     "argv": args,
-    "stdin": stdin,
+    "stdin": None,
     "cwd": os.getcwd(),
     "tracking_uri": os.environ.get("MLFLOW_TRACKING_URI"),
 }
+if "--append-system-prompt-file" in args:
+    prompt_index = args.index("--append-system-prompt-file") + 1
+    prompt_path = Path(args[prompt_index])
+    record["system_prompt_path"] = str(prompt_path)
+    record["system_prompt"] = prompt_path.read_text(encoding="utf-8")
+
+if os.environ.get("MLFLOW_SCRIPTED_EXIT_BEFORE_STDIN") == "1":
+    with open(os.environ["MLFLOW_SCRIPTED_CLI_LOG"], "a") as handle:
+        handle.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
+    sys.stderr.write("Invalid session id")
+    sys.stderr.flush()
+    raise SystemExit(1)
+
+if is_codex or ("--input-format" in args and args[args.index("--input-format") + 1] == "text"):
+    record["stdin"] = sys.stdin.read()
 with open(os.environ["MLFLOW_SCRIPTED_CLI_LOG"], "a") as handle:
     handle.write(json.dumps(record, ensure_ascii=True, separators=(",", ":")) + "\n")
 
@@ -355,6 +370,18 @@ def _read_invocations(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
+def _normalize_invocation(record: dict[str, Any]) -> dict[str, Any]:
+    if prompt_path := record.pop("system_prompt_path", None):
+        prompt_path = Path(prompt_path)
+        assert prompt_path.name.startswith("mlflow_assistant_")
+        assert prompt_path.name.endswith(".txt")
+        assert not prompt_path.exists()
+        prompt_index = record["argv"].index("--append-system-prompt-file") + 1
+        assert record["argv"][prompt_index] == str(prompt_path)
+        record["argv"][prompt_index] = "<system-prompt-file>"
+    return record
+
+
 def _assert_scripted_stream_parity(
     tmp_path: Path,
     provider: str,
@@ -378,8 +405,25 @@ def _assert_scripted_stream_parity(
         rust_frames = _rust_stream(provider, config, request, environment, cancel_after_events)
 
     assert rust_frames == python_frames
-    python_invocation, rust_invocation = _read_invocations(log)
+    python_invocation, rust_invocation = map(_normalize_invocation, _read_invocations(log))
     assert rust_invocation == python_invocation
+    if provider == "claude_code":
+        argv = rust_invocation["argv"]
+        assert argv[:6] == [
+            "-p",
+            "--input-format",
+            "text",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ]
+        assert "--append-system-prompt" not in argv
+        assert argv[-2:] == ["--append-system-prompt-file", "<system-prompt-file>"]
+        assert request["prompt"] not in argv
+        assert "You are an MLflow assistant" not in " ".join(argv)
+        assert len(" ".join(argv)) < 4096
+        assert rust_invocation["stdin"].endswith(request["prompt"])
+        assert TRACKING_URI in rust_invocation["system_prompt"]
     return rust_frames
 
 
@@ -481,6 +525,29 @@ def test_claude_scripted_filter_usage_and_permission_frames(tmp_path, permission
         "event: stream_event",
         "event: done",
     ]
+
+
+def test_claude_broken_stdin_surfaces_stderr_and_cleans_prompt_file(tmp_path):
+    request = _stream_request(tmp_path, session_id="invalid-session")
+    request["prompt"] = "x" * (1024 * 1024)
+    log = tmp_path / "broken-stdin-invocations.jsonl"
+    with _scripted_path(tmp_path, "claude_code") as bin_dir:
+        environment = {
+            **os.environ,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            "MLFLOW_SCRIPTED_CLI_LOG": str(log),
+            "MLFLOW_SCRIPTED_EXIT_BEFORE_STDIN": "1",
+        }
+        config = _config("claude_code")
+        python_frames = _python_stream("claude_code", config, request, environment)
+        rust_frames = _rust_stream("claude_code", config, request, environment)
+
+    assert rust_frames == python_frames
+    assert rust_frames[-1].startswith("event: error\n")
+    assert "Invalid session id" in rust_frames[-1]
+    assert "broken pipe" not in rust_frames[-1].lower()
+    python_invocation, rust_invocation = map(_normalize_invocation, _read_invocations(log))
+    assert rust_invocation == python_invocation
 
 
 CODEX_TRANSCRIPT = [

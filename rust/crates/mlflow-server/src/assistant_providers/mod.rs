@@ -123,13 +123,14 @@ pub struct StreamRequest {
     pub context: Option<Map<String, Value>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Invocation {
     pub program: PathBuf,
     pub args: Vec<OsString>,
     pub stdin: Option<Vec<u8>>,
     pub environment: BTreeMap<OsString, OsString>,
     pub cwd: Option<PathBuf>,
+    temporary_files: Vec<tempfile::TempPath>,
 }
 
 impl Invocation {
@@ -352,11 +353,11 @@ pub fn build_invocation(
     executable: impl Into<PathBuf>,
     config: &ProviderConfig,
     request: &StreamRequest,
-) -> Invocation {
+) -> io::Result<Invocation> {
     let executable = executable.into();
     match provider {
         ProviderKind::ClaudeCode => build_claude_invocation(executable, config, request),
-        ProviderKind::Codex => build_codex_invocation(executable, config, request),
+        ProviderKind::Codex => Ok(build_codex_invocation(executable, config, request)),
     }
 }
 
@@ -367,7 +368,7 @@ pub async fn spawn(
 ) -> Result<SpawnedProvider, SpawnError> {
     let executable = find_executable(provider.binary())
         .ok_or_else(|| SpawnError::CliNotFound(provider.stream_not_found_message()))?;
-    let invocation = build_invocation(provider, executable, &config, &request);
+    let invocation = build_invocation(provider, executable, &config, &request)?;
     let mut command = Command::new(&invocation.program);
     command
         .args(&invocation.args)
@@ -390,12 +391,16 @@ pub async fn spawn(
         .id()
         .ok_or_else(|| io::Error::other("assistant CLI process has no PID"))?;
     if let Some(stdin_bytes) = invocation.stdin {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("assistant CLI stdin pipe was not created"))?;
-        stdin.write_all(&stdin_bytes).await?;
-        stdin.shutdown().await?;
+        if let Some(mut stdin) = child.stdin.take() {
+            // A CLI can exit before consuming stdin (for example, for an invalid
+            // resume ID). Ignore write/close failures so its stderr remains the
+            // user-facing error instead of an unhelpful broken-pipe error.
+            let _ = async {
+                stdin.write_all(&stdin_bytes).await?;
+                stdin.shutdown().await
+            }
+            .await;
+        }
     }
 
     let stdout = child
@@ -408,12 +413,16 @@ pub async fn spawn(
         .ok_or_else(|| io::Error::other("assistant CLI stderr pipe was not created"))?;
     let (sender, receiver) = mpsc::channel(32);
     let (shutdown_sender, shutdown_receiver) = oneshot::channel();
-    tokio::spawn(run_process(
-        provider,
-        config,
+    let process = RunningProcess {
         child,
         stdout,
         stderr,
+        _temporary_files: invocation.temporary_files,
+    };
+    tokio::spawn(run_process(
+        provider,
+        config,
+        process,
         sender,
         shutdown_receiver,
     ));
@@ -469,17 +478,16 @@ fn build_claude_invocation(
     executable: PathBuf,
     config: &ProviderConfig,
     request: &StreamRequest,
-) -> Invocation {
+) -> io::Result<Invocation> {
     let user_message = message_with_context(&request.prompt, request.context.as_ref());
     let system_prompt = format_system_prompt(CLAUDE_SYSTEM_PROMPT, &request.tracking_uri);
     let mut args = vec![
         OsString::from("-p"),
-        OsString::from(user_message),
+        OsString::from("--input-format"),
+        OsString::from("text"),
         OsString::from("--output-format"),
         OsString::from("stream-json"),
         OsString::from("--verbose"),
-        OsString::from("--append-system-prompt"),
-        OsString::from(system_prompt),
     ];
 
     if config.permissions.full_access {
@@ -518,13 +526,32 @@ fn build_claude_invocation(
         push_pair(&mut args, "--resume", session_id);
     }
 
-    Invocation {
+    use std::io::Write as _;
+
+    // Close the file handle before spawning Claude so the npm shim can open it
+    // on Windows. Keeping the TempPath in the invocation makes cleanup follow
+    // the process through launch failures, cancellation, and normal completion.
+    let mut system_prompt_file = tempfile::Builder::new()
+        .prefix("mlflow_assistant_")
+        .suffix(".txt")
+        .tempfile()?;
+    system_prompt_file.write_all(system_prompt.as_bytes())?;
+    system_prompt_file.flush()?;
+    let system_prompt_path = system_prompt_file.into_temp_path();
+    push_pair(
+        &mut args,
+        "--append-system-prompt-file",
+        system_prompt_path.as_os_str(),
+    );
+
+    Ok(Invocation {
         program: executable,
         args,
-        stdin: None,
+        stdin: Some(user_message.into_bytes()),
         environment: tracking_environment(&request.tracking_uri),
         cwd: request.cwd.clone(),
-    }
+        temporary_files: vec![system_prompt_path],
+    })
 }
 
 fn build_codex_invocation(
@@ -569,6 +596,7 @@ fn build_codex_invocation(
         stdin: Some(user_message.into_bytes()),
         environment: tracking_environment(&request.tracking_uri),
         cwd: request.cwd.clone(),
+        temporary_files: Vec::new(),
     }
 }
 
@@ -604,18 +632,29 @@ pub(crate) fn format_system_prompt(template: &str, tracking_uri: &str) -> String
         .replace("}}", "}")
 }
 
+struct RunningProcess<R, E> {
+    child: Child,
+    stdout: R,
+    stderr: E,
+    _temporary_files: Vec<tempfile::TempPath>,
+}
+
 async fn run_process<R, E>(
     provider: ProviderKind,
     config: ProviderConfig,
-    mut child: Child,
-    stdout: R,
-    mut stderr: E,
+    process: RunningProcess<R, E>,
     sender: mpsc::Sender<Event>,
     mut shutdown: oneshot::Receiver<()>,
 ) where
     R: AsyncRead + Unpin,
     E: AsyncRead + Unpin,
 {
+    let RunningProcess {
+        mut child,
+        stdout,
+        mut stderr,
+        _temporary_files,
+    } = process;
     let mut reader = BufReader::new(stdout);
     let mut thread_id = String::new();
     let mut buffer = Vec::new();
@@ -1336,12 +1375,15 @@ mod tests {
                 model: "default".to_string(),
                 permissions,
             };
-            let argv = argv_strings(&build_invocation(
-                ProviderKind::ClaudeCode,
-                "/fixture/claude",
-                &config,
-                &request(),
-            ));
+            let argv = argv_strings(
+                &build_invocation(
+                    ProviderKind::ClaudeCode,
+                    "/fixture/claude",
+                    &config,
+                    &request(),
+                )
+                .unwrap(),
+            );
             let actual: Vec<&str> = argv
                 .windows(2)
                 .filter_map(|pair| (pair[0] == "--allowed-tools").then_some(pair[1].as_str()))
@@ -1362,14 +1404,17 @@ mod tests {
         };
         let mut request = request();
         request.session_id = Some("session-1".to_string());
-        let argv = argv_strings(&build_invocation(
-            ProviderKind::ClaudeCode,
-            "/fixture/claude",
-            &config,
-            &request,
-        ));
+        let argv = argv_strings(
+            &build_invocation(
+                ProviderKind::ClaudeCode,
+                "/fixture/claude",
+                &config,
+                &request,
+            )
+            .unwrap(),
+        );
         assert_eq!(
-            &argv[argv.len() - 6..],
+            &argv[argv.len() - 8..argv.len() - 2],
             [
                 "--permission-mode",
                 "bypassPermissions",
@@ -1379,6 +1424,7 @@ mod tests {
                 "session-1"
             ]
         );
+        assert_eq!(argv[argv.len() - 2], "--append-system-prompt-file");
         assert!(!argv.contains(&"--allowed-tools".to_string()));
     }
 
@@ -1389,7 +1435,8 @@ mod tests {
             "/fixture/codex",
             &ProviderConfig::default(),
             &request(),
-        );
+        )
+        .unwrap();
         let full = build_invocation(
             ProviderKind::Codex,
             "/fixture/codex",
@@ -1401,7 +1448,8 @@ mod tests {
                 ..ProviderConfig::default()
             },
             &request(),
-        );
+        )
+        .unwrap();
         assert_eq!(restricted.args, full.args);
         assert_eq!(
             argv_strings(&restricted)[..7],
@@ -1418,7 +1466,7 @@ mod tests {
     }
 
     #[test]
-    fn context_and_sse_json_match_python_defaults() {
+    fn claude_uses_stdin_and_temporary_system_prompt_file() {
         let mut request = request();
         request.prompt = "why?".to_string();
         request.context = Some(Map::from_iter([
@@ -1430,11 +1478,53 @@ mod tests {
             "/fixture/claude",
             &ProviderConfig::default(),
             &request,
-        );
+        )
+        .unwrap();
+        let argv = argv_strings(&invocation);
         assert_eq!(
-            invocation.args[1].to_string_lossy(),
-            "<context>\n{\"experimentId\": \"12\", \"unicode\": \"caf\\u00e9 \\ud83d\\ude00\"}\n</context>\n\nwhy?"
+            argv[..7],
+            [
+                "/fixture/claude",
+                "-p",
+                "--input-format",
+                "text",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+            ]
         );
+        assert!(!argv.contains(&"--append-system-prompt".to_string()));
+        assert!(!argv.iter().any(|arg| arg.contains("why?")));
+        assert!(!argv
+            .iter()
+            .any(|arg| arg.contains("You are an MLflow assistant")));
+        assert!(argv.join(" ").len() < 4096);
+        assert_eq!(
+            invocation.stdin.as_deref(),
+            Some(
+                b"<context>\n{\"experimentId\": \"12\", \"unicode\": \"caf\\u00e9 \\ud83d\\ude00\"}\n</context>\n\nwhy?"
+                    .as_slice()
+            )
+        );
+
+        let prompt_flag = argv
+            .iter()
+            .position(|arg| arg == "--append-system-prompt-file")
+            .unwrap();
+        let prompt_path = PathBuf::from(&argv[prompt_flag + 1]);
+        let prompt_name = prompt_path.file_name().unwrap().to_string_lossy();
+        assert!(prompt_name.starts_with("mlflow_assistant_"));
+        assert!(prompt_name.ends_with(".txt"));
+        assert!(std::fs::read_to_string(&prompt_path)
+            .unwrap()
+            .contains("http://127.0.0.1:5000"));
+
+        drop(invocation);
+        assert!(!prompt_path.exists());
+    }
+
+    #[test]
+    fn sse_json_matches_python_defaults() {
         assert_eq!(
             Event::from_message("assistant", json!([{"text": "café 😀"}])).to_sse_frame(),
             concat!(

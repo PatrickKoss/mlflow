@@ -51,6 +51,7 @@ flate2 = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
+tempfile = "3.27.0"
 # `/signup` CSRF signing (T9.7): HMAC-SHA256 tokens, own secret per plan D12.
 hmac = { workspace = true }
 sha2 = { workspace = true }
@@ -102,7 +103,6 @@ base64 = { workspace = true }
 flate2 = { workspace = true }
 serde_json = { workspace = true }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
-tempfile = "3.27.0"
 # The T9.3 RBAC HTTP tests build a fresh auth DB (create the four tables +
 # alembic head) over a temp SQLite file before wrapping it in an `AuthStore`;
 # the workspace HTTP tests seed/count root-table rows directly in the SQLite
