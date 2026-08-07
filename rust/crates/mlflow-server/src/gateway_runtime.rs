@@ -332,6 +332,14 @@ pub struct BedrockAdapter;
 #[derive(Debug)]
 pub struct DatabricksAdapter;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnthropicChatRequestTarget {
+    // Native Anthropic preserves separate tool-result turns; Bedrock requires parallel results
+    // in one user turn even though Claude models use the Anthropic wire format there.
+    Anthropic,
+    Bedrock,
+}
+
 impl GatewayProviderAdapter for OpenAiAdapter {
     fn provider_name(&self) -> &'static str {
         "openai"
@@ -472,7 +480,11 @@ impl GatewayProviderAdapter for AnthropicAdapter {
                 "The embeddings route is not implemented for Anthropic models.",
             ));
         }
-        anthropic_chat_request(&mut payload, &model.model_name)?;
+        anthropic_chat_request(
+            &mut payload,
+            &model.model_name,
+            AnthropicChatRequestTarget::Anthropic,
+        )?;
         let base = model
             .auth_config
             .get("api_base")
@@ -987,7 +999,11 @@ impl GatewayProviderAdapter for BedrockAdapter {
             let input = object.remove("input").unwrap_or(Value::Null);
             payload = json!({"inputText": input});
         } else if model.model_name.contains("anthropic") || model.model_name.contains("claude") {
-            anthropic_chat_request(&mut payload, &model.model_name)?;
+            anthropic_chat_request(
+                &mut payload,
+                &model.model_name,
+                AnthropicChatRequestTarget::Bedrock,
+            )?;
             let object = object_mut(&mut payload)?;
             object.remove("model");
             object.insert(
@@ -4309,7 +4325,11 @@ fn python_value_truthy(value: &Value) -> bool {
     }
 }
 
-fn anthropic_chat_request(payload: &mut Value, model: &str) -> Result<(), GatewayRuntimeError> {
+fn anthropic_chat_request(
+    payload: &mut Value,
+    model: &str,
+    target: AnthropicChatRequestTarget,
+) -> Result<(), GatewayRuntimeError> {
     let object = object_mut(payload)?;
     if object.contains_key("temperature") && object.contains_key("top_p") {
         return Err(GatewayRuntimeError::new(
@@ -4355,29 +4375,55 @@ fn anthropic_chat_request(payload: &mut Value, model: &str) -> Result<(), Gatewa
     let systems = messages
         .iter()
         .filter(|message| message.get("role").and_then(Value::as_str) == Some("system"))
-        .filter_map(|message| message.get("content").and_then(Value::as_str))
+        .filter_map(|message| match target {
+            AnthropicChatRequestTarget::Anthropic => message
+                .get("content")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            AnthropicChatRequestTarget::Bedrock => {
+                Some(normalize_bedrock_content_text(message.get("content")))
+            }
+        })
         .collect::<Vec<_>>();
     if !systems.is_empty() {
         object.insert("system".to_string(), Value::String(systems.join("\n")));
     }
     let mut converted_messages = Vec::new();
-    for mut message in messages {
+    let mut index = 0;
+    while index < messages.len() {
+        let mut message = messages[index].clone();
         match message.get("role").and_then(Value::as_str) {
             Some("system") => {}
             Some("user") => {
-                if let Some(content) = message.get("content").and_then(Value::as_array) {
-                    let content = anthropic_content_parts(content);
-                    if let Some(message) = message.as_object_mut() {
-                        message.insert("content".to_string(), Value::Array(content));
+                match target {
+                    AnthropicChatRequestTarget::Anthropic => {
+                        if let Some(content) = message.get("content").and_then(Value::as_array) {
+                            let content = anthropic_content_parts(content);
+                            if let Some(message) = message.as_object_mut() {
+                                message.insert("content".to_string(), Value::Array(content));
+                            }
+                        }
+                    }
+                    AnthropicChatRequestTarget::Bedrock => {
+                        let content = normalize_bedrock_content_text(message.get("content"));
+                        if let Some(message) = message.as_object_mut() {
+                            message.insert("content".to_string(), Value::String(content));
+                        }
                     }
                 }
                 converted_messages.push(message);
             }
             Some("assistant") => {
                 if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
-                    let content = tool_calls
-                        .iter()
-                        .map(|tool_call| {
+                    let mut content = Vec::new();
+                    if target == AnthropicChatRequestTarget::Bedrock {
+                        let text = normalize_bedrock_content_text(message.get("content"));
+                        if !text.is_empty() {
+                            content.push(json!({"type":"text", "text":text}));
+                        }
+                    }
+                    content.extend(
+                        tool_calls.iter().map(|tool_call| {
                             let arguments = tool_call
                                 .pointer("/function/arguments")
                                 .and_then(Value::as_str)
@@ -4395,13 +4441,41 @@ fn anthropic_chat_request(payload: &mut Value, model: &str) -> Result<(), Gatewa
                                 "input":input
                             }))
                         })
-                        .collect::<Result<Vec<_>, GatewayRuntimeError>>()?;
+                        .collect::<Result<Vec<_>, GatewayRuntimeError>>()?,
+                    );
                     if let Some(message) = message.as_object_mut() {
                         message.insert("content".to_string(), Value::Array(content));
                         message.remove("tool_calls");
                     }
+                } else if target == AnthropicChatRequestTarget::Bedrock {
+                    let content = normalize_bedrock_content_text(message.get("content"));
+                    if let Some(message) = message.as_object_mut() {
+                        message.insert("content".to_string(), Value::String(content));
+                    }
                 }
                 converted_messages.push(message);
+            }
+            Some("tool") if target == AnthropicChatRequestTarget::Bedrock => {
+                let mut tool_results = Vec::new();
+                while index < messages.len()
+                    && messages[index].get("role").and_then(Value::as_str) == Some("tool")
+                {
+                    let tool_message = &messages[index];
+                    tool_results.push(json!({
+                        "type":"tool_result",
+                        "tool_use_id":tool_message
+                            .get("tool_call_id")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                        "content":normalize_bedrock_content_text(tool_message.get("content"))
+                    }));
+                    index += 1;
+                }
+                converted_messages.push(json!({
+                    "role":"user",
+                    "content":tool_results
+                }));
+                continue;
             }
             Some("tool") => converted_messages.push(json!({
                 "role":"user",
@@ -4411,8 +4485,13 @@ fn anthropic_chat_request(payload: &mut Value, model: &str) -> Result<(), Gatewa
                     "content":message.get("content").cloned().unwrap_or(Value::Null)
                 }]
             })),
+            _ if target == AnthropicChatRequestTarget::Bedrock => {
+                let content = normalize_bedrock_content_text(message.get("content"));
+                converted_messages.push(json!({"role":"user", "content":content}));
+            }
             _ => {}
         }
+        index += 1;
     }
     object.insert("messages".to_string(), Value::Array(converted_messages));
 
@@ -4479,6 +4558,23 @@ fn anthropic_chat_request(payload: &mut Value, model: &str) -> Result<(), Gatewa
         }
     }
     Ok(())
+}
+
+fn normalize_bedrock_content_text(content: Option<&Value>) -> String {
+    match content.unwrap_or(&Value::Null) {
+        Value::Null => String::new(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+            .map(|part| part.get("text").and_then(Value::as_str).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::String(value) => value.clone(),
+        Value::Bool(true) => "True".to_string(),
+        Value::Bool(false) => "False".to_string(),
+        Value::Number(value) => value.to_string(),
+        value => value.to_string(),
+    }
 }
 
 fn parse_base64_data_url(url: &str) -> Option<(&str, &str)> {
@@ -6088,6 +6184,128 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with("AWS4-HMAC-SHA256"));
+    }
+
+    #[test]
+    fn bedrock_groups_parallel_tool_results_without_changing_anthropic() {
+        let payload = json!({
+            "messages":[
+                {"role":"system","content":[
+                    {"type":"text","text":"Use"},
+                    {"type":"text","text":"the tools"}
+                ]},
+                {"role":"user","content":[
+                    {"type":"text","text":"Compute"},
+                    {"type":"image_url","image_url":{"url":"ignored"}},
+                    {"type":"text","text":"both sums"}
+                ]},
+                {
+                    "role":"assistant",
+                    "content":[
+                        {"type":"text","text":"Calling"},
+                        {"type":"text","text":"both tools"}
+                    ],
+                    "tool_calls":[
+                        {
+                            "id":"tool_abc123",
+                            "type":"function",
+                            "function":{"name":"add","arguments":"{\"a\":17,\"b\":25}"}
+                        },
+                        {
+                            "id":"tool_def456",
+                            "type":"function",
+                            "function":{"name":"add","arguments":"{\"a\":10,\"b\":5}"}
+                        }
+                    ]
+                },
+                {"role":"tool","tool_call_id":"tool_abc123","content":42},
+                {"role":"tool","tool_call_id":"tool_def456","content":[
+                    {"type":"text","text":"fifteen"},
+                    {"type":"image_url","image_url":{"url":"ignored"}},
+                    {"type":"text","text":"15"}
+                ]}
+            ]
+        });
+        let mut bedrock_model = fixture_model("bedrock");
+        bedrock_model.model_name = "anthropic.claude-fixture".to_string();
+        bedrock_model
+            .auth_config
+            .insert("auth_mode".to_string(), "api_key".to_string());
+        let bedrock = BedrockAdapter
+            .transform_request(&bedrock_model, InvocationKind::Chat, payload.clone(), false)
+            .unwrap();
+
+        assert_eq!(bedrock.body["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(bedrock.body["system"], "Use\nthe tools");
+        assert_eq!(bedrock.body["messages"][0]["content"], "Compute\nboth sums");
+        assert_eq!(
+            bedrock.body["messages"][1]["content"],
+            json!([
+                {"type":"text","text":"Calling\nboth tools"},
+                {"type":"tool_use","id":"tool_abc123","name":"add","input":{"a":17,"b":25}},
+                {"type":"tool_use","id":"tool_def456","name":"add","input":{"a":10,"b":5}},
+            ])
+        );
+        assert_eq!(
+            bedrock.body["messages"][2],
+            json!({
+                "role":"user",
+                "content":[
+                    {"type":"tool_result","tool_use_id":"tool_abc123","content":"42"},
+                    {"type":"tool_result","tool_use_id":"tool_def456","content":"fifteen\n15"},
+                ]
+            })
+        );
+
+        let mut anthropic_payload = payload;
+        anthropic_payload["messages"]
+            .as_array_mut()
+            .unwrap()
+            .remove(0);
+        let anthropic = AnthropicAdapter
+            .transform_request(
+                &fixture_model("anthropic"),
+                InvocationKind::Chat,
+                anthropic_payload,
+                false,
+            )
+            .unwrap();
+        assert_eq!(anthropic.body["messages"].as_array().unwrap().len(), 4);
+        assert_eq!(anthropic.body["messages"][2]["content"][0]["content"], 42);
+        assert_eq!(
+            anthropic.body["messages"][3]["content"][0]["content"],
+            json!([
+                {"type":"text","text":"fifteen"},
+                {"type":"image_url","image_url":{"url":"ignored"}},
+                {"type":"text","text":"15"},
+            ])
+        );
+    }
+
+    #[test]
+    fn bedrock_content_normalization_matches_python_matrix() {
+        assert_eq!(normalize_bedrock_content_text(None), "");
+        let cases = [
+            (Value::Null, ""),
+            (json!("plain"), "plain"),
+            (json!(17), "17"),
+            (json!(2.5), "2.5"),
+            (json!(true), "True"),
+            (json!(false), "False"),
+            (
+                json!([
+                    {"type":"text","text":"first"},
+                    {"type":"image_url","image_url":{"url":"ignored"}},
+                    {"type":"text","text":"second"},
+                    {"type":"text"},
+                    "ignored scalar part"
+                ]),
+                "first\nsecond\n",
+            ),
+        ];
+        for (content, expected) in cases {
+            assert_eq!(normalize_bedrock_content_text(Some(&content)), expected);
+        }
     }
 
     #[tokio::test]
