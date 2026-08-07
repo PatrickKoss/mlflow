@@ -335,7 +335,7 @@ async fn create_duplicate_workspace_conflicts() {
 #[tokio::test]
 async fn create_workspace_rejects_invalid_name() {
     let srv = TestServer::enabled("create-badname").await;
-    for name in ["Team-A", "team_a", "team--a", "-team", "t"] {
+    for name in ["Team-A", "team_a", "-team", "t"] {
         let resp = send(
             &srv.base,
             Method::POST,
@@ -354,6 +354,20 @@ async fn create_workspace_rejects_invalid_name() {
             "name={name}"
         );
     }
+}
+
+#[tokio::test]
+async fn create_workspace_accepts_consecutive_hyphens() {
+    let srv = TestServer::enabled("create-consecutive-hyphens").await;
+    let resp = send(
+        &srv.base,
+        Method::POST,
+        WORKSPACES,
+        Some(json!({"name": "team--a"})),
+    )
+    .await;
+    assert_eq!(resp.status, StatusCode::CREATED, "{}", resp.text);
+    assert_eq!(resp.json["workspace"]["name"], "team--a");
 }
 
 #[tokio::test]

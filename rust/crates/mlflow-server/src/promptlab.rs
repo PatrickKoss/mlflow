@@ -446,7 +446,7 @@ fn promptlab_python_version() -> &'static str {
 
 fn conda_yaml() -> String {
     format!(
-        "channels:\n- conda-forge\ndependencies:\n- python={}\n- pip<=26.1.2\n- pip:\n  - mlflow[gateway]=={}\nname: mlflow-env\n",
+        "channels:\n- conda-forge\ndependencies:\n- python={}\n- pip<=26.2\n- pip:\n  - mlflow[gateway]=={}\nname: mlflow-env\n",
         promptlab_python_version(),
         crate::routes::MLFLOW_VERSION
     )
@@ -454,7 +454,7 @@ fn conda_yaml() -> String {
 
 fn python_env_yaml() -> String {
     format!(
-        "python: {}\nbuild_dependencies:\n- pip==26.1.2\n- setuptools==81.0.0\n- wheel==0.47.0\ndependencies:\n- -r requirements.txt\n",
+        "python: {}\nbuild_dependencies:\n- pip==26.2\n- setuptools==81.0.0\n- wheel==0.47.0\ndependencies:\n- -r requirements.txt\n",
         promptlab_python_version()
     )
 }
