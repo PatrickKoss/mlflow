@@ -36,7 +36,26 @@ kept both sides' new tests). Production UI rebuilt post-merge (`yarn build` rc=0
   - **AC:** (1) Concurrent `log_spans` calls for the same pre-existing trace must not lose token-usage/cost aggregation: the Rust store serializes read-modify-write of trace-level usage/cost recomputation per trace, locking trace rows in `request_id` order **before** writing span rows, locking only pre-existing traces (not ones created by the same call), and locking `trace_info` rows directly (never through a workspace/experiment join that would serialize the whole experiment). On MySQL the stored-span re-read for recompute is a locking read; other backends keep plain reads. Recompute set is derived from the locked pre-existing IDs intersected with usage/cost-bearing traces. (2) `d87c8210b0` is a Python-side query optimization: confirm Rust `search_traces`/`get_trace_info` responses are byte-identical to merged Python (no behavior change expected; no Rust code change unless a differential appears). (3) `c5be75fb97` is ORM-metadata-only (constraint name alignment, no migration): confirm no Rust schema/migration drift; expected no-op.
   - **VER:** New Rust store concurrency test (two interleaved `log_spans` batches for one trace; final trace-level `total_tokens` equals sum, mirroring upstream `test_log_spans_locks_and_recomputes_token_usage` and the workspace variant) via `cargo test -p mlflow-store`; corpus replay `uv run --no-sync python rust/compliance/replay.py` (traces subset green); note in DONE entry confirming (2)/(3) no-op status.
 
-- [ ] T-S2 Trace-attachment / artifact download streaming HTTP contract (conditional + range responses)
+- [x] T-S2 Trace-attachment / artifact download streaming HTTP contract (conditional + range responses)
+  - **DONE 2026-08-07:** commits `bafc9106c` + `c4716a696` + `f11a3b1d5` (executor: Codex ×2 +
+    coordinator fix; rebased onto post-T-S8 head with a duplicate-`tempfile`-dependency rebase
+    artifact fixed by amend; coordinator-verified). Werkzeug-compatible ETag
+    (`mtime-size-adler32(path)` shape asserted per server; exact value narrowly allowlisted with
+    upstream link), Last-Modified, Cache-Control, Accept-Ranges/206/304/416, Content-Length,
+    attachment-path validation, and local-path fast paths across proxied get-artifact,
+    mlflow-artifacts download, and get-trace-artifact; replay harness gained `compare_headers` /
+    `expect_headers` / header bindings / `expect_status` enforcement. **Enforcement fallout
+    (T-S2b):** the auth section had been silently degraded — alice's provisioning failed the
+    server's >12-char password policy unchecked, so all user-credentialed cases 401'd on both
+    servers and earlier syncs' `expect_status` values were never validated. Fixed provisioning
+    (abort on failure), canonicalized volatile `online_scoring_config_id`, made shared-auth-DB
+    create-only grant double-writes explicit per-case (py 200 / rust 400-duplicate declared in
+    YAML), corrected stale expectations with Python-as-spec evidence (NO_PERMISSIONS grant
+    rejection, delete-only revoke 404, presigned 501 without capability, get-history 200 on
+    missing run, scorer sample_rate>0 activation rejection) — **no real Rust divergence found**.
+    Independent VER rerun: full corpus replay 494 cases / 0 non-allowlisted diffs / 0 status
+    mismatches / RC=0 (twice); `artifacts_http` 23/23 + `trace_artifact_http` 13/13.
+    Integrated ff-only.
   - **Upstream refs:** `fcb20c33a7` stream trace attachments and data from disk instead of memory (#24323)
   - **Rust target:** `rust/crates/mlflow-server/src/trace_artifact.rs`, `rust/crates/mlflow-server/src/artifacts.rs` (server-proxied `get-artifact`, mlflow-artifacts download route, `get-trace-artifact` handler)
   - **AC:** Match merged Python's new download response contract on the three Flask surfaces (`_send_artifact` proxy get-artifact, `_download_artifact` mlflow-artifacts route, `get_trace_artifact_handler`): responses expose `Content-Length`, `Last-Modified`, `Cache-Control: no-cache`, `ETag` of the form `"{mtime}-{size}-{adler32(file_path) & 0xffffffff}"`, and honor conditional/`Range` requests (`Accept-Ranges: bytes`, 206 partial content, 304 on matching conditionals, 416 with `Content-Range: bytes */{size}` on unsatisfiable ranges) with `Content-Disposition` attachment semantics unchanged. `get-trace-artifact` additionally validates the `path` query param with `_validate_attachment_path` semantics (reject traversal/invalid attachment paths with the same 400) and serves attachments from a local file path when the artifact repo exposes one. Where Werkzeug's exact ETag/mtime values depend on server-local file state, parity means same header presence/shape and same status-code semantics, byte-identical bodies; document any allowlisted volatile headers rather than weakening body checks.
