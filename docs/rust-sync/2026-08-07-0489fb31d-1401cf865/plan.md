@@ -56,7 +56,19 @@ kept both sides' new tests). Production UI rebuilt post-merge (`yarn build` rc=0
   - **AC:** For create (each `model_configs[i]`), update (each `model_configs[i]` when list non-empty), and attach-model (`model_config`): a `linkage_type` proto value with no entity counterpart (including unset/UNSPECIFIED) → 400 INVALID_PARAMETER_VALUE with message `Invalid or missing value for required parameter 'linkage_type' in model_configs[{i}]. Must be one of: primary, fallback.` (attach uses location `model_config`; valid-values list must match merged Python's `GatewayModelLinkageType` values exactly). Rust must not default-fill unspecified linkage (current `unwrap_or_default()` path) on these three routes.
   - **VER:** Unary corpus cases per route: missing linkage_type, explicit UNSPECIFIED, and valid `primary`/`fallback` controls; `uv run --no-sync python rust/compliance/replay.py` green; `cargo test -p mlflow-server` gateway tests.
 
-- [ ] T-S4 Gateway provider runtime: Vertex AI multi-region hosts + Bedrock parallel tool-result grouping
+- [x] T-S4 Gateway provider runtime: Vertex AI multi-region hosts + Bedrock parallel tool-result grouping
+  - **DONE 2026-08-07:** commit `5dbe2e06c` (executor: Codex, rebased onto post-T-S3 head;
+    coordinator-verified). Bedrock translation now groups consecutive `role:"tool"` messages into
+    one Anthropic-native user turn with per-message `tool_result` blocks and applies upstream's
+    content normalization (null → "", text-part lists newline-joined, scalars stringified) via an
+    `AnthropicChatRequestTarget` split that leaves the native Anthropic path byte-identical to its
+    (unchanged) Python counterpart. Vertex: explicit N/A — `adapter_for` routes `vertex_ai`
+    through the generic OpenAI-compatible adapter requiring explicit `api_base`
+    (gateway_runtime.rs:3584/3705); no Rust-owned code constructs `aiplatform.googleapis.com`
+    hosts; only discovery/config metadata (gateway.rs:78) exists. Independent VER rerun after
+    rebase: runtime lib tests 22/22, `gateway_runtime_http` 16/16, full recorder differentials
+    40/40 (the executor's 7 assistant argv failures were its pre-T-S5 base; resolved by rebase).
+    Integrated ff-only.
   - **Upstream refs:** `3bd9069c12` Support Vertex AI `eu`/`us` multi-region endpoints in gateway provider (#24932); `8e7b832957` Fix Bedrock gateway grouping of parallel tool results (#24309)
   - **Rust target:** `rust/crates/mlflow-server/src/gateway_runtime.rs` (BedrockAdapter request translation; vertex surface investigation), `rust/crates/mlflow-server/src/gateway_provider_matrix.rs` if provider metadata shifts
   - **AC:** (1) Vertex: merged Python builds hosts as global → `https://aiplatform.googleapis.com`, `eu`/`us` → `https://aiplatform.{loc}.rep.googleapis.com`, else `https://{loc}-aiplatform.googleapis.com` across Claude/MaaS/Gemini vertex delegates. The Rust runtime has no native vertex_ai adapter today (`adapter_for` falls through to OpenAI-compatible/manifest error); if any Rust-owned surface constructs vertex hosts, port the three-shape rule; otherwise record explicit N/A with the dispatch evidence. (2) Bedrock: when translating OpenAI-style chat messages, consecutive `role:"tool"` messages must be grouped into a single user turn containing one tool-result block per message (Converse `toolResult` list in Python; the equivalent single-user-turn grouping of `tool_result` blocks in Rust's Anthropic-native Bedrock translation, which is what Anthropic/Converse APIs require for parallel tool calls), with upstream's content normalization (None → "", list-of-parts → newline-joined text parts, scalars stringified) applied to tool and non-tool content alike.
