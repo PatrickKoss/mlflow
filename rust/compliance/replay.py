@@ -921,7 +921,10 @@ def _run_auth_section(
     no fake results are produced.
     """
     admin_user, admin_pass = "admin", "password1234"
-    user_user, user_pass = "alice", "alicepw123"
+    # Must satisfy the server-side password policy (longer than 12 characters);
+    # a too-short password makes users/create fail and every alice-credentialed
+    # case silently degrade to 401 on both servers.
+    user_user, user_pass = "alice", "alicepw123456"
     creds = {"admin": (admin_user, admin_pass), "user": (user_user, user_pass)}
 
     seed_db = workroot / "seed.db"
@@ -977,13 +980,25 @@ def _run_auth_section(
             python_asgi_app="mlflow.server.auth:create_app",
         ) as servers:
             # Create the non-admin user on both servers via the admin account.
+            # A failed creation must abort the section: the expected-status
+            # checks depend on alice's credentials actually authenticating.
             for h in (servers.python, servers.rust):
-                requests.post(
+                created = requests.post(
                     f"{h.url}/api/2.0/mlflow/users/create",
                     json={"username": user_user, "password": user_pass},
                     auth=(admin_user, admin_pass),
                     timeout=30,
                 )
+                # Both servers share the auth DB, so the second create sees the
+                # user already present; any other failure must abort.
+                already_exists = (
+                    created.status_code == 400 and "RESOURCE_ALREADY_EXISTS" in created.text
+                )
+                if created.status_code != 200 and not already_exists:
+                    raise RuntimeError(
+                        f"users/create for {user_user!r} failed on {h.url}: "
+                        f"{created.status_code} {created.text[:200]}"
+                    )
             py_bindings: dict[str, Any] = {}
             rust_bindings: dict[str, Any] = {}
             results.extend(
