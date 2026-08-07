@@ -1,8 +1,8 @@
 {
   "summary": {
-    "cases_run": 467,
+    "cases_run": 494,
     "non_allowlisted_diffs": 0,
-    "allowlisted_diffs": 9,
+    "allowlisted_diffs": 16,
     "status_mismatches": 0,
     "errors": 0,
     "skipped_sections": []
@@ -23,7 +23,7 @@
       "errors": 0
     },
     "gateway": {
-      "cases": 71,
+      "cases": 82,
       "status_mismatch": 0,
       "diffs": 0,
       "allowlisted": 0,
@@ -100,7 +100,7 @@
       "errors": 0
     },
     "scorers": {
-      "cases": 13,
+      "cases": 15,
       "status_mismatch": 0,
       "diffs": 0,
       "allowlisted": 0,
@@ -117,7 +117,7 @@
       "cases": 7,
       "status_mismatch": 0,
       "diffs": 0,
-      "allowlisted": 6,
+      "allowlisted": 7,
       "errors": 0
     },
     "artifacts": {
@@ -125,6 +125,13 @@
       "status_mismatch": 0,
       "diffs": 0,
       "allowlisted": 0,
+      "errors": 0
+    },
+    "artifact_download_contract": {
+      "cases": 6,
+      "status_mismatch": 0,
+      "diffs": 0,
+      "allowlisted": 3,
       "errors": 0
     },
     "artifacts_native_disabled": {
@@ -177,7 +184,7 @@
       "errors": 0
     },
     "invoke": {
-      "cases": 11,
+      "cases": 12,
       "status_mismatch": 0,
       "diffs": 0,
       "allowlisted": 0,
@@ -191,10 +198,10 @@
       "errors": 0
     },
     "traces": {
-      "cases": 20,
+      "cases": 25,
       "status_mismatch": 0,
       "diffs": 0,
-      "allowlisted": 1,
+      "allowlisted": 4,
       "errors": 0
     },
     "gateway_proxy_validation": {
@@ -219,7 +226,7 @@
       "errors": 0
     },
     "workspaces": {
-      "cases": 10,
+      "cases": 12,
       "status_mismatch": 0,
       "diffs": 0,
       "allowlisted": 0,
@@ -785,7 +792,7 @@
       "allowlisted": [
         {
           "json_pointer": "/message",
-          "python_value": "Experiment(name=exp_alpha) already exists. Error: (sqlite3.IntegrityError) UNIQUE constraint failed: experiments.workspace, experiments.name\n[SQL: INSERT INTO experiments (name, workspace, artifact_location, lifecycle_stage, creation_time, last_update_time) VALUES (?, ?, ?, ?, ?, ?)]\n[parameters: ('exp_alpha', 'default', '', 'active', 1785696494030, 1785696494030)]\n(Background on this error at: https://sqlalche.me/e/20/gkpj)",
+          "python_value": "Experiment(name=exp_alpha) already exists. Error: (sqlite3.IntegrityError) UNIQUE constraint failed: experiments.workspace, experiments.name\n[SQL: INSERT INTO experiments (name, workspace, artifact_location, lifecycle_stage, creation_time, last_update_time) VALUES (?, ?, ?, ?, ?, ?)]\n[parameters: ('exp_alpha', 'default', '', 'active', 1786135322655, 1786135322655)]\n(Background on this error at: https://sqlalche.me/e/20/gkpj)",
           "rust_value": "Experiment(name=exp_alpha) already exists. Error: (workspace, name) must be unique",
           "kind": "value",
           "reason": "Python leaks the raw SQLAlchemy IntegrityError into the message, including the INSERT statement and its bound parameters (which contain the request's creation_time) \u2014 the text differs even between two Python runs, so byte-parity is impossible by construction. Rust returns the same leading \"Experiment(name=...) already exists.\" sentence with a stable tail. Error code and status match."
@@ -1081,7 +1088,59 @@
       "note": null
     },
     {
-      "name": "gateway_create_endpoint",
+      "name": "gateway_create_endpoint_missing_linkage_type",
+      "section": "gateway",
+      "method": "POST",
+      "path": "/api/3.0/mlflow/gateway/endpoints/create",
+      "py_status": 400,
+      "rust_status": 400,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "gateway_create_endpoint_unspecified_linkage_type",
+      "section": "gateway",
+      "method": "POST",
+      "path": "/api/3.0/mlflow/gateway/endpoints/create",
+      "py_status": 400,
+      "rust_status": 400,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "gateway_create_endpoint_fallback_linkage_control",
+      "section": "gateway",
+      "method": "POST",
+      "path": "/api/3.0/mlflow/gateway/endpoints/create",
+      "py_status": 200,
+      "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "gateway_delete_endpoint_fallback_linkage_control",
+      "section": "gateway",
+      "method": "DELETE",
+      "path": "/api/3.0/mlflow/gateway/endpoints/delete",
+      "py_status": 200,
+      "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "gateway_create_endpoint_primary_linkage_control",
       "section": "gateway",
       "method": "POST",
       "path": "/api/3.0/mlflow/gateway/endpoints/create",
@@ -1107,7 +1166,46 @@
       "note": null
     },
     {
-      "name": "gateway_update_endpoint",
+      "name": "gateway_update_endpoint_missing_linkage_type",
+      "section": "gateway",
+      "method": "POST",
+      "path": "/api/3.0/mlflow/gateway/endpoints/update",
+      "py_status": 400,
+      "rust_status": 400,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "gateway_update_endpoint_unspecified_linkage_type",
+      "section": "gateway",
+      "method": "POST",
+      "path": "/api/3.0/mlflow/gateway/endpoints/update",
+      "py_status": 400,
+      "rust_status": 400,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "gateway_update_endpoint_primary_linkage_control",
+      "section": "gateway",
+      "method": "POST",
+      "path": "/api/3.0/mlflow/gateway/endpoints/update",
+      "py_status": 200,
+      "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "gateway_update_endpoint_fallback_linkage_control",
       "section": "gateway",
       "method": "POST",
       "path": "/api/3.0/mlflow/gateway/endpoints/update",
@@ -1302,7 +1400,33 @@
       "note": null
     },
     {
-      "name": "gateway_attach_model",
+      "name": "gateway_attach_model_missing_linkage_type",
+      "section": "gateway",
+      "method": "POST",
+      "path": "/ajax-api/3.0/mlflow/gateway/endpoints/models/attach",
+      "py_status": 400,
+      "rust_status": 400,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "gateway_attach_model_unspecified_linkage_type",
+      "section": "gateway",
+      "method": "POST",
+      "path": "/ajax-api/3.0/mlflow/gateway/endpoints/models/attach",
+      "py_status": 400,
+      "rust_status": 400,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "gateway_attach_model_primary_linkage_control",
       "section": "gateway",
       "method": "POST",
       "path": "/ajax-api/3.0/mlflow/gateway/endpoints/models/attach",
@@ -1315,7 +1439,33 @@
       "note": null
     },
     {
-      "name": "gateway_detach_model",
+      "name": "gateway_detach_model_primary_linkage_control",
+      "section": "gateway",
+      "method": "POST",
+      "path": "/api/3.0/mlflow/gateway/endpoints/models/detach",
+      "py_status": 200,
+      "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "gateway_attach_model_fallback_linkage_control",
+      "section": "gateway",
+      "method": "POST",
+      "path": "/ajax-api/3.0/mlflow/gateway/endpoints/models/attach",
+      "py_status": 200,
+      "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "gateway_detach_model_fallback_linkage_control",
       "section": "gateway",
       "method": "POST",
       "path": "/api/3.0/mlflow/gateway/endpoints/models/detach",
@@ -2347,7 +2497,7 @@
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 200 != expected 404"
+      "note": null
     },
     {
       "name": "metric_get_history_bulk_interval_lone_start_step",
@@ -3650,6 +3800,32 @@
       "note": null
     },
     {
+      "name": "scorer_ensemble_register",
+      "section": "scorers",
+      "method": "POST",
+      "path": "/api/3.0/mlflow/scorers/register",
+      "py_status": 200,
+      "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "scorer_ensemble_get",
+      "section": "scorers",
+      "method": "GET",
+      "path": "/ajax-api/3.0/mlflow/scorers/get",
+      "py_status": 200,
+      "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
       "name": "scorer_list_latest",
       "section": "scorers",
       "method": "GET",
@@ -3719,13 +3895,13 @@
       "section": "scorers",
       "method": "PUT",
       "path": "/ajax-api/3.0/mlflow/scorers/online-config",
-      "py_status": 400,
-      "rust_status": 400,
+      "py_status": 200,
+      "rust_status": 200,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 400 != expected 200"
+      "note": null
     },
     {
       "name": "scorer_online_configs_get",
@@ -3927,20 +4103,6 @@
           "reason": "DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500."
         },
         {
-          "json_pointer": "/__raw_text__",
-          "python_value": "<!doctype html>\n<html lang=en>\n<title>500 Internal Server Error</title>\n<h1>Internal Server Error</h1>\n<p>The server encountered an internal error and was unable to complete your request. Either the server is overloaded or there is an error in the application.</p>\n",
-          "rust_value": null,
-          "kind": "missing_in_rust",
-          "reason": "DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500."
-        },
-        {
-          "json_pointer": "/message",
-          "python_value": null,
-          "rust_value": "Unknown or unspecified webhook entity: 0",
-          "kind": "missing_in_python",
-          "reason": "DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500."
-        },
-        {
           "json_pointer": "/error_code",
           "python_value": null,
           "rust_value": "INVALID_PARAMETER_VALUE",
@@ -3955,10 +4117,31 @@
           "reason": "DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500."
         },
         {
+          "json_pointer": "/message",
+          "python_value": null,
+          "rust_value": "Unknown or unspecified webhook entity: 0",
+          "kind": "missing_in_python",
+          "reason": "DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500."
+        },
+        {
           "json_pointer": "/error_class",
           "python_value": null,
           "rust_value": "INVALID_PARAMETER_VALUE",
           "kind": "missing_in_python",
+          "reason": "DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500."
+        },
+        {
+          "json_pointer": "/__raw_text__",
+          "python_value": "<!doctype html>\n<html lang=en>\n<title>500 Internal Server Error</title>\n<h1>Internal Server Error</h1>\n<p>The server encountered an internal error and was unable to complete your request. Either the server is overloaded or there is an error in the application.</p>\n",
+          "rust_value": null,
+          "kind": "missing_in_rust",
+          "reason": "DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500."
+        },
+        {
+          "json_pointer": "/__expected_status__/python",
+          "python_value": 400,
+          "rust_value": 500,
+          "kind": "status_expectation",
           "reason": "DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500."
         }
       ],
@@ -4063,6 +4246,108 @@
       "path": "/api/2.0/mlflow-artifacts/artifacts/compliance/nope.txt",
       "py_status": 404,
       "rust_status": 404,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "artifact_contract_setup_upload",
+      "section": "artifact_download_contract",
+      "method": "PUT",
+      "path": "/api/2.0/mlflow-artifacts/artifacts/conditional/hello.txt",
+      "py_status": 200,
+      "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "artifact_contract_download",
+      "section": "artifact_download_contract",
+      "method": "GET",
+      "path": "/api/2.0/mlflow-artifacts/artifacts/conditional/hello.txt",
+      "py_status": 200,
+      "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [
+        {
+          "json_pointer": "/__headers__/etag",
+          "python_value": "\"1786135342.115461-29-4274331499\"",
+          "rust_value": "\"1786135342.115461-29-3209895575\"",
+          "kind": "header",
+          "reason": "ETag includes adler32 of a different server-local artifact path; shape is asserted per server."
+        }
+      ],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "artifact_contract_download_range",
+      "section": "artifact_download_contract",
+      "method": "GET",
+      "path": "/api/2.0/mlflow-artifacts/artifacts/conditional/hello.txt",
+      "py_status": 206,
+      "rust_status": 206,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [
+        {
+          "json_pointer": "/__headers__/etag",
+          "python_value": "\"1786135342.115461-29-4274331499\"",
+          "rust_value": "\"1786135342.115461-29-3209895575\"",
+          "kind": "header",
+          "reason": "ETag includes adler32 of a different server-local artifact path; shape is asserted per server."
+        }
+      ],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "artifact_contract_download_unsatisfiable_range",
+      "section": "artifact_download_contract",
+      "method": "GET",
+      "path": "/api/2.0/mlflow-artifacts/artifacts/conditional/hello.txt",
+      "py_status": 416,
+      "rust_status": 416,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "artifact_contract_download_if_none_match",
+      "section": "artifact_download_contract",
+      "method": "GET",
+      "path": "/api/2.0/mlflow-artifacts/artifacts/conditional/hello.txt",
+      "py_status": 304,
+      "rust_status": 304,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [
+        {
+          "json_pointer": "/__headers__/etag",
+          "python_value": "\"1786135342.115461-29-4274331499\"",
+          "rust_value": "\"1786135342.115461-29-3209895575\"",
+          "kind": "header",
+          "reason": "ETag includes adler32 of a different server-local artifact path; shape is asserted per server."
+        }
+      ],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "artifact_contract_download_invalid_path",
+      "section": "artifact_download_contract",
+      "method": "GET",
+      "path": "/api/2.0/mlflow-artifacts/artifacts/conditional/%2E%2E%2Fsecret.txt",
+      "py_status": 400,
+      "rust_status": 400,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
@@ -4434,6 +4719,19 @@
       "note": null
     },
     {
+      "name": "scorer_ensemble_invoke_gate",
+      "section": "invoke",
+      "method": "POST",
+      "path": "/ajax-api/3.0/mlflow/scorer/invoke",
+      "py_status": 200,
+      "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
       "name": "scorer_invoke_missing_experiment",
       "section": "invoke",
       "method": "POST",
@@ -4583,6 +4881,95 @@
       "path": "/api/3.0/mlflow/traces/tr-compliance-1",
       "py_status": 200,
       "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "trace_attachment_download",
+      "section": "traces",
+      "method": "GET",
+      "path": "/ajax-api/2.0/mlflow/get-trace-artifact",
+      "py_status": 200,
+      "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [
+        {
+          "json_pointer": "/__headers__/etag",
+          "python_value": "\"1786135389.553472-22-2138452885\"",
+          "rust_value": "\"1786135389.553472-22-103953089\"",
+          "kind": "header",
+          "reason": "ETag includes adler32 of a different server-local attachment path; shape is asserted per server."
+        }
+      ],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "trace_attachment_download_range",
+      "section": "traces",
+      "method": "GET",
+      "path": "/ajax-api/2.0/mlflow/get-trace-artifact",
+      "py_status": 206,
+      "rust_status": 206,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [
+        {
+          "json_pointer": "/__headers__/etag",
+          "python_value": "\"1786135389.553472-22-2138452885\"",
+          "rust_value": "\"1786135389.553472-22-103953089\"",
+          "kind": "header",
+          "reason": "ETag includes adler32 of a different server-local attachment path; shape is asserted per server."
+        }
+      ],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "trace_attachment_download_unsatisfiable_range",
+      "section": "traces",
+      "method": "GET",
+      "path": "/ajax-api/2.0/mlflow/get-trace-artifact",
+      "py_status": 416,
+      "rust_status": 416,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "trace_attachment_download_if_none_match",
+      "section": "traces",
+      "method": "GET",
+      "path": "/ajax-api/2.0/mlflow/get-trace-artifact",
+      "py_status": 304,
+      "rust_status": 304,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [
+        {
+          "json_pointer": "/__headers__/etag",
+          "python_value": "\"1786135389.553472-22-2138452885\"",
+          "rust_value": "\"1786135389.553472-22-103953089\"",
+          "kind": "header",
+          "reason": "ETag includes adler32 of a different server-local attachment path; shape is asserted per server."
+        }
+      ],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "trace_attachment_invalid_path",
+      "section": "traces",
+      "method": "GET",
+      "path": "/ajax-api/2.0/mlflow/get-trace-artifact",
+      "py_status": 400,
+      "rust_status": 400,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
@@ -5811,21 +6198,21 @@
       "section": "auth",
       "method": "GET",
       "path": "/api/2.0/mlflow/experiments/search",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 200,
+      "rust_status": 200,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 200"
+      "note": null
     },
     {
       "name": "auth_nonadmin_create_experiment_ok_or_403",
       "section": "auth",
       "method": "POST",
       "path": "/api/2.0/mlflow/experiments/create",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 200,
+      "rust_status": 200,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
@@ -5837,26 +6224,26 @@
       "section": "auth",
       "method": "GET",
       "path": "/api/2.0/mlflow/users/get",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 403,
+      "rust_status": 403,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 403"
+      "note": null
     },
     {
       "name": "auth_webhooks_admin_only_for_user",
       "section": "auth",
       "method": "GET",
       "path": "/api/2.0/mlflow/webhooks",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 403,
+      "rust_status": 403,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 403"
+      "note": null
     },
     {
       "name": "auth_admin_create_mcp_server",
@@ -5889,26 +6276,26 @@
       "section": "auth",
       "method": "GET",
       "path": "/api/3.0/mlflow/mcp-servers/com.example/auth-actions",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 200,
+      "rust_status": 200,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 200"
+      "note": null
     },
     {
       "name": "auth_user_search_mcp_servers_has_allowed_actions",
       "section": "auth",
       "method": "GET",
       "path": "/api/3.0/mlflow/mcp-servers",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 200,
+      "rust_status": 200,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 200"
+      "note": null
     },
     {
       "name": "auth_admin_search_mcp_servers_has_no_allowed_actions",
@@ -6006,104 +6393,104 @@
       "section": "auth",
       "method": "GET",
       "path": "/api/3.0/mlflow/scorers/online-configs",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 200,
+      "rust_status": 200,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 200"
+      "note": null
     },
     {
       "name": "auth_online_configs_body_read_allowed",
       "section": "auth",
       "method": "GET",
       "path": "/ajax-api/3.0/mlflow/scorers/online-configs",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 200,
+      "rust_status": 200,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 200"
+      "note": null
     },
     {
       "name": "auth_online_config_put_read_only_denied",
       "section": "auth",
       "method": "PUT",
       "path": "/api/3.0/mlflow/scorers/online-config",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 403,
+      "rust_status": 403,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 403"
+      "note": null
     },
     {
       "name": "auth_online_config_put_missing_experiment_denied",
       "section": "auth",
       "method": "PUT",
       "path": "/ajax-api/3.0/mlflow/scorers/online-config",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 403,
+      "rust_status": 403,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 403"
+      "note": null
     },
     {
-      "name": "auth_online_config_deny_experiment_b",
+      "name": "auth_online_config_no_permissions_grant_rejected",
       "section": "auth",
       "method": "POST",
       "path": "/api/3.0/mlflow/users/permissions/grant",
-      "py_status": 404,
-      "rust_status": 404,
+      "py_status": 400,
+      "rust_status": 400,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 404 != expected 200"
+      "note": null
     },
     {
-      "name": "auth_online_configs_every_experiment_required",
+      "name": "auth_online_configs_default_read_remains",
       "section": "auth",
       "method": "GET",
       "path": "/api/3.0/mlflow/scorers/online-configs",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 200,
+      "rust_status": 200,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 403"
+      "note": null
     },
     {
       "name": "auth_online_config_grant_edit_a",
       "section": "auth",
       "method": "POST",
       "path": "/ajax-api/3.0/mlflow/users/permissions/grant",
-      "py_status": 404,
-      "rust_status": 404,
+      "py_status": 200,
+      "rust_status": 400,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 404 != expected 200"
+      "note": "shared auth DB second write: Python inserts first into the auth DB shared by both servers; Rust observes that exact grant as a duplicate."
     },
     {
       "name": "auth_online_config_put_edit_allowed",
       "section": "auth",
       "method": "PUT",
       "path": "/ajax-api/3.0/mlflow/scorers/online-config",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 200,
+      "rust_status": 200,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 200"
+      "note": null
     },
     {
       "name": "auth_admin_create_presigned_experiment",
@@ -6132,33 +6519,33 @@
       "note": null
     },
     {
-      "name": "auth_user_presigned_rpc_read_granted",
+      "name": "auth_user_presigned_rpc_default_read_not_implemented",
       "section": "auth",
       "method": "POST",
       "path": "/api/2.0/mlflow/artifacts/presigned-download-url",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 501,
+      "rust_status": 501,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 501"
+      "note": null
     },
     {
-      "name": "auth_user_presigned_proxy_read_granted",
+      "name": "auth_user_presigned_proxy_default_read_not_implemented",
       "section": "auth",
       "method": "GET",
       "path": "/ajax-api/2.0/mlflow-artifacts/presigned/${auth_presigned_experiment_id}/missing.txt",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 501,
+      "rust_status": 501,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 501"
+      "note": null
     },
     {
-      "name": "auth_admin_revoke_experiment_read",
+      "name": "auth_admin_revoke_missing_experiment_grant",
       "section": "auth",
       "method": "POST",
       "path": "/api/3.0/mlflow/users/permissions/revoke",
@@ -6168,72 +6555,72 @@
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 404 != expected 200"
+      "note": null
     },
     {
-      "name": "auth_user_presigned_rpc_read_denied",
+      "name": "auth_user_presigned_rpc_after_missing_revoke_not_implemented",
       "section": "auth",
       "method": "POST",
       "path": "/ajax-api/2.0/mlflow/artifacts/presigned-download-url",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 501,
+      "rust_status": 501,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 403"
+      "note": null
     },
     {
-      "name": "auth_user_presigned_proxy_read_denied",
+      "name": "auth_user_presigned_proxy_after_missing_revoke_not_implemented",
       "section": "auth",
       "method": "GET",
       "path": "/api/2.0/mlflow-artifacts/presigned/${auth_presigned_experiment_id}/missing.txt",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 501,
+      "rust_status": 501,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 403"
+      "note": null
     },
     {
-      "name": "auth_admin_restore_experiment_read",
+      "name": "auth_admin_grant_explicit_experiment_read",
       "section": "auth",
       "method": "POST",
       "path": "/api/3.0/mlflow/users/permissions/grant",
-      "py_status": 404,
-      "rust_status": 404,
+      "py_status": 200,
+      "rust_status": 400,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 404 != expected 200"
+      "note": "shared auth DB second write: Python inserts first into the auth DB shared by both servers; Rust observes that exact grant as a duplicate."
     },
     {
-      "name": "auth_user_presigned_rpc_read_restored",
+      "name": "auth_user_presigned_rpc_explicit_read_not_implemented",
       "section": "auth",
       "method": "POST",
       "path": "/api/2.0/mlflow/artifacts/presigned-download-url",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 501,
+      "rust_status": 501,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 501"
+      "note": null
     },
     {
-      "name": "auth_user_presigned_proxy_read_restored",
+      "name": "auth_user_presigned_proxy_explicit_read_not_implemented",
       "section": "auth",
       "method": "GET",
       "path": "/api/2.0/mlflow-artifacts/presigned/${auth_presigned_experiment_id}/missing.txt",
-      "py_status": 401,
-      "rust_status": 401,
+      "py_status": 501,
+      "rust_status": 501,
       "status_match": true,
       "diffs": [],
       "allowlisted": [],
       "error": null,
-      "note": "python status 401 != expected 501"
+      "note": null
     },
     {
       "name": "ws_list",
@@ -6266,6 +6653,32 @@
       "section": "workspaces",
       "method": "GET",
       "path": "/api/3.0/mlflow/workspaces/team-a",
+      "py_status": 200,
+      "rust_status": 200,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "ws_create_consecutive_hyphens",
+      "section": "workspaces",
+      "method": "POST",
+      "path": "/api/3.0/mlflow/workspaces",
+      "py_status": 201,
+      "rust_status": 201,
+      "status_match": true,
+      "diffs": [],
+      "allowlisted": [],
+      "error": null,
+      "note": null
+    },
+    {
+      "name": "ws_get_consecutive_hyphens",
+      "section": "workspaces",
+      "method": "GET",
+      "path": "/api/3.0/mlflow/workspaces/team--a",
       "py_status": 200,
       "rust_status": 200,
       "status_match": true,

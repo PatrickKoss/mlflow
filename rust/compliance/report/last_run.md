@@ -1,11 +1,12 @@
 # Differential Request Replay - Last Run
 
-- Cases run: **467**  |  Non-allowlisted diffs: **0**  |  Allowlisted: **9**  |  Status mismatches: **0**  |  Errors: **0**
+- Cases run: **494**  |  Non-allowlisted diffs: **0**  |  Allowlisted: **16**  |  Status mismatches: **0**  |  Errors: **0**
 
 ## Per-section
 
 | Section | Cases | Status mismatch | Diffs | Allowlisted | Errors |
 |---|---|---|---|---|---|
+| artifact_download_contract | 6 | 0 | 0 | 3 | 0 |
 | artifacts | 8 | 0 | 0 | 0 | 0 |
 | artifacts_native_disabled | 2 | 0 | 0 | 0 | 0 |
 | artifacts_native_unconfigured | 2 | 0 | 0 | 0 | 0 |
@@ -14,10 +15,10 @@
 | auth_artifacts_only | 2 | 0 | 0 | 0 | 0 |
 | datasets | 17 | 0 | 0 | 0 | 0 |
 | experiments | 27 | 0 | 0 | 1 | 0 |
-| gateway | 71 | 0 | 0 | 0 | 0 |
+| gateway | 82 | 0 | 0 | 0 | 0 |
 | gateway_proxy_validation | 5 | 0 | 0 | 0 | 0 |
 | graphql | 6 | 0 | 0 | 0 | 0 |
-| invoke | 11 | 0 | 0 | 0 | 0 |
+| invoke | 12 | 0 | 0 | 0 | 0 |
 | issue_credentials | 3 | 0 | 0 | 0 | 0 |
 | issues | 7 | 0 | 0 | 0 | 0 |
 | label_schemas | 9 | 0 | 0 | 0 | 0 |
@@ -31,23 +32,30 @@
 | registry | 30 | 0 | 0 | 0 | 0 |
 | review_queues | 14 | 0 | 0 | 0 | 0 |
 | runs | 20 | 0 | 0 | 0 | 0 |
-| scorers | 13 | 0 | 0 | 0 | 0 |
+| scorers | 15 | 0 | 0 | 0 | 0 |
 | server_info | 3 | 0 | 0 | 0 | 0 |
 | server_info_no_artifacts | 1 | 0 | 0 | 0 | 0 |
-| traces | 20 | 0 | 0 | 1 | 0 |
-| webhooks | 7 | 0 | 0 | 6 | 0 |
-| workspaces | 10 | 0 | 0 | 0 | 0 |
+| traces | 25 | 0 | 0 | 4 | 0 |
+| webhooks | 7 | 0 | 0 | 7 | 0 |
+| workspaces | 12 | 0 | 0 | 0 | 0 |
 
 ## Allowlisted diffs (known, tolerated)
 
 - experiments::experiment_create_duplicate `/message` - Python leaks the raw SQLAlchemy IntegrityError into the message, including the INSERT statement and its bound parameters (which contain the request's creation_time) — the text differs even between two Python runs, so byte-parity is impossible by construction. Rust returns the same leading "Experiment(name=...) already exists." sentence with a stable tail. Error code and status match.
 - logged_models::dataset_search `/__raw_text__` - Flask default HTML 404 page vs empty axum body on an unmatched route; status matches.
 - webhooks::webhook_create_bad_event `/__status__` - DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500.
-- webhooks::webhook_create_bad_event `/__raw_text__` - DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500.
-- webhooks::webhook_create_bad_event `/message` - DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500.
 - webhooks::webhook_create_bad_event `/error_code` - DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500.
 - webhooks::webhook_create_bad_event `/sqlstate` - DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500.
+- webhooks::webhook_create_bad_event `/message` - DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500.
 - webhooks::webhook_create_bad_event `/error_class` - DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500.
+- webhooks::webhook_create_bad_event `/__raw_text__` - DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500.
+- webhooks::webhook_create_bad_event `/__expected_status__/python` - DELIBERATE DEVIATION - Python raises an unhandled exception on an unknown webhook entity (HTTP 500 with the Flask HTML error page); Rust returns a clean 400 INVALID_PARAMETER_VALUE naming the bad entity. Revisit if the Phase 12 Python-suite run asserts the 500.
+- artifact_download_contract::artifact_contract_download `/__headers__/etag` - ETag includes adler32 of a different server-local artifact path; shape is asserted per server.
+- artifact_download_contract::artifact_contract_download_range `/__headers__/etag` - ETag includes adler32 of a different server-local artifact path; shape is asserted per server.
+- artifact_download_contract::artifact_contract_download_if_none_match `/__headers__/etag` - ETag includes adler32 of a different server-local artifact path; shape is asserted per server.
+- traces::trace_attachment_download `/__headers__/etag` - ETag includes adler32 of a different server-local attachment path; shape is asserted per server.
+- traces::trace_attachment_download_range `/__headers__/etag` - ETag includes adler32 of a different server-local attachment path; shape is asserted per server.
+- traces::trace_attachment_download_if_none_match `/__headers__/etag` - ETag includes adler32 of a different server-local attachment path; shape is asserted per server.
 - traces::trace_set_tag_v3 `/__raw_text__` - Flask default HTML 405 page vs empty axum body; status matches.
 
 ## Coverage notes
@@ -77,8 +85,7 @@ Corpus sections map to plan section 3 as follows:
 - gateway_proxy_validation -> 12.8 (GET/POST validation before a closed local target)
 
 Deliberately deferred to follow-up (documented, not covered here): assessments
-FieldMask update paths (3.9) beyond create/get; trace artifact fetch dispatch
-on spansLocation (3.10); tracing V2 deprecated adapters (3.7) beyond the search
+FieldMask update paths (3.9) beyond create/get; tracing V2 deprecated adapters (3.7) beyond the search
 smoke; queryTraceMetrics / calculateTraceFilterCorrelation aggregations (3.6);
 multipart artifact create/complete/abort (3.11); full RBAC
 role/permission matrix and after-request search filtering (3.16); workspace
