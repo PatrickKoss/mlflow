@@ -1,6 +1,6 @@
 # Rust upstream sync plan — 2026-08-07
 
-Status: **OPEN** · From: `0489fb31d8a144ec3c80d15eb44dbe24b790465e` · To: `1401cf865aa2d26f22d4b36687fc3fc9008d413e`
+Status: **COMPLETE (2026-08-07)** · From: `0489fb31d8a144ec3c80d15eb44dbe24b790465e` · To: `1401cf865aa2d26f22d4b36687fc3fc9008d413e`
 
 | Bucket       | Commits |
 | ------------ | ------: |
@@ -152,7 +152,12 @@ kept both sides' new tests). Production UI rebuilt post-merge (`yarn build` rc=0
   - **AC:** (1) `/server-info` response keys/values unchanged by the Python constant extraction (pure refactor) — corpus stays green with zero diffs. (2) Rust-served supported-models/model-catalog data equals the merged end state of both catalog commits after a rebuild (build.rs re-embeds the JSON; goldens re-pinned if sizes shift). (3) `scorer_ensemble` is a Python-side scorer primitive executed by the Python worker: registering an ensemble scorer (serialized scorer JSON) through the Rust server's scorer registration/invoke gates round-trips identically to Python (no server-side rejection of the new `kind`/serialization fields); no Rust reimplementation of ensemble semantics. (4) Python's after-request leak fix (`AFTER_REQUEST_HANDLERS` dict-comprehension guard) has no Rust analogue — Rust's auth middleware declares filters explicitly; confirm no Rust route applies an after-request permission filter to a path Python now excludes (evidence: route/filter table review or auth conformance rows).
   - **VER:** `uv run --no-sync python rust/compliance/replay.py` (server-info + gateway discovery/supported-models cases green after rebuild); `cargo test -p mlflow-server --test gateway_discovery_http`; new conformance row registering + fetching an ensemble scorer via `uv run --no-sync python rust/genai-inventory/run_conformance.py --profile required`; auth after-request verification noted with evidence in the DONE entry.
 
-- [ ] T-S9 Rebuild the upstream UI and run UI smoke
+- [x] T-S9 Rebuild the upstream UI and run UI smoke
+  - **DONE 2026-08-07:** coordinator-executed. Production UI rebuilt during Phase 1 (`yarn build`
+    rc=0) and again by the e2e harness. `bash rust/e2e/run.sh` from the final head: rc=0, both
+    rounds green — GenAI 16/16, Part 1 16/16, auth-enabled admin+account suite passed, ×2. No
+    Python-attributed responses, no Playwright spec changes needed (the 11 merged UI commits are
+    all frontend-only surfaces served by the static build).
   - **Upstream refs:** all 11 `ui` commits: `dce78a5c95`, `f1a61cd2d3`, `206e7649a3`, `a1e7b4e220`, `21fc618fa4`, `c1599e195f`, `da9f4fa9fd`, `2e08b5a8d5`, `23513d005b`, `bec770166e`, `1401cf865a` (DeleteRunModal/RestoreRunModal error text, PermissionDeniedView removal, A2UI custom trace views 1–3/N, 3.15.1.dev0 version bump, chart-grid virtualization, Assistant analyze action on evaluation runs, span-links display, chart-card metric-name dedup)
   - **Rust target:** production React static build served by the Rust deployment
   - **AC:** The merged UI builds and all e2e-covered surfaces work against Rust without Python-attributed responses and without unexpected 4xx; run-modal error paths now surface server error messages (Rust error payloads must render, which they do if `message` fields match Python — any drift found is a bug in the owning task, not papered over in Playwright).
@@ -165,13 +170,19 @@ kept both sides' new tests). Production UI rebuilt post-merge (`yarn build` rc=0
 
 ## Completion checklist
 
-- [ ] Unary differential corpus replay is green:
+- [x] Unary differential corpus replay is green:
       `uv run --no-sync python rust/compliance/replay.py`.
-- [ ] Required Python-over-HTTP conformance matrix is green:
+      (2026-08-07 final head: RC=0, 494 cases, 0 non-allowlisted diffs, 0 status mismatches.)
+- [x] Required Python-over-HTTP conformance matrix is green:
       `uv run --no-sync python rust/genai-inventory/run_conformance.py --profile required`.
-- [ ] SSE/streaming recorder differentials are green:
-      `uv run --no-sync pytest -q rust/compliance/recorders/`.
-- [ ] Three-phase Playwright UI smoke is green: `bash rust/e2e/run.sh`.
-- [ ] Production UI was rebuilt if the `ui` bucket was non-empty.
-- [ ] New upstream endpoints have new corpus/conformance cases, not code-only coverage.
-- [ ] `rust/sync/state.json` advances to `1401cf865aa2d26f22d4b36687fc3fc9008d413e` and records this plan.
+      (2026-08-07 final head: RC=0, sqlite + postgres.)
+- [x] SSE/streaming recorder differentials are green:
+      `uv run --no-sync pytest -q rust/compliance/recorders/`. (2026-08-07 final head: 40/40.)
+- [x] Three-phase Playwright UI smoke is green: `bash rust/e2e/run.sh`.
+      (2026-08-07 final head: rc=0, both rounds.)
+- [x] Production UI was rebuilt if the `ui` bucket was non-empty. (Phase 1 + e2e harness.)
+- [x] New upstream endpoints have new corpus/conformance cases, not code-only coverage.
+      (linkage_type ×3 routes, download-contract section + traces attachment cases, `team--a`
+      workspace round-trip, ensemble scorer register/fetch/invoke, log_spans concurrency tests,
+      grouped Bedrock translation tests, buffered-window unit tests.)
+- [x] `rust/sync/state.json` advances to `1401cf865aa2d26f22d4b36687fc3fc9008d413e` and records this plan.
