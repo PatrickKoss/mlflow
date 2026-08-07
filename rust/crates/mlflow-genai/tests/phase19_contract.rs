@@ -135,6 +135,6 @@ fn execution_rejections_match_python_messages() {
     .unwrap();
     assert_eq!(
         incomplete.validate_for_oss_execution().unwrap_err().to_string(),
-        "Failed to load scorer 'x'. The scorer is serialized in an unknown format that cannot be deserialized. Please make sure you are using a compatible MLflow version or recreate the scorer. Scorer was created with MLflow version: 3.15.1.dev0, serialization version: 1, current MLflow version: 3.15.1.dev0."
+        "Failed to load scorer 'x'. The scorer is serialized in an unknown format that cannot be deserialized. Please make sure you are using a compatible MLflow version or recreate the scorer. Scorer was created with MLflow version: 3.15.2.dev0, serialization version: 1, current MLflow version: 3.15.2.dev0."
     );
 }

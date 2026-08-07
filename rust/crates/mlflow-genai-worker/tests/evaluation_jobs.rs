@@ -306,7 +306,7 @@ async fn native_jobs_persist_evaluation_invoke_online_and_checkpoints() {
                 "serialized_scorer": RESPONSE_LENGTH,
                 "online_config": {"sample_rate": 1.0, "filter_string": null}
             }],
-            "current_time_ms": 4_000,
+            "current_time_ms": 304_000,
         }),
     );
     assert_eq!(

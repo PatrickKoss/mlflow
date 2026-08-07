@@ -361,7 +361,7 @@
         "embeddings": false,
         "stream": true
       },
-      "chat_transform": null,
+      "chat_transform": "litellm.llms.bedrock_mantle.chat.transformation.BedrockMantleChatConfig",
       "embedding_transform": null,
       "model_entry_count": 9,
       "name": "bedrock_mantle",
