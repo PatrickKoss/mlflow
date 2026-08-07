@@ -18,7 +18,19 @@ kept both sides' new tests). Production UI rebuilt post-merge (`yarn build` rc=0
 
 ## Tasks
 
-- [ ] T-S1 SqlAlchemy trace-store parity: log_spans same-trace serialization + trace-info materialization + runs.status metadata
+- [x] T-S1 SqlAlchemy trace-store parity: log_spans same-trace serialization + trace-info materialization + runs.status metadata
+  - **DONE 2026-08-07:** commit `123a4f7af` (executor: Codex, rebased onto post-T-S7 head;
+    coordinator-verified). Ordered direct `trace_info` row locks for pre-existing traces before
+    any span writes (`FOR UPDATE` on postgres/mysql; sqlite stays plain-read single-writer with
+    write-conflict transaction retry); MySQL locking stored-span re-read; batch-local aggregation
+    for traces created in the same call; also closes a pre-existing gap by recomputing trace-level
+    **cost** (not just token usage) from the stored span tree, matching Python. No-ops confirmed:
+    `d87c8210b0` (Rust already materializes explicit columns; corpus identical) and `c5be75fb97`
+    (Rust owns no ORM constraint metadata; Alembic-created fixture already has the unnamed check).
+    Independent VER rerun after rebase: `cargo test -p mlflow-store` green incl. new
+    `concurrent_log_spans_calls_do_not_lose_token_usage` (+ workspace variant), replay `-k traces`
+    RC=0 (20 cases, 0 non-allowlisted diffs). MSSQL unsupported by the Rust dialect layer (as
+    before). Integrated ff-only.
   - **Upstream refs:** `22a5cdedbc` Serialize concurrent `SqlAlchemyStore.log_spans` calls for the same trace (#24516); `d87c8210b0` Optimize SQL trace info materialization (#24880); `c5be75fb97` Align `runs.status` constraint metadata (#24890)
   - **Rust target:** `rust/crates/mlflow-store/src/store/spans.rs`, `rust/crates/mlflow-store/src/store/traces.rs` (and migrations metadata only if a Rust-side schema description exists for the `runs.status` CHECK constraint)
   - **AC:** (1) Concurrent `log_spans` calls for the same pre-existing trace must not lose token-usage/cost aggregation: the Rust store serializes read-modify-write of trace-level usage/cost recomputation per trace, locking trace rows in `request_id` order **before** writing span rows, locking only pre-existing traces (not ones created by the same call), and locking `trace_info` rows directly (never through a workspace/experiment join that would serialize the whole experiment). On MySQL the stored-span re-read for recompute is a locking read; other backends keep plain reads. Recompute set is derived from the locked pre-existing IDs intersected with usage/cost-bearing traces. (2) `d87c8210b0` is a Python-side query optimization: confirm Rust `search_traces`/`get_trace_info` responses are byte-identical to merged Python (no behavior change expected; no Rust code change unless a differential appears). (3) `c5be75fb97` is ORM-metadata-only (constraint name alignment, no migration): confirm no Rust schema/migration drift; expected no-op.
