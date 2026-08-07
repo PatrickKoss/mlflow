@@ -177,7 +177,9 @@ impl ScorerExecutor {
                 crate::third_party::execute(self, common, data, item, gateway_url, embedding_url)
                     .await
             }
-            SerializedScorer::Decorator { .. } => Err(EngineError::UnsupportedScorer),
+            SerializedScorer::Decorator { .. } | SerializedScorer::Ensemble { .. } => {
+                Err(EngineError::UnsupportedScorer)
+            }
         }
     }
 

@@ -9,13 +9,13 @@ Reference: MLflow `3.14.1.dev0` at `c69051f534f4b0d171ed92d07c58a20f8c2a3461`.
 
 ## Coverage
 
-The ledger contains 1,892 items: 186 `mlflow/genai` modules, 1,580 definitions, and 126 explicit Part II surface records. Its test index contains 3,562 exact pytest test IDs.
+The ledger contains 1,976 items: 190 `mlflow/genai` modules, 1,659 definitions, and 127 explicit Part II surface records. Its test index contains 3,919 exact pytest test IDs.
 
 | Test execution classification | Tests |
 | --- | --- |
 | server_reachable | 35 |
-| client_only | 183 |
-| python_internal | 3344 |
+| client_only | 184 |
+| python_internal | 3700 |
 
 `python_internal` tests exercise Python handlers, stores, workers, or monkeypatched implementation classes directly; they remain inventory evidence but are not falsely reported as repointable Rust HTTP conformance.
 
@@ -30,8 +30,8 @@ The repointable band is derived mechanically from the Python AST: a test must tr
 
 | Classification | Items |
 | --- | --- |
-| server_reachable | 1546 |
-| client_only | 346 |
+| server_reachable | 1588 |
+| client_only | 388 |
 | dead | 0 |
 
 Conservative rule: ambiguous reachability is `server_reachable`. There are no unclassified items or server paths.
@@ -41,16 +41,16 @@ Conservative rule: ambiguous reachability is `server_reachable`. There are no un
 | Tier | Items |
 | --- | --- |
 | A | 184 |
-| B | 28 |
-| C | 1334 |
+| B | 29 |
+| C | 1375 |
 
 | Phase | Items |
 | --- | --- |
 | T16 | 138 |
 | T17 | 6 |
 | T18 | 55 |
-| T19 | 1331 |
-| T20 | 12 |
+| T19 | 1372 |
+| T20 | 13 |
 | T21 | 4 |
 | T22 | 0 |
 
@@ -73,13 +73,13 @@ Conservative rule: ambiguous reachability is `server_reachable`. There are no un
 | T18.5 | 1 |
 | T18.6 | 1 |
 | T18.7 | 1 |
-| T19.1 | 625 |
+| T19.1 | 666 |
 | T19.2 | 337 |
 | T19.3 | 207 |
 | T19.4 | 63 |
 | T19.5 | 99 |
 | T20.1 | 6 |
-| T20.2 | 3 |
+| T20.2 | 4 |
 | T20.3 | 2 |
 | T20.4 | 1 |
 | T21.1 | 1 |
@@ -94,7 +94,7 @@ Conservative rule: ambiguous reachability is `server_reachable`. There are no un
 | algorithms | 2 |
 | builtin_scorers | 24 |
 | provider_models | 2908 |
-| providers | 191 |
+| providers | 192 |
 | scorers | 138 |
 | serialized_judges | 2 |
 | third_party_metrics | 112 |
@@ -118,8 +118,8 @@ The provider population is the union of the MLflow gateway registry, LiteLLM's p
 
 | Strategy | Ledger items | Shared oracle groups |
 | --- | --- | --- |
-| existing_python_tests | 1429 | 109 |
-| corpus recorder needed | 463 | 89 |
+| existing_python_tests | 1507 | 112 |
+| corpus recorder needed | 469 | 90 |
 
 ### semantic
 
@@ -135,5 +135,5 @@ Fixtures: `rust/compliance/fixtures/genai/sse/`. Normalization: preserve SSE eve
 
 ## Recorded ambiguities
 
-- The module has a proven server/job call root, but serialized and dynamic dispatch make per-symbol static reachability incomplete; classified server_reachable conservatively. (1227 surface records)
+- The module has a proven server/job call root, but serialized and dynamic dispatch make per-symbol static reachability incomplete; classified server_reachable conservatively. (1266 surface records)
 - §12 labels this family /2.0, but get_service_endpoints uses since.major=3; the generated descriptor registers /api/3.0 and /ajax-api/3.0. (41 surface records)

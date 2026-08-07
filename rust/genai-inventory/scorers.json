@@ -1498,7 +1498,7 @@
       "condition": "call_source is not null on OSS",
       "kind": "decorator_scorer",
       "owner_task": "T19.1",
-      "source": "mlflow/genai/scorers/base.py:567"
+      "source": "mlflow/genai/scorers/base.py:657"
     }
   ],
   "schema_version": 1,

@@ -90,6 +90,12 @@ pub enum SerializedScorer {
         common: SerializedScorerCommon,
         data: Map<String, Value>,
     },
+    /// A Python `make_scorer_ensemble` payload. The Rust server preserves and
+    /// queues this representation; ensemble semantics remain Python-owned.
+    Ensemble {
+        common: SerializedScorerCommon,
+        data: Map<String, Value>,
+    },
 }
 
 impl SerializedScorer {
@@ -115,7 +121,8 @@ impl SerializedScorer {
             Self::Instructions(payload) => &payload.common,
             Self::Decorator { common, .. }
             | Self::MemoryAugmented { common, .. }
-            | Self::ThirdParty { common, .. } => common,
+            | Self::ThirdParty { common, .. }
+            | Self::Ensemble { common, .. } => common,
         }
     }
 
@@ -202,6 +209,7 @@ fn parse_raw(raw: Map<String, Value>) -> Result<SerializedScorer, ScorerPayloadE
         "instructions_judge_pydantic_data",
         "memory_augmented_judge_data",
         "third_party_scorer_data",
+        "ensemble_scorer_data",
     ];
     let present = representation_fields
         .iter()
@@ -211,7 +219,7 @@ fn parse_raw(raw: Map<String, Value>) -> Result<SerializedScorer, ScorerPayloadE
     match present.len() {
         0 => {
             return Err(ScorerPayloadError::InvalidData(
-                "Failed to parse serialized scorer data: SerializedScorer must have either builtin scorer fields (builtin_scorer_class), decorator scorer fields (call_source), instructions judge fields (instructions_judge_pydantic_data), memory augmented judge fields (memory_augmented_judge_data), or third-party scorer fields (third_party_scorer_data) present".to_string(),
+                "Failed to parse serialized scorer data: SerializedScorer must have either builtin scorer fields (builtin_scorer_class), decorator scorer fields (call_source), instructions judge fields (instructions_judge_pydantic_data), memory augmented judge fields (memory_augmented_judge_data), third-party scorer fields (third_party_scorer_data), or ensemble scorer fields (ensemble_scorer_data) present".to_string(),
             ));
         }
         1 => {}
@@ -261,6 +269,10 @@ fn parse_raw(raw: Map<String, Value>) -> Result<SerializedScorer, ScorerPayloadE
         "third_party_scorer_data" => Ok(SerializedScorer::ThirdParty {
             common,
             data: required_object(&raw, "third_party_scorer_data")?,
+        }),
+        "ensemble_scorer_data" => Ok(SerializedScorer::Ensemble {
+            common,
+            data: required_object(&raw, "ensemble_scorer_data")?,
         }),
         _ => unreachable!("representation field comes from closed list"),
     }
@@ -340,6 +352,7 @@ fn parse_common(
         "instructions_judge_pydantic_data",
         "memory_augmented_judge_data",
         "third_party_scorer_data",
+        "ensemble_scorer_data",
     ];
     let unknown_fields = raw
         .iter()

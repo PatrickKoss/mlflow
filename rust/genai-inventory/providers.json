@@ -44651,8 +44651,8 @@
       "tokenizer_metadata_present": false
     },
     {
-      "chat_transform": null,
-      "chat_transform_present": false,
+      "chat_transform": "litellm.llms.bedrock_mantle.chat.transformation.BedrockMantleChatConfig",
+      "chat_transform_present": true,
       "embedding_transform": null,
       "embedding_transform_present": false,
       "limits_present": true,

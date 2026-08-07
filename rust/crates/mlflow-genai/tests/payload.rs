@@ -51,6 +51,45 @@ fn parses_python_instructions_payload() {
 }
 
 #[test]
+fn preserves_python_ensemble_payload_without_implementing_it() {
+    let value = serde_json::json!({
+        "name": "conformance-ensemble",
+        "aggregations": null,
+        "description": null,
+        "is_session_level_scorer": false,
+        "mlflow_version": "3.15.2.dev0",
+        "serialization_version": 1,
+        "builtin_scorer_class": null,
+        "builtin_scorer_pydantic_data": null,
+        "call_source": null,
+        "call_signature": null,
+        "original_func_name": null,
+        "instructions_judge_pydantic_data": null,
+        "memory_augmented_judge_data": null,
+        "third_party_scorer_data": null,
+        "ensemble_scorer_data": {
+            "ensemble_fn": "majority_vote",
+            "scorers": [{
+                "name": "response_length",
+                "builtin_scorer_class": "ResponseLength",
+                "builtin_scorer_pydantic_data": {"max_length": 100}
+            }]
+        }
+    });
+    let scorer = SerializedScorer::from_value(value.clone()).unwrap();
+    assert_eq!(scorer.to_json_value(), value);
+    let SerializedScorer::Ensemble { common, data } = scorer else {
+        panic!("expected ensemble scorer")
+    };
+    assert_eq!(common.name, "conformance-ensemble");
+    assert_eq!(data["ensemble_fn"], "majority_vote");
+    assert_eq!(data["scorers"].as_array().unwrap().len(), 1);
+    assert!(SerializedScorer::Ensemble { common, data }
+        .validate_for_oss_execution()
+        .is_ok());
+}
+
+#[test]
 fn rejects_multiple_representations() {
     let payload = serde_json::json!({
         "name": "ambiguous",

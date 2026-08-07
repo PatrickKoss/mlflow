@@ -53,6 +53,16 @@ cases:
       log_assessments: true
     expect_status: 200
 
+  - name: scorer_ensemble_invoke_gate
+    method: POST
+    path: /ajax-api/3.0/mlflow/scorer/invoke
+    body:
+      experiment_id: "0"
+      serialized_scorer: '{"name":"corpus-ensemble","aggregations":null,"description":null,"is_session_level_scorer":false,"mlflow_version":"3.15.2.dev0","serialization_version":1,"builtin_scorer_class":null,"builtin_scorer_pydantic_data":null,"call_source":null,"call_signature":null,"original_func_name":null,"instructions_judge_pydantic_data":null,"memory_augmented_judge_data":null,"third_party_scorer_data":null,"ensemble_scorer_data":{"ensemble_fn":"majority_vote","scorers":[{"name":"corpus-ensemble-length","aggregations":null,"description":"Check whether the output length is within specified bounds.","is_session_level_scorer":false,"mlflow_version":"3.15.2.dev0","serialization_version":1,"builtin_scorer_class":"ResponseLength","builtin_scorer_pydantic_data":{"name":"corpus-ensemble-length","aggregations":null,"description":"Check whether the output length is within specified bounds.","required_columns":["outputs"],"inference_params":null,"extra_headers":null,"min_length":null,"max_length":100,"unit":"chars","instructions":"Check whether the output length in chars is within [max=100]."},"call_source":null,"call_signature":null,"original_func_name":null,"instructions_judge_pydantic_data":null,"memory_augmented_judge_data":null,"third_party_scorer_data":null,"ensemble_scorer_data":null}]}}'
+      trace_ids: [tr-corpus-ensemble]
+      log_assessments: false
+    expect_status: 200
+
   - name: scorer_invoke_missing_experiment
     method: POST
     path: /ajax-api/3.0/mlflow/scorer/invoke

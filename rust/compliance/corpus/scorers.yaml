@@ -22,6 +22,21 @@ cases:
       - {bind: scorer_id_v2, from: "$.scorer_id"}
     expect_status: 200
 
+  - name: scorer_ensemble_register
+    method: POST
+    path: /api/3.0/mlflow/scorers/register
+    body:
+      experiment_id: "0"
+      name: corpus-ensemble
+      serialized_scorer: '{"name":"corpus-ensemble","aggregations":null,"description":null,"is_session_level_scorer":false,"mlflow_version":"3.15.2.dev0","serialization_version":1,"builtin_scorer_class":null,"builtin_scorer_pydantic_data":null,"call_source":null,"call_signature":null,"original_func_name":null,"instructions_judge_pydantic_data":null,"memory_augmented_judge_data":null,"third_party_scorer_data":null,"ensemble_scorer_data":{"ensemble_fn":"majority_vote","scorers":[{"name":"corpus-ensemble-length","aggregations":null,"description":"Check whether the output length is within specified bounds.","is_session_level_scorer":false,"mlflow_version":"3.15.2.dev0","serialization_version":1,"builtin_scorer_class":"ResponseLength","builtin_scorer_pydantic_data":{"name":"corpus-ensemble-length","aggregations":null,"description":"Check whether the output length is within specified bounds.","required_columns":["outputs"],"inference_params":null,"extra_headers":null,"min_length":null,"max_length":100,"unit":"chars","instructions":"Check whether the output length in chars is within [max=100]."},"call_source":null,"call_signature":null,"original_func_name":null,"instructions_judge_pydantic_data":null,"memory_augmented_judge_data":null,"third_party_scorer_data":null,"ensemble_scorer_data":null}]}}'
+    expect_status: 200
+
+  - name: scorer_ensemble_get
+    method: GET
+    path: /ajax-api/3.0/mlflow/scorers/get
+    query: {experiment_id: "0", name: corpus-ensemble}
+    expect_status: 200
+
   - name: scorer_list_latest
     method: GET
     path: /api/3.0/mlflow/scorers/list
