@@ -17,6 +17,16 @@ cases:
     method: GET
     path: /api/3.0/mlflow/workspaces/team-a
 
+  - name: ws_create_consecutive_hyphens
+    method: POST
+    path: /api/3.0/mlflow/workspaces
+    body: {name: team--a}
+    expect_status: 201
+
+  - name: ws_get_consecutive_hyphens
+    method: GET
+    path: /api/3.0/mlflow/workspaces/team--a
+
   - name: ws_scoped_create_experiment
     method: POST
     path: /api/2.0/mlflow/experiments/create

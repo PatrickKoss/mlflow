@@ -144,7 +144,7 @@ pub struct WorkspaceNameValidator;
 
 impl WorkspaceNameValidator {
     /// `WorkspaceNameValidator._PATTERN`.
-    pub const PATTERN: &'static str = r"^(?!.*--)[a-z0-9]([-a-z0-9]*[a-z0-9])?$";
+    pub const PATTERN: &'static str = r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$";
     const MIN_LENGTH: usize = 2;
     const MAX_LENGTH: usize = 63;
     /// `WorkspaceNameValidator._RESERVED`.
@@ -180,15 +180,12 @@ impl WorkspaceNameValidator {
         Ok(())
     }
 
-    /// `re.match(r"^(?!.*--)[a-z0-9]([-a-z0-9]*[a-z0-9])?$", name)` without a
-    /// regex engine: no `--` anywhere, all chars in `[a-z0-9-]`, first and last
-    /// chars alphanumeric. `re.match` anchors at the start; the pattern's `$`
-    /// anchors the end, so this is a full match (min length 2 is enforced
-    /// separately, matching Python's ordering).
+    /// `re.match(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", name)` without a regex
+    /// engine: all chars are in `[a-z0-9-]`, with alphanumeric first and last
+    /// chars. `re.match` anchors at the start; the pattern's `$` anchors the end,
+    /// so this is a full match (min length 2 is enforced separately, matching
+    /// Python's ordering).
     fn matches_pattern(name: &str) -> bool {
-        if name.contains("--") {
-            return false;
-        }
         let bytes = name.as_bytes();
         let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
         let is_body = |b: u8| is_alnum(b) || b == b'-';
@@ -772,7 +769,7 @@ mod tests {
 
     #[test]
     fn validator_accepts_valid_names() {
-        for name in ["team-a", "ab", &"a".repeat(63), "123", "a1-b2"] {
+        for name in ["team-a", "ab", &"a".repeat(63), "123", "a1-b2", "team--a"] {
             WorkspaceNameValidator::validate(name).expect(name);
         }
     }
@@ -783,7 +780,6 @@ mod tests {
             ("t", "must be between"),
             ("Team-A", "must match the pattern"),
             ("team_a", "must match the pattern"),
-            ("team--a", "must match the pattern"),
             ("-team", "must match the pattern"),
             ("team-", "must match the pattern"),
             ("workspaces", "is reserved"),
