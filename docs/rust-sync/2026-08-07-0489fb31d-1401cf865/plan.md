@@ -104,7 +104,7 @@ kept both sides' new tests). Production UI rebuilt post-merge (`yarn build` rc=0
     Executor-run `tests/dev/test_dev_stubs.py` 6/6. Integrated ff-only.
   - **Upstream refs:** `baf75740b8` Fix `claude_code` provider exceeding Windows `cmd.exe` command-line limit (#24440)
   - **Rust target:** `rust/crates/mlflow-server/src/assistant_providers/mod.rs` (`build_claude_invocation`, spawn/stdin plumbing; `Invocation.stdin` already exists)
-  - **AC:** The Rust claude_code invocation matches merged Python: argv is `claude -p --input-format text --output-format stream-json --verbose` (+ existing permission-mode/resume flags) with **no** user message or `--append-system-prompt` on the command line; the system prompt is written to a temp file (`mlflow_assistant_*.txt`) passed via `--append-system-prompt-file`, created before spawn and deleted after the stream ends (also on error paths); the user message is written to the CLI's stdin then stdin is closed, and stdin write failures on an already-dead CLI are swallowed so the stderr-derived error surfaces instead of a broken-pipe error. SSE output contract unchanged. The merged dev stub `claude` CLI (`dev/dev_stubs/`, exercised by `tests/dev/test_dev_stubs.py` and e2e `--stub-providers claude`) must accept the Rust invocation identically.
+  - **AC:** The Rust claude*code invocation matches merged Python: argv is `claude -p --input-format text --output-format stream-json --verbose` (+ existing permission-mode/resume flags) with **no** user message or `--append-system-prompt` on the command line; the system prompt is written to a temp file (`mlflow_assistant*\*.txt`) passed via `--append-system-prompt-file`, created before spawn and deleted after the stream ends (also on error paths); the user message is written to the CLI's stdin then stdin is closed, and stdin write failures on an already-dead CLI are swallowed so the stderr-derived error surfaces instead of a broken-pipe error. SSE output contract unchanged. The merged dev stub `claude` CLI (`dev/dev_stubs/`, exercised by `tests/dev/test_dev_stubs.py`and e2e`--stub-providers claude`) must accept the Rust invocation identically.
   - **VER:** `cargo test -p mlflow-server --test assistant_http` + assistant unit tests updated for the new argv/stdin/tempfile contract; recorder differentials `uv run --no-sync pytest -q rust/compliance/recorders/` (assistant streams); e2e assistant phase stays green in T-S9's `bash rust/e2e/run.sh` (stubbed claude).
 
 - [x] T-S6 Online scoring: trace completion buffer for the trace scoring window
@@ -112,7 +112,7 @@ kept both sides' new tests). Production UI rebuilt post-merge (`yarn build` rc=0
     points implemented in `mlflow-genai/src/online.rs` (`trace_window_action`,
     `trace_checkpoint_after_fetch`, env clamp). Independent VER rerun: `cargo test -p mlflow-genai`
     green across all binaries (36 lib + integration suites), `cargo test -p mlflow-server --test
-    online_scoring_scheduler` 8/8. Conformance gate deferred to T-S8/close: blocked on the
+online_scoring_scheduler` 8/8. Conformance gate deferred to T-S8/close: blocked on the
     coordinator head too by merge-induced ledger line-number drift in
     `mlflow/genai/evaluation/base.py` (validate_ledger mismatch, pre-existing; T-S8 regenerates
     via the sanctioned generator). Integrated ff-only.

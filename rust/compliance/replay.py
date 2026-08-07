@@ -850,8 +850,8 @@ Corpus sections map to plan section 3 as follows:
 - gateway_proxy_validation -> 12.8 (GET/POST validation before a closed local target)
 
 Deliberately deferred to follow-up (documented, not covered here): assessments
-FieldMask update paths (3.9) beyond create/get; tracing V2 deprecated adapters (3.7) beyond the search
-smoke; queryTraceMetrics / calculateTraceFilterCorrelation aggregations (3.6);
+FieldMask update paths (3.9) beyond create/get; tracing V2 deprecated adapters (3.7)
+beyond the search smoke; queryTraceMetrics / calculateTraceFilterCorrelation aggregations (3.6);
 multipart artifact create/complete/abort (3.11); full RBAC
 role/permission matrix and after-request search filtering (3.16); workspace
 delete modes RESTRICT/CASCADE/SET_DEFAULT (3.17). These are enumerated as the
