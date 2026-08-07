@@ -10,8 +10,11 @@
 
 #![allow(clippy::too_many_arguments, clippy::cloned_ref_to_slice_refs)]
 
+use std::sync::Arc;
+
 use mlflow_store::{
-    Db, SpanInput, SpanMetricInput, StartTraceInput, TraceTimeRange, TrackingStore,
+    Db, SpanInput, SpanMetricInput, StartTraceInput, TraceTimeRange, TrackingStore, Workspace,
+    WorkspaceStore,
 };
 use mlflow_test_support::TempDb;
 
@@ -78,6 +81,16 @@ fn usage_span(
     parent_span_id: Option<&str>,
     usage: Option<(i64, i64, i64)>,
 ) -> SpanInput {
+    usage_and_cost_span(trace_id, span_id, parent_span_id, usage, None)
+}
+
+fn usage_and_cost_span(
+    trace_id: &str,
+    span_id: &str,
+    parent_span_id: Option<&str>,
+    usage: Option<(i64, i64, i64)>,
+    cost: Option<(f64, f64, f64)>,
+) -> SpanInput {
     let mut attributes = serde_json::Map::new();
     if let Some((input_tokens, output_tokens, total_tokens)) = usage {
         attributes.insert(
@@ -87,6 +100,19 @@ fn usage_span(
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "total_tokens": total_tokens,
+                })
+                .to_string(),
+            ),
+        );
+    }
+    if let Some((input_cost, output_cost, total_cost)) = cost {
+        attributes.insert(
+            "mlflow.llm.cost".to_string(),
+            serde_json::Value::String(
+                serde_json::json!({
+                    "input_cost": input_cost,
+                    "output_cost": output_cost,
+                    "total_cost": total_cost,
                 })
                 .to_string(),
             ),
@@ -114,6 +140,110 @@ fn trace_token_usage(trace: &mlflow_store::TraceInfo) -> Option<serde_json::Valu
     trace
         .metadata("mlflow.trace.tokenUsage")
         .map(|value| serde_json::from_str(value).unwrap())
+}
+
+async fn assert_concurrent_log_spans_preserves_usage(temp_tag: &str, workspace: &str) {
+    let tmp = TempDb::new(temp_tag).await;
+    let s = store(&tmp).await;
+    if workspace != WS {
+        WorkspaceStore::new(s.db().clone(), tmp.uri())
+            .create_workspace(Workspace::named(workspace))
+            .await
+            .unwrap();
+    }
+    let exp = s
+        .create_experiment(workspace, "e", None, &[])
+        .await
+        .unwrap();
+    s.log_spans(
+        workspace,
+        &exp,
+        &[usage_and_cost_span(
+            "tr",
+            "seed",
+            None,
+            Some((100, 0, 100)),
+            Some((1.0, 0.0, 1.0)),
+        )],
+        &[],
+        &[usage_range("tr")],
+    )
+    .await
+    .unwrap();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let first = {
+        let barrier = Arc::clone(&barrier);
+        let s = s.clone();
+        let exp = exp.clone();
+        async move {
+            barrier.wait().await;
+            s.log_spans(
+                workspace,
+                &exp,
+                &[usage_and_cost_span(
+                    "tr",
+                    "first",
+                    None,
+                    Some((200, 0, 200)),
+                    Some((2.0, 0.0, 2.0)),
+                )],
+                &[],
+                &[usage_range("tr")],
+            )
+            .await
+        }
+    };
+    let second = {
+        let barrier = Arc::clone(&barrier);
+        let s = s.clone();
+        let exp = exp.clone();
+        async move {
+            barrier.wait().await;
+            s.log_spans(
+                workspace,
+                &exp,
+                &[usage_and_cost_span(
+                    "tr",
+                    "second",
+                    None,
+                    Some((300, 0, 300)),
+                    Some((3.0, 0.0, 3.0)),
+                )],
+                &[],
+                &[usage_range("tr")],
+            )
+            .await
+        }
+    };
+    let (first_result, second_result) =
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            tokio::join!(first, second)
+        })
+        .await
+        .expect("concurrent log_spans calls timed out");
+    first_result.unwrap();
+    second_result.unwrap();
+
+    let trace = s.get_trace_info(workspace, "tr").await.unwrap();
+    assert_eq!(
+        trace_token_usage(&trace),
+        Some(serde_json::json!({
+            "input_tokens": 600,
+            "output_tokens": 0,
+            "total_tokens": 600,
+        }))
+    );
+    assert_eq!(
+        trace
+            .metadata("mlflow.trace.cost")
+            .map(|value| serde_json::from_str::<serde_json::Value>(value).unwrap()),
+        Some(serde_json::json!({
+            "input_cost": 6.0,
+            "output_cost": 0.0,
+            "total_cost": 6.0,
+        }))
+    );
 }
 
 /// A time-range aggregate derived from a single span (ns→ms floor division).
@@ -411,6 +541,16 @@ async fn log_spans_deduplicates_rollup_parent_token_usage_across_batches() {
             "parent_first={parent_first}"
         );
     }
+}
+
+#[tokio::test]
+async fn concurrent_log_spans_calls_do_not_lose_token_usage() {
+    assert_concurrent_log_spans_preserves_usage("usage_concurrent", WS).await;
+}
+
+#[tokio::test]
+async fn concurrent_log_spans_calls_do_not_lose_token_usage_in_workspace() {
+    assert_concurrent_log_spans_preserves_usage("usage_concurrent_workspace", "team-a").await;
 }
 
 #[tokio::test]

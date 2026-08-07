@@ -1148,10 +1148,15 @@ impl TrackingStore {
         Ok(rows.into_iter().collect())
     }
 
-    /// Run a trace-write closure, retrying on DB deadlocks
+    /// Run a trace-write closure, retrying on DB deadlocks and SQLite writer
+    /// lock conflicts
     /// (`_run_with_deadlock_retry`, `sqlalchemy_store.py:3469`). Retries up to
     /// [`TRACE_WRITE_MAX_DEADLOCK_RETRIES`] times with exponential backoff +
-    /// jitter; only errors whose message contains "deadlock" are retried.
+    /// jitter. PostgreSQL/MySQL deadlocks are identified by their error text.
+    /// SQLite has one writer and no row-level `FOR UPDATE`; when two deferred
+    /// transactions race to upgrade from readers, the loser reports
+    /// `database is locked`. Retrying the whole transaction after the winner
+    /// commits refreshes the read view and provides the same serialization.
     pub(crate) async fn run_with_deadlock_retry<T, F, Fut>(
         &self,
         mut op: F,
@@ -1165,8 +1170,11 @@ impl TrackingStore {
             match op().await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    let is_deadlock = e.message.to_lowercase().contains("deadlock");
-                    if !is_deadlock || attempt >= TRACE_WRITE_MAX_DEADLOCK_RETRIES {
+                    let message = e.message.to_lowercase();
+                    let retryable = message.contains("deadlock")
+                        || message.contains("database is locked")
+                        || message.contains("database table is locked");
+                    if !retryable || attempt >= TRACE_WRITE_MAX_DEADLOCK_RETRIES {
                         return Err(e);
                     }
                     // Exponential backoff with jitter, matching Python's

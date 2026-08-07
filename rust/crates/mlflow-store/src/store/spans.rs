@@ -16,9 +16,9 @@
 //! semantics: bulk span/metric upsert, atomic min-start / max-end trace time
 //! update (skipped when `start_trace` finalized the trace), span-derived trace
 //! status, and the `SPANS_LOCATION = TRACKING_STORE` tag. Trace-level token
-//! usage is recomputed here from the complete stored span tree so rollup parent
-//! spans do not double-count their children, including across calls. Cost trace
-//! metadata remains caller-provided.
+//! usage and cost are recomputed here from the complete stored span tree so
+//! rollup parent spans do not double-count their children, including across
+//! calls.
 //!
 //! ## Lazy content reads (commit `d5dce6e8f`)
 //!
@@ -47,10 +47,13 @@ use crate::schema::traces::{
 const MAX_SPAN_ATTRIBUTE_KEY_CHARS: usize = 250;
 const MAX_SPAN_ATTRIBUTE_VALUE_CHARS: usize = 500;
 const SPAN_CHAT_USAGE: &str = "mlflow.chat.tokenUsage";
+const SPAN_LLM_COST: &str = "mlflow.llm.cost";
 const TRACE_TOKEN_USAGE: &str = "mlflow.trace.tokenUsage";
+const TRACE_COST: &str = "mlflow.trace.cost";
 const TOKEN_USAGE_KEYS: &[&str] = &["input_tokens", "output_tokens", "total_tokens"];
 const OPTIONAL_TOKEN_USAGE_KEYS: &[&str] =
     &["cache_read_input_tokens", "cache_creation_input_tokens"];
+const COST_KEYS: &[&str] = &["input_cost", "output_cost", "total_cost"];
 
 /// A prepared span row to upsert (the store-level shape; the OTLP→row
 /// translation is a Phase-3 concern). `duration_ns` is never set — it is a
@@ -141,6 +144,11 @@ impl TrackingStore {
             .filter(|span| span_usage(&span.content).is_some())
             .map(|span| span.trace_id.as_str())
             .collect::<BTreeSet<_>>();
+        let traces_with_cost = spans
+            .iter()
+            .filter(|span| span_cost(&span.content).is_some())
+            .map(|span| span.trace_id.as_str())
+            .collect::<BTreeSet<_>>();
 
         // Verify the experiment is in the workspace (mirrors get_experiment in
         // Python's Phase 2). A missing/foreign experiment errors like Python.
@@ -155,7 +163,8 @@ impl TrackingStore {
         let mut tx = self.db().begin_tx().await.map_err(internal)?;
 
         // Phase 1: which traces already exist, and are they finalized?
-        let existing = fetch_existing_trace_status(&mut tx, dialect, &trace_ids).await?;
+        let existing = fetch_existing_trace_status(&mut tx, dialect, workspace, &trace_ids).await?;
+        let preexisting_trace_ids = existing.keys().cloned().collect::<BTreeSet<_>>();
 
         // Phase 2: create trace_info rows for missing traces from the aggregate.
         for trace_id in &trace_ids {
@@ -169,6 +178,14 @@ impl TrackingStore {
             })?;
             create_trace_info_from_spans(&mut tx, dialect, trace_id, exp_id, range).await?;
         }
+
+        // Serialize the read-modify-write of trace-level aggregates for every
+        // trace that existed before this call. Lock trace_info directly (the
+        // workspace-scoped existence query above already resolved the IDs),
+        // in request_id order, and before touching any span rows. Going
+        // through experiments here would also lock the experiment row on some
+        // backends and unnecessarily serialize unrelated traces.
+        lock_preexisting_trace_rows(&mut tx, dialect, &preexisting_trace_ids).await?;
 
         // Writer side of the archival generation guard. This conditional bump
         // and every span mutation share the transaction: a finalize that won
@@ -197,8 +214,40 @@ impl TrackingStore {
             let has_authoritative_usage = existing
                 .get(trace_id)
                 .is_some_and(|status| status.finalized && status.has_token_usage);
-            if traces_with_usage.contains(trace_id.as_str()) && !has_authoritative_usage {
-                recompute_trace_token_usage(&mut tx, dialect, trace_id).await?;
+            let has_authoritative_cost = existing
+                .get(trace_id)
+                .is_some_and(|status| status.finalized && status.has_cost);
+            let recompute_usage =
+                traces_with_usage.contains(trace_id.as_str()) && !has_authoritative_usage;
+            let recompute_cost =
+                traces_with_cost.contains(trace_id.as_str()) && !has_authoritative_cost;
+            if recompute_usage || recompute_cost {
+                if preexisting_trace_ids.contains(trace_id) {
+                    // The stored-span recompute is only performed for rows
+                    // locked above. MySQL additionally needs this to be a
+                    // locking read so REPEATABLE READ observes spans committed
+                    // by the previous trace-row lock holder.
+                    recompute_trace_aggregates(
+                        &mut tx,
+                        dialect,
+                        trace_id,
+                        recompute_usage,
+                        recompute_cost,
+                    )
+                    .await?;
+                } else {
+                    // A trace created by this transaction is invisible to
+                    // other writers, so its batch-local aggregate is
+                    // authoritative and needs neither a row lock nor a stored
+                    // span re-read.
+                    let nodes = batch_trace_aggregation_nodes(spans, trace_id);
+                    if let (true, Some(usage)) = (recompute_usage, aggregate_token_usage(&nodes)) {
+                        write_trace_token_usage(&mut tx, dialect, trace_id, &usage).await?;
+                    }
+                    if let (true, Some(cost)) = (recompute_cost, aggregate_cost(&nodes)) {
+                        write_trace_cost(&mut tx, dialect, trace_id, &cost).await?;
+                    }
+                }
             }
 
             // Mark span payloads as stored in the tracking store.
@@ -208,6 +257,50 @@ impl TrackingStore {
         tx.commit().await.map_err(super::traces::map_db_err_pub)?;
         Ok(())
     }
+}
+
+/// Lock pre-existing trace rows in a stable order before any span writes.
+///
+/// PostgreSQL and MySQL provide row locks with `FOR UPDATE`. SQLite has no row
+/// lock syntax and already permits only one writer, so the query remains a
+/// plain ordered read there. The query intentionally addresses `trace_info`
+/// directly: workspace scoping was enforced while resolving `trace_ids`, and
+/// joining experiments here would broaden the lock to the experiment row.
+async fn lock_preexisting_trace_rows(
+    tx: &mut Tx<'_>,
+    dialect: Dialect,
+    trace_ids: &BTreeSet<String>,
+) -> Result<(), MlflowError> {
+    if trace_ids.is_empty() {
+        return Ok(());
+    }
+    let mut binds = Vec::with_capacity(trace_ids.len());
+    let placeholders = trace_ids
+        .iter()
+        .enumerate()
+        .map(|(index, trace_id)| {
+            binds.push(Val::Text(trace_id.clone()));
+            dialect.placeholder(index + 1)
+        })
+        .collect::<Vec<_>>();
+    let sql = trace_row_lock_sql(dialect, &placeholders);
+    tx.fetch_all(&sql, &binds, |row| row.get_string("request_id"))
+        .await
+        .map_err(super::traces::map_db_err_pub)?;
+    Ok(())
+}
+
+fn trace_row_lock_sql(dialect: Dialect, placeholders: &[String]) -> String {
+    let lock = if dialect == Dialect::Sqlite {
+        ""
+    } else {
+        " FOR UPDATE"
+    };
+    format!(
+        "SELECT request_id FROM {TRACE_INFO} WHERE request_id IN ({}) \
+         ORDER BY request_id{lock}",
+        placeholders.join(", ")
+    )
 }
 
 async fn advance_db_payload_generations(
@@ -257,20 +350,22 @@ async fn advance_db_payload_generations(
 struct TraceStatusRow {
     finalized: bool,
     has_token_usage: bool,
+    has_cost: bool,
 }
 
-/// Batch-read which of `trace_ids` already exist and whether each carries the
-/// `TRACE_INFO_FINALIZED` metadata flag.
+/// Batch-read which of `trace_ids` already exist, whether each carries the
+/// `TRACE_INFO_FINALIZED` flag, and which authoritative aggregates are set.
 async fn fetch_existing_trace_status(
     tx: &mut Tx<'_>,
     dialect: Dialect,
+    workspace: &str,
     trace_ids: &BTreeSet<String>,
 ) -> Result<HashMap<String, TraceStatusRow>, MlflowError> {
     if trace_ids.is_empty() {
         return Ok(HashMap::new());
     }
     let ids: Vec<&String> = trace_ids.iter().collect();
-    let mut binds: Vec<Val> = Vec::with_capacity(ids.len() + 2);
+    let mut binds: Vec<Val> = Vec::with_capacity(ids.len() + 4);
     // The metadata-key placeholders appear first in the SQL text (in the
     // correlated subqueries), so they must be bound first — positional
     // placeholders (`?`) bind in SQL-text order on SQLite/MySQL.
@@ -278,21 +373,29 @@ async fn fetch_existing_trace_status(
     let flag_ph = dialect.placeholder(1);
     binds.push(Val::Text(TRACE_TOKEN_USAGE.to_string()));
     let usage_ph = dialect.placeholder(2);
+    binds.push(Val::Text(TRACE_COST.to_string()));
+    let cost_ph = dialect.placeholder(3);
     let phs: Vec<String> = ids
         .iter()
         .enumerate()
         .map(|(i, id)| {
             binds.push(Val::Text((*id).clone()));
-            dialect.placeholder(i + 3)
+            dialect.placeholder(i + 4)
         })
         .collect();
+    binds.push(Val::Text(workspace.to_string()));
+    let workspace_ph = dialect.placeholder(ids.len() + 4);
     let sql = format!(
         "SELECT ti.request_id, \
          (SELECT COUNT(*) FROM trace_request_metadata m \
           WHERE m.request_id = ti.request_id AND m.\"key\" = {flag_ph}) AS finalized, \
          (SELECT COUNT(*) FROM trace_request_metadata m \
-          WHERE m.request_id = ti.request_id AND m.\"key\" = {usage_ph}) AS has_token_usage \
-         FROM {TRACE_INFO} ti WHERE ti.request_id IN ({})",
+          WHERE m.request_id = ti.request_id AND m.\"key\" = {usage_ph}) AS has_token_usage, \
+         (SELECT COUNT(*) FROM trace_request_metadata m \
+          WHERE m.request_id = ti.request_id AND m.\"key\" = {cost_ph}) AS has_cost \
+         FROM {TRACE_INFO} ti WHERE ti.request_id IN ({}) \
+         AND ti.experiment_id IN (SELECT experiment_id FROM experiments \
+         WHERE workspace = {workspace_ph})",
         phs.join(", ")
     );
     let rows = tx
@@ -301,18 +404,20 @@ async fn fetch_existing_trace_status(
                 r.get_string("request_id")?,
                 r.get_i64("finalized")? > 0,
                 r.get_i64("has_token_usage")? > 0,
+                r.get_i64("has_cost")? > 0,
             ))
         })
         .await
         .map_err(internal)?;
     Ok(rows
         .into_iter()
-        .map(|(id, finalized, has_token_usage)| {
+        .map(|(id, finalized, has_token_usage, has_cost)| {
             (
                 id,
                 TraceStatusRow {
                     finalized,
                     has_token_usage,
+                    has_cost,
                 },
             )
         })
@@ -320,10 +425,11 @@ async fn fetch_existing_trace_status(
 }
 
 #[derive(Debug)]
-struct UsageNode {
+struct SpanAggregationNode {
     span_id: String,
     parent_span_id: Option<String>,
     usage: Option<serde_json::Map<String, serde_json::Value>>,
+    cost: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -333,6 +439,30 @@ struct TokenUsage {
     total_tokens: i64,
     cache_read_input_tokens: Option<i64>,
     cache_creation_input_tokens: Option<i64>,
+}
+
+#[derive(Debug, Default, PartialEq)]
+struct Cost {
+    input_cost: f64,
+    output_cost: f64,
+    total_cost: f64,
+}
+
+impl Cost {
+    fn add(&mut self, cost: &serde_json::Map<String, serde_json::Value>) {
+        self.input_cost += cost_f64(cost, COST_KEYS[0]);
+        self.output_cost += cost_f64(cost, COST_KEYS[1]);
+        self.total_cost += cost_f64(cost, COST_KEYS[2]);
+    }
+
+    fn metadata_json(&self) -> String {
+        format!(
+            "{{\"input_cost\": {}, \"output_cost\": {}, \"total_cost\": {}}}",
+            serde_json::to_string(&self.input_cost).expect("finite cost"),
+            serde_json::to_string(&self.output_cost).expect("finite cost"),
+            serde_json::to_string(&self.total_cost).expect("finite cost"),
+        )
+    }
 }
 
 impl TokenUsage {
@@ -388,6 +518,12 @@ fn usage_i64(usage: &serde_json::Map<String, serde_json::Value>, key: &str) -> i
         .unwrap_or(0)
 }
 
+fn cost_f64(cost: &serde_json::Map<String, serde_json::Value>, key: &str) -> f64 {
+    cost.get(key)
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(0.0)
+}
+
 fn add_optional_usage(
     total: &mut Option<i64>,
     usage: &serde_json::Map<String, serde_json::Value>,
@@ -398,11 +534,11 @@ fn add_optional_usage(
     }
 }
 
-fn span_usage(content: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+fn span_attribute(content: &str, key: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
     let value = serde_json::from_str::<serde_json::Value>(content)
         .ok()?
         .get("attributes")?
-        .get(SPAN_CHAT_USAGE)?
+        .get(key)?
         .clone();
     match value {
         serde_json::Value::Object(usage) => Some(usage),
@@ -413,7 +549,15 @@ fn span_usage(content: &str) -> Option<serde_json::Map<String, serde_json::Value
     }
 }
 
-fn aggregate_token_usage(nodes: &[UsageNode]) -> Option<TokenUsage> {
+fn span_usage(content: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    span_attribute(content, SPAN_CHAT_USAGE)
+}
+
+fn span_cost(content: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    span_attribute(content, SPAN_LLM_COST)
+}
+
+fn aggregate_token_usage(nodes: &[SpanAggregationNode]) -> Option<TokenUsage> {
     let node_ids = nodes
         .iter()
         .map(|node| node.span_id.as_str())
@@ -459,34 +603,116 @@ fn aggregate_token_usage(nodes: &[UsageNode]) -> Option<TokenUsage> {
     has_usage.then_some(totals)
 }
 
-async fn recompute_trace_token_usage(
+fn aggregate_cost(nodes: &[SpanAggregationNode]) -> Option<Cost> {
+    let node_ids = nodes
+        .iter()
+        .map(|node| node.span_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut children = HashMap::<&str, Vec<usize>>::new();
+    let mut roots = Vec::new();
+    for (index, node) in nodes.iter().enumerate() {
+        if let Some(parent) = node
+            .parent_span_id
+            .as_deref()
+            .filter(|parent| node_ids.contains(parent))
+        {
+            children.entry(parent).or_default().push(index);
+        } else {
+            roots.push(index);
+        }
+    }
+
+    let mut totals = Cost::default();
+    let mut has_cost = false;
+    let mut stack = roots
+        .into_iter()
+        .map(|index| (index, false))
+        .collect::<Vec<_>>();
+    while let Some((index, ancestor_has_cost)) = stack.pop() {
+        let node = &nodes[index];
+        let node_has_cost = node.cost.is_some();
+        if !ancestor_has_cost {
+            if let Some(cost) = &node.cost {
+                totals.add(cost);
+                has_cost = true;
+            }
+        }
+        let descendants_have_cost = ancestor_has_cost || node_has_cost;
+        stack.extend(
+            children
+                .get(node.span_id.as_str())
+                .into_iter()
+                .flatten()
+                .map(|child| (*child, descendants_have_cost)),
+        );
+    }
+    has_cost.then_some(totals)
+}
+
+fn batch_trace_aggregation_nodes(spans: &[SpanInput], trace_id: &str) -> Vec<SpanAggregationNode> {
+    spans
+        .iter()
+        .filter(|span| span.trace_id == trace_id)
+        .map(|span| SpanAggregationNode {
+            span_id: span.span_id.clone(),
+            parent_span_id: span.parent_span_id.clone(),
+            usage: span_usage(&span.content),
+            cost: span_cost(&span.content),
+        })
+        .collect()
+}
+
+async fn recompute_trace_aggregates(
     tx: &mut Tx<'_>,
     dialect: Dialect,
     trace_id: &str,
+    recompute_usage: bool,
+    recompute_cost: bool,
 ) -> Result<(), MlflowError> {
     let rows = tx
         .fetch_all(
-            &format!(
-                "SELECT span_id, parent_span_id, content FROM {SPANS} \
-                 WHERE trace_id = {} AND content <> ''",
-                dialect.placeholder(1)
-            ),
+            &stored_span_rows_sql(dialect),
             &[Val::Text(trace_id.to_string())],
             |row| {
                 let content = row.get_string("content")?;
-                Ok(UsageNode {
+                Ok(SpanAggregationNode {
                     span_id: row.get_string("span_id")?,
                     parent_span_id: row.get_opt_string("parent_span_id")?,
                     usage: span_usage(&content),
+                    cost: span_cost(&content),
                 })
             },
         )
         .await
         .map_err(internal)?;
-    let Some(usage) = aggregate_token_usage(&rows) else {
-        return Ok(());
-    };
+    if let (true, Some(usage)) = (recompute_usage, aggregate_token_usage(&rows)) {
+        write_trace_token_usage(tx, dialect, trace_id, &usage).await?;
+    }
+    if let (true, Some(cost)) = (recompute_cost, aggregate_cost(&rows)) {
+        write_trace_cost(tx, dialect, trace_id, &cost).await?;
+    }
+    Ok(())
+}
 
+fn stored_span_rows_sql(dialect: Dialect) -> String {
+    let lock = if dialect == Dialect::MySql {
+        " FOR UPDATE"
+    } else {
+        ""
+    };
+    format!(
+        "SELECT span_id, parent_span_id, content FROM {SPANS} \
+         WHERE trace_id = {} AND content <> ''{lock}",
+        dialect.placeholder(1)
+    )
+}
+
+async fn write_trace_token_usage(
+    tx: &mut Tx<'_>,
+    dialect: Dialect,
+    trace_id: &str,
+    usage: &TokenUsage,
+) -> Result<(), MlflowError> {
     super::traces::upsert_trace_child(
         tx,
         dialect,
@@ -502,6 +728,23 @@ async fn recompute_trace_token_usage(
         }
     }
     Ok(())
+}
+
+async fn write_trace_cost(
+    tx: &mut Tx<'_>,
+    dialect: Dialect,
+    trace_id: &str,
+    cost: &Cost,
+) -> Result<(), MlflowError> {
+    super::traces::upsert_trace_child(
+        tx,
+        dialect,
+        TRACE_REQUEST_METADATA,
+        trace_id,
+        TRACE_COST,
+        Val::Text(cost.metadata_json()),
+    )
+    .await
 }
 
 /// Create a `trace_info` row for a trace observed only via its spans (Python's
@@ -867,4 +1110,28 @@ pub(crate) async fn load_spans_for_traces(
         map.entry(span.trace_id.clone()).or_default().push(span);
     }
     Ok(map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trace_row_lock_sql_is_ordered_direct_and_backend_appropriate() {
+        for dialect in [Dialect::Sqlite, Dialect::Postgres, Dialect::MySql] {
+            let sql =
+                trace_row_lock_sql(dialect, &[dialect.placeholder(1), dialect.placeholder(2)]);
+            assert!(sql.contains("ORDER BY request_id"));
+            assert!(!sql.contains("JOIN"));
+            assert_eq!(sql.contains("FOR UPDATE"), dialect != Dialect::Sqlite);
+        }
+    }
+
+    #[test]
+    fn stored_span_rows_use_locking_read_only_on_mysql() {
+        for dialect in [Dialect::Sqlite, Dialect::Postgres, Dialect::MySql] {
+            let sql = stored_span_rows_sql(dialect);
+            assert_eq!(sql.contains("FOR UPDATE"), dialect == Dialect::MySql);
+        }
+    }
 }
