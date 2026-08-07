@@ -113,7 +113,21 @@ kept both sides' new tests). Production UI rebuilt post-merge (`yarn build` rc=0
   - **AC:** Workspace name validation accepts names matching `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` (length 2–63, reserved names unchanged) — i.e. `team--a` is now valid; all previously-invalid cases (uppercase, leading/trailing hyphen, too short/long, reserved) still rejected with unchanged error messages. Rust regex and any duplicated validation (auth/workspace API layer) updated together; UI-side validation comes free from the merged JS build.
   - **VER:** `cargo test -p mlflow-store` workspace-validator tests updated (consecutive-hyphen acceptance case); unary corpus case: createWorkspace with `a--b` succeeds and round-trips via getWorkspace; `uv run --no-sync python rust/compliance/replay.py` green.
 
-- [ ] T-S8 Verify-only cluster: server-info constants, model catalogs, scorer_ensemble, basic-auth after-request map
+- [x] T-S8 Verify-only cluster: server-info constants, model catalogs, scorer_ensemble, basic-auth after-request map
+  - **DONE 2026-08-07:** commit `4b4a87548` (executor: Codex, rebased onto post-T-S4 head;
+    coordinator-verified). (1) `/server-info` differential-clean (pure Python refactor).
+    (2) Supported-models goldens re-pinned to the merged two-commit catalog end state (all-models
+    1,034,679 bytes; gemini 19,331). (3) Ensemble scorers: transport-only
+    `ensemble_scorer_data` variant added to the Rust `SerializedScorer` parser (invoke gate
+    rejects it as UnsupportedScorer exactly like decorator scorers; execution stays Python-owned);
+    corpus gained registration/fetch/invoke cases; inventory ledger/providers/scorers regenerated
+    via the sanctioned generator — this also cleared the merge-induced ledger drift that blocked
+    conformance during T-S6. (4) Auth after-request: Rust's explicit 21-entry mapping
+    (auth_middleware/after_request.rs:152, routes generated only from it in path_matchers.rs:708)
+    pairs 1:1 with Python's post-fix 21 declared handlers; no leaked extras. Independent VER rerun
+    after rebase: validate_ledger RC=0, `gateway_discovery_http` 7/7, replay
+    server_info+gateway+scorers+invoke RC=0, conformance `--profile required` RC=0 on sqlite AND
+    postgres (coordinator-run docker postgres:16). Integrated ff-only.
   - **Upstream refs:** `94b88ab7bd` Centralize Python `/server-info` fetching and caching (#24678); `4b78cee603` Add 13 new models to Databricks AI Gateway model catalog (#24893); `79b5ab6cce` Update model catalog from upstream sources (#24889); `edd6d31a4b` Add scorer_ensemble primitive (#24749); `2b7c75d7fc` Fix basic-auth after-request handler registration (#24322)
   - **Rust target:** `rust/crates/mlflow-server/src/server_info.rs` (verify), `rust/crates/mlflow-server/build.rs` model-catalog generation from merged `mlflow/utils/model_catalog/*.json` (rebuild), `rust/crates/mlflow-server/src/invoke.rs` + scorer registration surface (verify ensemble round-trip), `rust/crates/mlflow-auth` after-request coverage (verify)
   - **AC:** (1) `/server-info` response keys/values unchanged by the Python constant extraction (pure refactor) — corpus stays green with zero diffs. (2) Rust-served supported-models/model-catalog data equals the merged end state of both catalog commits after a rebuild (build.rs re-embeds the JSON; goldens re-pinned if sizes shift). (3) `scorer_ensemble` is a Python-side scorer primitive executed by the Python worker: registering an ensemble scorer (serialized scorer JSON) through the Rust server's scorer registration/invoke gates round-trips identically to Python (no server-side rejection of the new `kind`/serialization fields); no Rust reimplementation of ensemble semantics. (4) Python's after-request leak fix (`AFTER_REQUEST_HANDLERS` dict-comprehension guard) has no Rust analogue — Rust's auth middleware declares filters explicitly; confirm no Rust route applies an after-request permission filter to a path Python now excludes (evidence: route/filter table review or auth conformance rows).
