@@ -14,6 +14,8 @@ use crate::{
 
 pub(crate) const TRACE_CHECKPOINT_TAG: &str = "mlflow.latestOnlineScoring.trace.checkpoint";
 pub(crate) const SESSION_CHECKPOINT_TAG: &str = "mlflow.latestOnlineScoring.session.checkpoint";
+const TRACE_COMPLETION_BUFFER_SECONDS_ENV: &str =
+    "MLFLOW_ONLINE_SCORING_DEFAULT_TRACE_COMPLETION_BUFFER_SECONDS";
 const ONLINE_SESSION_ID: &str = "mlflow.assessment.onlineScoringSessionId";
 const TRACE_SESSION: &str = "mlflow.trace.session";
 const MAX_LOOKBACK_MS: i64 = 60 * 60 * 1000;
@@ -48,10 +50,84 @@ struct ConfiguredScorer {
     filter: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 struct TraceCheckpoint {
     timestamp_ms: i64,
     trace_id: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TraceWindowAction {
+    ResetFutureCheckpoint(TraceCheckpoint),
+    Skip,
+    Process { minimum: i64, maximum: i64 },
+}
+
+fn trace_completion_buffer_seconds_from(value: Option<&str>) -> Result<i64, EngineError> {
+    value.map_or(Ok(300), |value| {
+        value
+            .parse::<i64>()
+            .map(|value| value.max(0))
+            .map_err(|error| {
+                EngineError::InvalidParams(format!(
+                "Failed to convert {value:?} for {TRACE_COMPLETION_BUFFER_SECONDS_ENV}: {error}"
+            ))
+            })
+    })
+}
+
+fn trace_completion_buffer_seconds() -> Result<i64, EngineError> {
+    let value = std::env::var(TRACE_COMPLETION_BUFFER_SECONDS_ENV).ok();
+    trace_completion_buffer_seconds_from(value.as_deref())
+}
+
+fn trace_window_action(
+    now: i64,
+    completion_buffer_seconds: i64,
+    checkpoint: Option<&TraceCheckpoint>,
+) -> TraceWindowAction {
+    if checkpoint.is_some_and(|checkpoint| checkpoint.timestamp_ms > now) {
+        return TraceWindowAction::ResetFutureCheckpoint(TraceCheckpoint {
+            timestamp_ms: now,
+            trace_id: None,
+        });
+    }
+
+    let maximum = now.saturating_sub(completion_buffer_seconds.max(0).saturating_mul(1000));
+    if checkpoint.is_some_and(|checkpoint| checkpoint.timestamp_ms >= maximum) {
+        return TraceWindowAction::Skip;
+    }
+
+    let lookback_minimum = maximum.saturating_sub(MAX_LOOKBACK_MS);
+    let minimum = checkpoint.map_or(lookback_minimum, |checkpoint| {
+        checkpoint.timestamp_ms.max(lookback_minimum)
+    });
+    TraceWindowAction::Process { minimum, maximum }
+}
+
+fn trace_checkpoint_after_fetch<'a>(
+    maximum: i64,
+    task_timestamps: &HashMap<String, i64>,
+    fetched_trace_ids: impl IntoIterator<Item = &'a str>,
+) -> TraceCheckpoint {
+    fetched_trace_ids
+        .into_iter()
+        .filter_map(|trace_id| {
+            task_timestamps
+                .get(trace_id)
+                .map(|timestamp_ms| (*timestamp_ms, trace_id.to_string()))
+        })
+        .max()
+        .map_or(
+            TraceCheckpoint {
+                timestamp_ms: maximum,
+                trace_id: None,
+            },
+            |(timestamp_ms, trace_id)| TraceCheckpoint {
+                timestamp_ms,
+                trace_id: Some(trace_id),
+            },
+        )
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -70,9 +146,15 @@ pub(crate) async fn run_online_trace_job(
         .current_time_ms
         .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
     let checkpoint = read_trace_checkpoint(&client, &params.experiment_id).await?;
-    let minimum = checkpoint.as_ref().map_or(now - MAX_LOOKBACK_MS, |value| {
-        value.timestamp_ms.max(now - MAX_LOOKBACK_MS)
-    });
+    let (minimum, maximum) =
+        match trace_window_action(now, trace_completion_buffer_seconds()?, checkpoint.as_ref()) {
+            TraceWindowAction::ResetFutureCheckpoint(checkpoint) => {
+                persist_trace_checkpoint(&client, &params.experiment_id, &checkpoint).await?;
+                return Ok(Value::Null);
+            }
+            TraceWindowAction::Skip => return Ok(Value::Null),
+            TraceWindowAction::Process { minimum, maximum } => (minimum, maximum),
+        };
     let base_filter = "metadata.mlflow.sourceRun IS NULL";
     let mut tasks: BTreeMap<String, (i64, Vec<ConfiguredScorer>)> = BTreeMap::new();
 
@@ -81,8 +163,9 @@ pub(crate) async fn run_online_trace_job(
             || base_filter.to_string(),
             |filter| format!("{base_filter} AND {filter}"),
         );
-        let time_filter =
-            format!("trace.timestamp_ms >= {minimum} AND trace.timestamp_ms <= {now} AND {filter}");
+        let time_filter = format!(
+            "trace.timestamp_ms >= {minimum} AND trace.timestamp_ms <= {maximum} AND {filter}"
+        );
         let mut infos = client
             .search_trace_infos(
                 &params.experiment_id,
@@ -128,7 +211,7 @@ pub(crate) async fn run_online_trace_job(
             &client,
             &params.experiment_id,
             &TraceCheckpoint {
-                timestamp_ms: now,
+                timestamp_ms: maximum,
                 trace_id: None,
             },
         )
@@ -136,6 +219,10 @@ pub(crate) async fn run_online_trace_job(
         return Ok(Value::Null);
     }
 
+    let task_timestamps = ordered
+        .iter()
+        .map(|(trace_id, (timestamp_ms, _))| (trace_id.clone(), *timestamp_ms))
+        .collect::<HashMap<_, _>>();
     let trace_ids = ordered.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
     let traces = client.fetch_traces(&trace_ids).await?;
     let trace_map = traces
@@ -167,21 +254,11 @@ pub(crate) async fn run_online_trace_job(
         let _ = result;
     }
 
-    let checkpoint = traces
-        .iter()
-        .max_by(|left, right| {
-            (left.timestamp_ms, &left.trace_id).cmp(&(right.timestamp_ms, &right.trace_id))
-        })
-        .map_or(
-            TraceCheckpoint {
-                timestamp_ms: now,
-                trace_id: None,
-            },
-            |trace| TraceCheckpoint {
-                timestamp_ms: trace.timestamp_ms,
-                trace_id: Some(trace.trace_id.clone()),
-            },
-        );
+    let checkpoint = trace_checkpoint_after_fetch(
+        maximum,
+        &task_timestamps,
+        traces.iter().map(|trace| trace.trace_id.as_str()),
+    );
     persist_trace_checkpoint(&client, &params.experiment_id, &checkpoint).await?;
     Ok(Value::Null)
 }
@@ -700,6 +777,109 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&checkpoint).unwrap(),
             json!({"timestamp_ms": 123, "trace_id": "tr-1"})
+        );
+    }
+
+    #[test]
+    fn trace_window_is_measured_from_the_buffered_upper_bound() {
+        assert_eq!(
+            trace_window_action(10_000_000, 120, None),
+            TraceWindowAction::Process {
+                minimum: 6_280_000,
+                maximum: 9_880_000,
+            }
+        );
+
+        assert_eq!(
+            trace_window_action(10_000_000, 7_200, None),
+            TraceWindowAction::Process {
+                minimum: -800_000,
+                maximum: 2_800_000,
+            }
+        );
+    }
+
+    #[test]
+    fn trace_window_uses_checkpoint_and_clamps_negative_buffer() {
+        let checkpoint = TraceCheckpoint {
+            timestamp_ms: 9_900_000,
+            trace_id: None,
+        };
+        assert_eq!(
+            trace_window_action(10_000_000, -10, Some(&checkpoint)),
+            TraceWindowAction::Process {
+                minimum: 9_900_000,
+                maximum: 10_000_000,
+            }
+        );
+        assert_eq!(trace_completion_buffer_seconds_from(None).unwrap(), 300);
+        assert_eq!(
+            trace_completion_buffer_seconds_from(Some("-10")).unwrap(),
+            0
+        );
+        assert_eq!(
+            trace_completion_buffer_seconds_from(Some("120")).unwrap(),
+            120
+        );
+    }
+
+    #[test]
+    fn future_trace_checkpoint_is_reset_to_injected_current_time() {
+        let checkpoint = TraceCheckpoint {
+            timestamp_ms: 20_000_000,
+            trace_id: Some("tr-future".to_string()),
+        };
+        assert_eq!(
+            trace_window_action(10_000_000, 300, Some(&checkpoint)),
+            TraceWindowAction::ResetFutureCheckpoint(TraceCheckpoint {
+                timestamp_ms: 10_000_000,
+                trace_id: None,
+            })
+        );
+    }
+
+    #[test]
+    fn non_advancing_trace_window_skips_without_replacing_tie_breaker() {
+        let checkpoint = TraceCheckpoint {
+            timestamp_ms: 9_700_000,
+            trace_id: Some("tr-boundary".to_string()),
+        };
+        assert_eq!(
+            trace_window_action(10_000_000, 300, Some(&checkpoint)),
+            TraceWindowAction::Skip
+        );
+        assert_eq!(checkpoint.trace_id.as_deref(), Some("tr-boundary"));
+
+        let ahead = TraceCheckpoint {
+            timestamp_ms: 9_700_001,
+            trace_id: Some("tr-ahead".to_string()),
+        };
+        assert_eq!(
+            trace_window_action(10_000_000, 300, Some(&ahead)),
+            TraceWindowAction::Skip
+        );
+    }
+
+    #[test]
+    fn trace_checkpoint_uses_search_timestamps_and_trace_id_tie_breaker() {
+        let task_timestamps = HashMap::from([
+            ("tr-001".to_string(), 1_500),
+            ("tr-002".to_string(), 1_500),
+            ("tr-003".to_string(), 1_400),
+        ]);
+        assert_eq!(
+            trace_checkpoint_after_fetch(10_000, &task_timestamps, ["tr-001", "tr-002", "tr-003"]),
+            TraceCheckpoint {
+                timestamp_ms: 1_500,
+                trace_id: Some("tr-002".to_string()),
+            }
+        );
+        assert_eq!(
+            trace_checkpoint_after_fetch(10_000, &task_timestamps, std::iter::empty()),
+            TraceCheckpoint {
+                timestamp_ms: 10_000,
+                trace_id: None,
+            }
         );
     }
 }
