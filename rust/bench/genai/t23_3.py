@@ -1418,6 +1418,9 @@ def matrix(args: argparse.Namespace) -> int:
     )
     cells = [cell for cell in all_cells if not args.cells or cell.slug in args.cells]
     output_dir.mkdir(parents=True, exist_ok=True)
+    if args.summary_only:
+        (output_dir / "t23_3_summary.md").write_text(summary_markdown(output_dir, all_cells))
+        return 0
     if "python" in args.targets and importlib.util.find_spec("litellm") is None:
         raise RuntimeError(
             "T23.3's real Python prompt runtime requires the locked litellm dependency; "
@@ -1568,6 +1571,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--issue-large-rows", type=int, default=CANONICAL_LARGE_ROWS)
     parser.add_argument("--timeout-seconds", type=float, default=JOB_TIMEOUT_SECONDS)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--summary-only", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--cells", nargs="+", default=[])
     parser.add_argument(

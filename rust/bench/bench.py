@@ -304,7 +304,9 @@ def scenario_trace_search_span_filter(handle: ServerHandle, ctx: dict, iters: in
     for _ in range(iters):
         dt, resp = _timed(
             lambda: requests.post(
-                f"{handle.url}/api/3.0/mlflow/traces/search", json=body, timeout=60
+                f"{handle.url}/api/3.0/mlflow/traces/search",
+                json=body,
+                timeout=ctx.get("trace_timeout", 60),
             )
         )
         resp.raise_for_status()
@@ -450,6 +452,7 @@ def run_all(
     history_points: int,
     deep_pages: int,
     otlp_spans_per_batch: int,
+    trace_timeout: float,
 ) -> dict[str, dict[str, Timing]]:
     names = [name for name in SCENARIOS if not only or name in only]
     results: dict[str, dict[str, Timing]] = {name: {} for name in names}
@@ -464,6 +467,7 @@ def run_all(
                 "deep_pages": deep_pages,
                 "otlp_spans_per_batch": otlp_spans_per_batch,
                 "otlp_sequence": 0,
+                "trace_timeout": trace_timeout,
             }
             _warmup(handle, ctx, names, warmup_iterations)
             for name in names:
@@ -475,10 +479,11 @@ def run_all(
 def write_results(
     results: dict[str, dict[str, Timing]],
     hw: dict[str, str],
-    scale: dict[str, int],
+    scale: dict[str, Any],
     iterations: int,
     warmup_iterations: int,
     deep_pages: int,
+    trace_timeout: float,
     out: Path,
     counts: dict[str, int] | None,
     seed_metadata: dict[str, Any] | None,
@@ -514,10 +519,12 @@ def write_results(
     lines.append("|---|---|")
     requested_scale = seed_metadata.get("scale", {}) if seed_metadata else {}
     for k, v in (requested_scale or scale).items():
-        lines.append(f"| {k} | {v:,} |")
+        value = f"{v:,}" if isinstance(v, (int, float)) else str(v)
+        lines.append(f"| {k} | {value} |")
     lines.append(f"| iterations/scenario | {iterations:,} |")
     lines.append(f"| unmeasured warmups/scenario | {warmup_iterations:,} |")
     lines.append(f"| deep-pagination pages | {deep_pages:,} |")
+    lines.append(f"| trace-search request timeout seconds | {trace_timeout:g} |")
     if seed_metadata:
         lines.append(f"| seed total wall seconds | {seed_metadata['total_seconds']:.3f} |")
     if database_bytes is not None:
@@ -712,6 +719,7 @@ def main() -> int:
     p.add_argument("--warmup-iterations", type=int, default=3)
     p.add_argument("--deep-pages", type=int, default=25)
     p.add_argument("--otlp-spans-per-batch", type=int, default=100)
+    p.add_argument("--trace-timeout", type=float, default=60)
     p.add_argument(
         "--rust-bin", default=str(_REPO_ROOT / "rust" / "target" / "release" / "mlflow-server")
     )
@@ -726,6 +734,8 @@ def main() -> int:
         p.error("--deep-pages must be at least 20")
     if args.otlp_spans_per_batch < 1:
         p.error("--otlp-spans-per-batch must be positive")
+    if args.trace_timeout <= 0:
+        p.error("--trace-timeout must be positive")
     unknown = set(args.only or []) - set(SCENARIOS)
     if unknown:
         p.error(f"unknown scenarios: {', '.join(sorted(unknown))}")
@@ -776,6 +786,7 @@ def main() -> int:
             scale.get("history_points", 100),
             args.deep_pages,
             args.otlp_spans_per_batch,
+            args.trace_timeout,
         )
 
     hw = _hardware_notes()
@@ -786,6 +797,7 @@ def main() -> int:
         args.iterations,
         args.warmup_iterations,
         args.deep_pages,
+        args.trace_timeout,
         Path(args.results),
         counts,
         seed_metadata,

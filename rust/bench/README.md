@@ -53,6 +53,7 @@ Runner flags:
 - `--warmup-iterations`: unmeasured requests per scenario (default 3).
 - `--deep-pages`: pages in the single deep-pagination walk; minimum 20 (default 25).
 - `--otlp-spans-per-batch`: protobuf spans per measured POST (default 100).
+- `--trace-timeout`: per-request timeout in seconds for the trace-search scenario (default 60).
 - `-k SCENARIO`: run one named scenario; repeat the flag for more than one.
 - `--rust-bin`: release binary path. The runner deliberately does not fall back to a debug build.
 - `--results`: Markdown report destination.
