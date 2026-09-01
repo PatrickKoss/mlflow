@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
-const PINNED_MLFLOW_VERSION: &str = "3.15.2.dev0";
+const PINNED_MLFLOW_VERSION: &str = "3.15.3.dev0";
 
 const BUILTIN_SCORERS: [&str; 24] = [
     "Completeness",

@@ -57,7 +57,7 @@ fn preserves_python_ensemble_payload_without_implementing_it() {
         "aggregations": null,
         "description": null,
         "is_session_level_scorer": false,
-        "mlflow_version": "3.15.2.dev0",
+        "mlflow_version": "3.15.3.dev0",
         "serialization_version": 1,
         "builtin_scorer_class": null,
         "builtin_scorer_pydantic_data": null,
