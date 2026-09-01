@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use mlflow_registry::schema::REGISTRY_TABLES;
 use mlflow_store::schema::TRACKING_TABLES;
-use mlflow_store::{Db, PoolConfig};
+use mlflow_store::{Db, PoolConfig, WORKSPACES, WORKSPACE_DEFAULT_NAME};
 
 #[cfg(unix)]
 pub mod reference_server;
@@ -195,8 +195,39 @@ async fn reset_live_db(uri: &str) -> Result<(), mlflow_store::StoreError> {
         // does (`rust/tools/make_test_db.py`).
         delete_all(&db, dialect, table).await?;
     }
+    // `workspaces` is migration-owned and not part of TRACKING_TABLES; keep the
+    // default row and drop the workspaces tests create so reruns stay idempotent.
+    delete_non_default_workspaces(&db, dialect).await?;
 
     seed_fixture_rows(db).await
+}
+
+async fn delete_non_default_workspaces(
+    db: &Db,
+    dialect: mlflow_store::Dialect,
+) -> Result<(), sqlx::Error> {
+    let sql = format!(
+        "DELETE FROM {} WHERE name <> {}",
+        dialect.quote_ident(WORKSPACES),
+        dialect.placeholder(1)
+    );
+    match db {
+        Db::Sqlite(p) => sqlx::query(&sql)
+            .bind(WORKSPACE_DEFAULT_NAME)
+            .execute(p)
+            .await
+            .map(|_| ()),
+        Db::Postgres(p) => sqlx::query(&sql)
+            .bind(WORKSPACE_DEFAULT_NAME)
+            .execute(p)
+            .await
+            .map(|_| ()),
+        Db::MySql(p) => sqlx::query(&sql)
+            .bind(WORKSPACE_DEFAULT_NAME)
+            .execute(p)
+            .await
+            .map(|_| ()),
+    }
 }
 
 async fn delete_all(
