@@ -254,38 +254,38 @@ async fn discovery_json_matches_python_with_empty_and_populated_gateway_stores()
         let cases = [
             (
                 "/ajax-api/3.0/mlflow/gateway/supported-providers",
-                1045,
-                "6d587556c256ec1f329523a661d4a1793168cd9000caac3b4e9affaf0fef0b13",
+                1066,
+                "f9f7460777dc98679aa7b0987bf0cd88cfab51a52e83015606e67d4ebb357715",
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/supported-models?provider=openai",
-                40672,
-                "d33f238fef3f8040dcbe84e199d0744868472dbd37394c25e1a8ce2286cf70c2",
+                42467,
+                "594e615e5fef7d44a13763961610ab790bf4201036b5e4b312936915b743b3c2",
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/supported-models",
-                1034679,
-                "bf47d3475b7265b5ab13b1e12b4af07c465025032141e7082765d179c375656a",
+                1155964,
+                "a129bc9f50b3f27d6257ae8bf43215ebf78adcd163f6415fdedab93a701ac341",
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/supported-models?provider=gemini",
-                19331,
-                "80a88f91aa2d99e10a5cee1250d6d1914d1bc11e5710cf288739bbafd3526bad",
+                22038,
+                "42ee83a873d6b3df0dde07bdf53a50f146a7230ebf8dbf0ea5797de2a72caad8",
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/supported-models?provider=vertex_ai",
-                53265,
-                "ba0f78f5b94d7dbbc238b94e54ac2ce7cd5910ec637bf602e41da886721be031",
+                53904,
+                "4892160eff54a8e8340b8cf284fb9899b642197221cae2fcafdbb2b12f54b425",
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/supported-models?provider=fireworks_ai",
-                123156,
-                "82491d8a53907096319f9e15b929be9d3e82c86757dccaaba0f9eb80f037a7ad",
+                132969,
+                "a8bee597be4284393a6269cea7f866354b00ee5a043776adca51b2f93b9995fa",
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/supported-models?provider=azure_ai",
-                31959,
-                "b64dcf3d4658fe30d93c650bafdaf9c96137d3379da9ece35613805d9192db81",
+                38168,
+                "2e3bd54d439477619e0f0f8ffcb8a8f7342d519b6105983ec6007f5b30ddb366",
             ),
             (
                 "/ajax-api/3.0/mlflow/gateway/provider-config?provider=openai",

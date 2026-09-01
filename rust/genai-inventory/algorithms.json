@@ -30,7 +30,7 @@
       "name": "MetaPrompt",
       "owner_task": "T19.5",
       "pin": "mlflow==3.14.1.dev0+git.c69051f534f4b0d171ed92d07c58a20f8c2a3461",
-      "source": "mlflow/genai/optimize/optimizers/metaprompt_optimizer.py:94"
+      "source": "mlflow/genai/optimize/optimizers/metaprompt_optimizer.py:92"
     }
   ],
   "reference": {
