@@ -1,5 +1,5 @@
 //! MCP registry table names. The physical schema is owned by Alembic revision
-//! `a8b9c0d1e2f3` (chain head `6f8d9c3b2a1e`); Rust only consumes its net
+//! `a8b9c0d1e2f3` (chain head `b7e2c1a4d9f3`); Rust only consumes its net
 //! schema. In particular, `mcp_server_versions` has `connect_options` after
 //! `source` and no version-level `display_name` column.
 

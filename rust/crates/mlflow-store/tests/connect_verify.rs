@@ -2,7 +2,7 @@
 //! real Alembic-migrated SQLite database.
 //!
 //! The fixture `tests/fixtures/tracking.db` is a fully migrated MLflow tracking
-//! DB at Alembic head `6f8d9c3b2a1e`, produced by
+//! DB at Alembic head `b7e2c1a4d9f3`, produced by
 //! `uv run --frozen python rust/tools/make_test_db.py`. Regenerate it with that
 //! command whenever the head changes.
 //!
