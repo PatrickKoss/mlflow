@@ -87,6 +87,25 @@ test("evaluation-runs", async ({ page }) => {
   await capture(page, definition);
 });
 
+test("demo-custom-view", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("mlflow.detectIssues.guidanceShown_v1", "true");
+  });
+  const definition = await openSurface(page, "demo-custom-view");
+  await page
+    .locator('[data-component-id="mlflow.prompts.details.mode"]')
+    .getByText("Traces", { exact: true })
+    .click();
+  await page
+    .locator('[data-component-id="mlflow.model_trace_explorer.drawer.custom_view_selector"]')
+    .click();
+  await page.getByRole("menuitemradio", { name: "Span review", exact: true }).click();
+  await expect(page.getByText("Span review", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Accuracy", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("Submit feedback", { exact: true })).toBeVisible();
+  await capture(page, definition);
+});
+
 test("issues", async ({ page }) => {
   const definition = await openSurface(page, "issues");
   await expect(page.getByRole("tab", { name: "Issues", exact: true })).toBeVisible();

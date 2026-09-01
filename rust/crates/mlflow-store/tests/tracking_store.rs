@@ -117,6 +117,178 @@ async fn create_experiment_with_tags() {
 }
 
 #[tokio::test]
+async fn experiment_tag_value_limit_is_20000_characters() {
+    let tmp = TempDb::new("experiment_tag_value_limit").await;
+    let s = store(&tmp).await;
+    let accepted = "a".repeat(20_000);
+    let accepted_multibyte = "😀".repeat(20_000);
+    let rejected = "a".repeat(20_001);
+
+    let id = s
+        .create_experiment(WS, "tag-value-create", None, &[("boundary", &accepted)])
+        .await
+        .unwrap();
+    s.set_experiment_tag(WS, &id, "boundary", &accepted_multibyte)
+        .await
+        .unwrap();
+    assert_eq!(
+        s.get_experiment(WS, &id)
+            .await
+            .unwrap()
+            .tags
+            .iter()
+            .find(|tag| tag.key == "boundary")
+            .and_then(|tag| tag.value.as_deref()),
+        Some(accepted_multibyte.as_str())
+    );
+
+    for error in [
+        s.create_experiment(
+            WS,
+            "tag-value-create-rejected",
+            None,
+            &[("too-long", &rejected)],
+        )
+        .await
+        .unwrap_err(),
+        s.set_experiment_tag(WS, &id, "too-long", &rejected)
+            .await
+            .unwrap_err(),
+    ] {
+        assert_eq!(
+            error.error_code,
+            mlflow_error::ErrorCode::InvalidParameterValue
+        );
+        assert_eq!(
+            error.message,
+            "'value' exceeds the maximum length of 20000 characters"
+        );
+    }
+}
+
+fn custom_view_tags(count: usize) -> Vec<(String, String)> {
+    (0..count)
+        .map(|index| {
+            (
+                format!("mlflow.customView.view.v1.view-{index}"),
+                "{}".to_string(),
+            )
+        })
+        .collect()
+}
+
+fn tag_refs(tags: &[(String, String)]) -> Vec<(&str, &str)> {
+    tags.iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect()
+}
+
+#[tokio::test]
+async fn create_experiment_enforces_custom_view_limit() {
+    let tmp = TempDb::new("create_experiment_custom_view_limit").await;
+    let s = store(&tmp).await;
+    let fifty = custom_view_tags(50);
+    s.create_experiment(WS, "fifty-custom-views", None, &tag_refs(&fifty))
+        .await
+        .unwrap();
+
+    let fifty_one = custom_view_tags(51);
+    let error = s
+        .create_experiment(WS, "fifty-one-custom-views", None, &tag_refs(&fifty_one))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.error_code,
+        mlflow_error::ErrorCode::InvalidParameterValue
+    );
+    assert_eq!(
+        error.message,
+        "Unable to create another custom view; the maximum number of custom views per experiment \
+         is 50. Delete an existing custom view before creating a new one."
+    );
+}
+
+#[tokio::test]
+async fn set_experiment_tag_caps_new_custom_views_but_allows_overwrite() {
+    let tmp = TempDb::new("set_experiment_tag_custom_view_limit").await;
+    let s = store(&tmp).await;
+    let tags = custom_view_tags(50);
+    let id = s
+        .create_experiment(WS, "custom-view-tag-write", None, &tag_refs(&tags))
+        .await
+        .unwrap();
+
+    let error = s
+        .set_experiment_tag(WS, &id, "mlflow.customView.view.v1.new-view", "{}")
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.error_code,
+        mlflow_error::ErrorCode::InvalidParameterValue
+    );
+    assert_eq!(
+        error.message,
+        format!(
+            "Unable to create another custom view for experiment {id}; the maximum number of \
+             custom views per experiment is 50. Delete an existing custom view before creating a \
+             new one."
+        )
+    );
+
+    s.set_experiment_tag(
+        WS,
+        &id,
+        "mlflow.customView.view.v1.view-0",
+        r#"{"updated":true}"#,
+    )
+    .await
+    .unwrap();
+    let experiment = s.get_experiment(WS, &id).await.unwrap();
+    assert_eq!(
+        experiment
+            .tags
+            .iter()
+            .find(|tag| tag.key == "mlflow.customView.view.v1.view-0")
+            .and_then(|tag| tag.value.as_deref()),
+        Some(r#"{"updated":true}"#)
+    );
+}
+
+#[tokio::test]
+async fn custom_view_limit_is_workspace_scoped() {
+    let tmp = TempDb::new("custom_view_limit_workspace_scoped").await;
+    let s = store(&tmp).await;
+    let tags = custom_view_tags(50);
+    let id_a = s
+        .create_experiment("ws-a", "shared", None, &tag_refs(&tags))
+        .await
+        .unwrap();
+    let id_b = s
+        .create_experiment("ws-b", "shared", None, &[])
+        .await
+        .unwrap();
+
+    s.set_experiment_tag("ws-b", &id_b, "mlflow.customView.view.v1.first", "{}")
+        .await
+        .unwrap();
+    let error = s
+        .set_experiment_tag("ws-a", &id_a, "mlflow.customView.view.v1.new-view", "{}")
+        .await
+        .unwrap_err();
+    assert!(error.message.contains(&format!("for experiment {id_a}")));
+    assert_eq!(
+        s.get_experiment("ws-b", &id_b)
+            .await
+            .unwrap()
+            .tags
+            .iter()
+            .filter(|tag| tag.key.starts_with("mlflow.customView.view"))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn duplicate_experiment_name_conflicts() {
     let tmp = TempDb::new("dup_exp").await;
     let s = store(&tmp).await;

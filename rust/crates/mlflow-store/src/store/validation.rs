@@ -12,8 +12,11 @@ pub(crate) const MAX_PARAM_VAL_LENGTH: usize = 6000;
 pub(crate) const MAX_TAG_VAL_LENGTH: usize = 8000;
 pub(crate) const MAX_EXPERIMENT_NAME_LENGTH: usize = 500;
 pub(crate) const MAX_EXPERIMENT_TAG_KEY_LENGTH: usize = 250;
-pub(crate) const MAX_EXPERIMENT_TAG_VAL_LENGTH: usize = 5000;
+pub(crate) const MAX_EXPERIMENT_TAG_VAL_LENGTH: usize = 20000;
+pub(crate) const MAX_CUSTOM_VIEWS_PER_EXPERIMENT: usize = 50;
 pub(crate) const MAX_ENTITY_KEY_LENGTH: usize = 250;
+
+const MLFLOW_CUSTOM_VIEW_TAG_PREFIX: &str = "mlflow.customView.view";
 
 /// `mlflow/utils/validation.py::exceeds_maximum_length`.
 fn exceeds_maximum_length(path: &str, limit: usize) -> String {
@@ -168,6 +171,60 @@ pub(crate) fn validate_experiment_tag(key: &str, value: &str) -> Result<(), Mlfl
     validate_length_limit("key", MAX_EXPERIMENT_TAG_KEY_LENGTH, key)?;
     validate_length_limit("value", MAX_EXPERIMENT_TAG_VAL_LENGTH, value)?;
     Ok(())
+}
+
+/// `mlflow/server/handlers.py::_is_custom_view_tag`.
+pub(crate) fn is_custom_view_tag(key: &str) -> bool {
+    key.starts_with(MLFLOW_CUSTOM_VIEW_TAG_PREFIX)
+}
+
+/// `mlflow/server/handlers.py::_validate_custom_view_count`.
+pub(crate) fn validate_custom_view_count(tags: &[(&str, &str)]) -> Result<(), MlflowError> {
+    if tags
+        .iter()
+        .filter(|(key, _)| is_custom_view_tag(key))
+        .count()
+        > MAX_CUSTOM_VIEWS_PER_EXPERIMENT
+    {
+        return Err(custom_view_limit_exceeded(None));
+    }
+    Ok(())
+}
+
+/// `mlflow/server/handlers.py::_validate_custom_view_tag_write`.
+pub(crate) fn validate_custom_view_tag_write<'a>(
+    experiment_id: &str,
+    existing_keys: impl Iterator<Item = &'a str>,
+    key: &str,
+) -> Result<(), MlflowError> {
+    if !is_custom_view_tag(key) {
+        return Ok(());
+    }
+
+    let mut custom_view_count = 0;
+    for existing_key in existing_keys {
+        if existing_key == key {
+            return Ok(());
+        }
+        if is_custom_view_tag(existing_key) {
+            custom_view_count += 1;
+        }
+    }
+    if custom_view_count >= MAX_CUSTOM_VIEWS_PER_EXPERIMENT {
+        return Err(custom_view_limit_exceeded(Some(experiment_id)));
+    }
+    Ok(())
+}
+
+fn custom_view_limit_exceeded(experiment_id: Option<&str>) -> MlflowError {
+    let experiment_ref = experiment_id
+        .map(|id| format!(" for experiment {id}"))
+        .unwrap_or_default();
+    MlflowError::invalid_parameter_value(format!(
+        "Unable to create another custom view{experiment_ref}; the maximum number of custom views \
+         per experiment is {MAX_CUSTOM_VIEWS_PER_EXPERIMENT}. Delete an existing custom view \
+         before creating a new one."
+    ))
 }
 
 /// `_validate_param_name` + length caps (`_validate_param` returns the

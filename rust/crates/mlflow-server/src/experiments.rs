@@ -29,6 +29,9 @@ use crate::schema_validation::{SchemaEntry, Validator};
 use crate::state::AppState;
 use crate::workspace::Workspace;
 
+const MLFLOW_CUSTOM_VIEW_TAG_PREFIX: &str = "mlflow.customView.view";
+const MAX_CUSTOM_VIEWS_PER_EXPERIMENT: usize = 50;
+
 /// `_create_experiment`'s schema (`handlers.py:1553-1557`):
 /// `{"name": [_assert_required, _assert_string], "artifact_location":
 /// [_assert_string], "tags": [_assert_array]}`.
@@ -72,6 +75,18 @@ pub async fn create_experiment(
             )
         })
         .collect();
+    if tags
+        .iter()
+        .filter(|(key, _)| key.starts_with(MLFLOW_CUSTOM_VIEW_TAG_PREFIX))
+        .count()
+        > MAX_CUSTOM_VIEWS_PER_EXPERIMENT
+    {
+        return Err(MlflowError::invalid_parameter_value(format!(
+            "Unable to create another custom view; the maximum number of custom views per \
+             experiment is {MAX_CUSTOM_VIEWS_PER_EXPERIMENT}. Delete an existing custom view \
+             before creating a new one."
+        )));
+    }
 
     let artifact_location = req.artifact_location.as_deref().filter(|s| !s.is_empty());
 

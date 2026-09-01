@@ -136,6 +136,16 @@ const experiment = existingExperimentId
       name: "T22.5 GenAI UI Smoke",
     });
 const experimentId = experiment.experiment_id;
+const demoExperiment = await request("POST", "/api/2.0/mlflow/experiments/create", {
+  name: "MLflow Demo",
+});
+const demoExperimentId = demoExperiment.experiment_id;
+const demoGeneration = await request("POST", "/ajax-api/3.0/mlflow/demo/generate", {
+  features: ["custom_view"],
+});
+if (!demoGeneration.features_generated?.includes("custom_view")) {
+  throw new Error("demo generation omitted the custom_view feature");
+}
 const secondWorkspaceName = enableWorkspaces ? "t11-part1-secondary" : null;
 if (secondWorkspaceName) {
   await request(
@@ -151,6 +161,8 @@ const traceHexes = [
   "33333333333333333333333333333333",
 ];
 const traceIds = traceHexes.map((hex) => `tr-${hex}`);
+
+const demoTraceId = traceIds[0];
 
 for (const [index, traceHex] of traceHexes.entries()) {
   await request(
@@ -431,7 +443,7 @@ await request("POST", "/api/2.0/mlflow/registered-models/create", {
   name: promptName,
   tags: [
     { key: "mlflow.prompt.is_prompt", value: "true" },
-    { key: "_mlflow_experiment_ids", value: `,${experimentId},` },
+    { key: "_mlflow_experiment_ids", value: `,${experimentId},${demoExperimentId},` },
     { key: "purpose", value: "ui-smoke" },
   ],
 });
@@ -511,6 +523,8 @@ const budgetResponse = await request("POST", "/api/3.0/mlflow/gateway/budgets/cr
 const state = {
   baseURL,
   experimentId,
+  demoExperimentId,
+  demoTraceId,
   traceIds,
   evaluationRunId,
   issueRunId,

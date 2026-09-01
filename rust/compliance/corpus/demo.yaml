@@ -1,0 +1,38 @@
+# Demo custom-view generation. The experiment is created first so the custom
+# view generator can run without the trace generator.
+cases:
+  - name: demo_create_experiment
+    method: POST
+    path: /api/2.0/mlflow/experiments/create
+    body: {name: "MLflow Demo"}
+    bind:
+      - {bind: demo_experiment, from: "$.experiment_id"}
+
+  - name: demo_generate_custom_view
+    method: POST
+    path: /ajax-api/3.0/mlflow/demo/generate
+    body: {features: [custom_view]}
+    expect_status: 200
+
+  - name: demo_get_seeded_custom_view
+    method: GET
+    path: /api/2.0/mlflow/experiments/get
+    query: {experiment_id: "${demo_experiment}"}
+    expect_status: 200
+
+  - name: demo_generate_custom_view_is_idempotent
+    method: POST
+    path: /ajax-api/3.0/mlflow/demo/generate
+    body: {features: [custom_view]}
+    expect_status: 200
+
+  - name: demo_delete_custom_view
+    method: POST
+    path: /ajax-api/3.0/mlflow/demo/delete
+    expect_status: 200
+
+  - name: demo_get_after_delete
+    method: GET
+    path: /api/2.0/mlflow/experiments/get
+    query: {experiment_id: "${demo_experiment}"}
+    expect_status: 200

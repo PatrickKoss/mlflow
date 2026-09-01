@@ -1,6 +1,58 @@
 # Section 3.1 - Experiments. CRUD, search (POST + GET), pagination walk, tags,
 # and error cases. Cases run in order; ids captured via bind, erased by
 # normalization at compare time.
+custom_view_tags_50: &custom_view_tags_50
+  - {key: mlflow.customView.view.v1.view-0, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-1, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-2, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-3, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-4, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-5, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-6, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-7, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-8, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-9, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-10, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-11, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-12, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-13, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-14, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-15, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-16, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-17, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-18, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-19, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-20, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-21, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-22, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-23, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-24, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-25, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-26, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-27, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-28, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-29, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-30, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-31, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-32, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-33, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-34, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-35, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-36, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-37, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-38, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-39, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-40, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-41, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-42, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-43, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-44, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-45, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-46, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-47, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-48, value: "{}"}
+  - {key: mlflow.customView.view.v1.view-49, value: "{}"}
+
 cases:
   - name: experiment_create_basic
     method: POST
@@ -15,6 +67,31 @@ cases:
     body: {name: exp_beta}
     bind:
       - {bind: exp_beta, from: "$.experiment_id"}
+
+  - name: experiment_create_with_50_custom_views
+    method: POST
+    path: /api/2.0/mlflow/experiments/create
+    body: {name: exp_custom_views, tags: *custom_view_tags_50}
+    bind:
+      - {bind: exp_custom_views, from: "$.experiment_id"}
+
+  - name: experiment_set_51st_custom_view_rejected
+    method: POST
+    path: /api/2.0/mlflow/experiments/set-experiment-tag
+    body:
+      experiment_id: "${exp_custom_views}"
+      key: mlflow.customView.view.v1.view-50
+      value: "{}"
+    expect_status: 400
+
+  - name: experiment_overwrite_custom_view_at_limit
+    method: POST
+    path: /api/2.0/mlflow/experiments/set-experiment-tag
+    body:
+      experiment_id: "${exp_custom_views}"
+      key: mlflow.customView.view.v1.view-0
+      value: '{"updated":true}'
+    expect_status: 200
 
   - name: experiment_get
     method: GET
@@ -69,38 +146,38 @@ cases:
     query: {experiment_id: "${exp_alpha}"}
     expect_status: 200
 
-  - name: experiment_set_saved_view_boundary
+  - name: experiment_set_tag_value_20000
     method: POST
     path: /api/2.0/mlflow/experiments/set-experiment-tag
     body:
       experiment_id: "${exp_alpha}"
-      key: mlflow.sharedViewState.boundary-20260802
+      key: boundary-value
       value:
         $repeat:
           prefix: '{"name":"Boundary saved view","createdAt":1785686400000,"state":"deflate;'
           value: A
           suffix: '"}'
-          total_length: 5000
+          total_length: 20000
     expect_status: 200
 
-  - name: experiment_get_saved_view_boundary
+  - name: experiment_get_tag_value_20000
     method: GET
     path: /api/2.0/mlflow/experiments/get
     query: {experiment_id: "${exp_alpha}"}
     expect_status: 200
 
-  - name: experiment_set_saved_view_over_limit
+  - name: experiment_set_tag_value_20001_rejected
     method: POST
     path: /api/2.0/mlflow/experiments/set-experiment-tag
     body:
       experiment_id: "${exp_alpha}"
-      key: mlflow.sharedViewState.over-limit-20260802
+      key: over-limit-value
       value:
         $repeat:
           prefix: '{"name":"Over-limit saved view","createdAt":1785686400000,"state":"deflate;'
           value: A
           suffix: '"}'
-          total_length: 5001
+          total_length: 20001
     expect_status: 400
 
   - name: experiment_delete_saved_view_envelope
@@ -111,12 +188,12 @@ cases:
       key: mlflow.sharedViewState.realistic-20260802
     expect_status: 200
 
-  - name: experiment_delete_saved_view_boundary
+  - name: experiment_delete_tag_value_20000
     method: POST
     path: /api/2.0/mlflow/experiments/delete-experiment-tag
     body:
       experiment_id: "${exp_alpha}"
-      key: mlflow.sharedViewState.boundary-20260802
+      key: boundary-value
     expect_status: 200
 
   - name: experiment_get_after_saved_view_delete

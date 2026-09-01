@@ -58,6 +58,14 @@ export function surfaces(state) {
       notes: "Populated state includes a completed GenAI evaluation run and issue-detection run.",
     },
     {
+      id: "demo-custom-view",
+      surface: "Demo seeded custom view",
+      route: `/experiments/${state.demoExperimentId}/prompts/${encodeURIComponent(state.promptName)}?promptVersion=2&selectedEvaluationId=${state.demoTraceId}`,
+      assertion: "The demo's Span review custom view rendered for a seeded trace.",
+      screenshot: "demo-custom-view.png",
+      notes: "The view definition came from POST /mlflow/demo/generate.",
+    },
+    {
       id: "issues",
       surface: "Issues",
       route: `${experiment}/evaluation-runs/${state.issueRunId}/issues`,

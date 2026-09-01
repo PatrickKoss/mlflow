@@ -168,6 +168,7 @@ impl TrackingStore {
         tags: &[(&str, &str)],
         root: &WorkspaceArtifactRoot,
     ) -> Result<String, MlflowError> {
+        validation::validate_custom_view_count(tags)?;
         validation::validate_experiment_name(name)?;
         for (k, v) in tags {
             validation::validate_experiment_tag(k, v)?;
@@ -415,11 +416,32 @@ impl TrackingStore {
         key: &str,
         value: &str,
     ) -> Result<(), MlflowError> {
+        let custom_view_experiment = if validation::is_custom_view_tag(key) {
+            let id = parse_experiment_id(experiment_id)?;
+            let experiment = self
+                .require_experiment(workspace, id, ViewType::All)
+                .await?;
+            validation::validate_custom_view_tag_write(
+                experiment_id,
+                experiment.tags.iter().map(|tag| tag.key.as_str()),
+                key,
+            )?;
+            Some((id, experiment))
+        } else {
+            None
+        };
+
         validation::validate_experiment_tag(key, value)?;
-        let id = parse_experiment_id(experiment_id)?;
-        let exp = self
-            .require_experiment(workspace, id, ViewType::All)
-            .await?;
+        let (id, exp) = match custom_view_experiment {
+            Some(pair) => pair,
+            None => {
+                let id = parse_experiment_id(experiment_id)?;
+                let experiment = self
+                    .require_experiment(workspace, id, ViewType::All)
+                    .await?;
+                (id, experiment)
+            }
+        };
         require_active_experiment(&exp)?;
         let dialect = self.db().dialect();
         let spec = crate::dialect::UpsertSpec {
