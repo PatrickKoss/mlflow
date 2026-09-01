@@ -1,7 +1,7 @@
 {
-  "last_synced_upstream_commit": "1401cf865aa2d26f22d4b36687fc3fc9008d413e",
-  "last_synced_at": "2026-08-07",
-  "note": "Third post-rewrite upstream sync (68 commits, 15 server-api); plan docs/rust-sync/2026-08-07-0489fb31d-1401cf865/plan.md",
+  "last_synced_upstream_commit": "98209f58fe27c124f0cd28a69e1b3ea80ba0d804",
+  "last_synced_at": "2026-09-01",
+  "note": "Fourth post-rewrite upstream sync (308 commits, 62 server-api/relevant); plan docs/rust-sync/2026-09-01-1401cf865-98209f58f/plan.md",
   "history": [
     {
       "from": "ee51c63ca0f541a47eb65a811b627755717da0a2",
@@ -26,6 +26,14 @@
       "plan_doc": "docs/rust-sync/2026-08-07-0489fb31d-1401cf865/plan.md",
       "commits_total": 68,
       "commits_relevant": 15
+    },
+    {
+      "from": "1401cf865aa2d26f22d4b36687fc3fc9008d413e",
+      "to": "98209f58fe27c124f0cd28a69e1b3ea80ba0d804",
+      "date": "2026-09-01",
+      "plan_doc": "docs/rust-sync/2026-09-01-1401cf865-98209f58f/plan.md",
+      "commits_total": 308,
+      "commits_relevant": 62
     }
   ]
 }

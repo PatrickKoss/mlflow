@@ -1,6 +1,6 @@
 # Rust upstream sync plan — 2026-09-01
 
-Status: **OPEN** · From: `1401cf865aa2d26f22d4b36687fc3fc9008d413e` · To: `98209f58fe27c124f0cd28a69e1b3ea80ba0d804`
+Status: **COMPLETE (2026-09-01)** · From: `1401cf865aa2d26f22d4b36687fc3fc9008d413e` · To: `98209f58fe27c124f0cd28a69e1b3ea80ba0d804`
 
 | Bucket       | Commits |
 | ------------ | ------: |
@@ -126,13 +126,17 @@ tables and reads the new `jobs.creator` column). Everything else can run in para
 
 ## Completion checklist
 
-- [ ] Unary differential corpus replay is green:
+- [x] Unary differential corpus replay is green:
       `uv run --no-sync python rust/compliance/replay.py`.
-- [ ] Required Python-over-HTTP conformance matrix is green:
+      Evidence 2026-09-01 (final head, main venv): 554 cases, 0 non-allowlisted diffs, 16 allowlisted, 0 status mismatches, 0 errors; auth 67 + auth_artifacts_only 2 ran (no skipped sections); new sections this sync: jobs 7, static_prefix 5, demo 6.
+- [x] Required Python-over-HTTP conformance matrix is green:
       `uv run --no-sync python rust/genai-inventory/run_conformance.py --profile required`.
-- [ ] SSE/streaming recorder differentials are green:
+      Evidence 2026-09-01: coverage `complete` on sqlite and postgres (`MLFLOW_RUST_CONFORMANCE_PG_URI`), auth suite 17/17 (`rust/compliance/report/ts2_basic_auth.md`), report `rust/compliance/report/t22_2_required.md`.
+- [x] SSE/streaming recorder differentials are green:
       `uv run --no-sync pytest -q rust/compliance/recorders/`.
-- [ ] Three-phase Playwright UI smoke is green: `bash rust/e2e/run.sh`.
-- [ ] Production UI was rebuilt if the `ui` bucket was non-empty.
-- [ ] New upstream endpoints have new corpus/conformance cases, not code-only coverage.
-- [ ] `rust/sync/state.json` advances to `98209f58fe27c124f0cd28a69e1b3ea80ba0d804` and records this plan.
+      Evidence 2026-09-01: 42 passed.
+- [x] Three-phase Playwright UI smoke is green: `bash rust/e2e/run.sh`.
+      Evidence 2026-09-01: genai 17, part1 16, auth 1 passed in both the auth-disabled and auth rounds (`E2E_RC=0`).
+- [x] Production UI was rebuilt if the `ui` bucket was non-empty. (Phase 1 rebuild; T-S11.)
+- [x] New upstream endpoints have new corpus/conformance cases, not code-only coverage. (`jobs.yaml`, `static_prefix.yaml`, `demo`/custom-view cases, 30 new `auth.yaml` cases, `basic_auth.yaml` conformance rows, auth Playwright spec.)
+- [x] `rust/sync/state.json` advances to `98209f58fe27c124f0cd28a69e1b3ea80ba0d804` and records this plan.
