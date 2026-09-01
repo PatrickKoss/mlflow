@@ -1,12 +1,32 @@
-"""Credential-free `claude` CLI stub for Assistant UI reviews.
+"""Credential-free stub `claude` CLI for reviewing provider-gated Assistant UI.
 
-`run_dev_server.py --stub-providers claude` puts a shim for this script on the
-dev server's PATH. The script never contacts Anthropic and supports the calls
-the Claude Code provider makes during a review:
+The MLflow Assistant's "Claude Code" provider only reveals its chat panel after
+an auth probe succeeds: it shells out to
+``claude -p hi --max-turns 1 --output-format json`` and unlocks the UI when that
+exits 0 (see ``mlflow/assistant/providers/claude_code.py``). When the dev server
+runs without ``ANTHROPIC_API_KEY`` -- the CI ui-review bot (to keep secrets out
+of PR backend code), or a local dev who hasn't installed/authed the real CLI --
+the provider reports "not authenticated" and the panel never renders, leaving
+provider-gated UI (e.g. restore-chat-on-reload) unreviewable.
 
-- `--output-format json` returns a successful authentication probe.
-- `--output-format stream-json` returns a synthetic chat response.
-- `--json-schema` changes that response to a structured Custom View envelope.
+This script stands in for ``claude``. ``run_dev_server.py --stub-providers claude``
+wraps it in a ``claude`` shim and prepends its directory to the dev server's PATH
+(only the dev server process and its children; a real ``claude`` elsewhere on the
+machine -- e.g. the ui-review bot's own review step -- is untouched).
+
+It never contacts Anthropic, so it costs nothing, needs no credentials, and is
+deterministic:
+
+- ``--output-format json`` (the auth probe): print one success result and exit 0.
+- ``--output-format stream-json`` (a live chat turn): emit canned stream-json
+  events -- an assistant text message plus a closing result -- so the chat panel
+  can be exercised end to end and its messages persisted for restore-on-reload.
+
+- ``--json-schema`` (a Custom View turn): the stream-json result carries a
+  ``structured_output`` envelope so structured custom-view delivery is exercised.
+
+The reply is clearly labeled synthetic so reviewers don't mistake it for a real
+model response. Real provider behavior stays covered by unit/integration tests.
 """
 
 from __future__ import annotations
