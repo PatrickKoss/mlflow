@@ -31,7 +31,9 @@ use futures::stream::{BoxStream, StreamExt};
 use mlflow_error::MlflowError;
 use object_store::local::LocalFileSystem;
 use object_store::path::Path as ObjPath;
-use object_store::{GetOptions, ObjectStore, PutMultipartOptions, WriteMultipart};
+use object_store::{
+    GetOptions, ObjectMeta, ObjectStore, ObjectStoreExt, PutMultipartOptions, WriteMultipart,
+};
 
 /// One entry of a non-recursive artifact listing. Field semantics match
 /// `mlflow.entities.FileInfo` / the `FileInfo` proto: `is_dir` true for
@@ -288,6 +290,9 @@ impl ArtifactRepo for ObjectStoreRepo {
 
         let mut infos = Vec::new();
         for obj in listing.objects {
+            if listed_object_is_directory_marker(&obj, &prefix) {
+                continue;
+            }
             let rel = self.strip_root(&obj.location);
             // Skip in-flight temp uploads (parity with the `_TEMP_ARTIFACT_PREFIX`
             // filter in `LocalArtifactRepository.list_artifacts`).
@@ -315,18 +320,30 @@ impl ArtifactRepo for ObjectStoreRepo {
 
     async fn delete(&self, path: &str) -> Result<(), MlflowError> {
         let full = self.full_path(path);
+        let deletion_path = if path.ends_with('/') && !full.as_ref().is_empty() {
+            format!("{full}/")
+        } else {
+            full.to_string()
+        };
         // List the subtree under `full` (the directory case).
         let mut locations = Vec::new();
         let mut stream = self.store.list(Some(&full));
         while let Some(meta) = stream.next().await {
-            locations.push(meta.map_err(store_error)?.location);
+            let location = meta.map_err(store_error)?.location;
+            if is_object_key_within_path(location.as_ref(), &deletion_path) {
+                locations.push(location);
+            }
         }
-        // If the subtree is empty, `full` is either a single file or absent —
-        // add it as a direct target. When it's a non-empty prefix we only
-        // delete the listed leaf objects (LocalFileSystem prunes the now-empty
-        // directories itself; cloud stores have no real directories).
-        if locations.is_empty() {
-            locations.push(full);
+
+        // object_store appends "/" to cloud listing prefixes, which omits an
+        // exact object that also has children. Probe it separately. A trailing
+        // slash denotes a pure prefix and must not delete the exact object.
+        if !path.ends_with('/') && !full.as_ref().is_empty() {
+            match self.store.head(&full).await {
+                Ok(_) if !locations.contains(&full) => locations.push(full),
+                Ok(_) | Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(store_error(e)),
+            }
         }
         // `delete_stream` deletes concurrently; both `NotFound` (absent path —
         // Python's delete is a no-op) and an "is a directory" generic error
@@ -362,6 +379,33 @@ impl ObjectStoreRepo {
 }
 
 const TEMP_ARTIFACT_PREFIX: &str = ".artifact.uploading.";
+
+/// Mirrors `artifact_repo.py:_is_object_key_within_path`.
+pub(crate) fn is_object_key_within_path(object_key: &str, path: &str) -> bool {
+    if path.is_empty() {
+        return true;
+    }
+    if path.ends_with('/') {
+        return object_key.starts_with(path);
+    }
+    object_key == path || object_key.starts_with(&format!("{path}/"))
+}
+
+/// Mirrors `s3_artifact_repo.py:_file_is_directory_marker`.
+pub(crate) fn file_is_directory_marker(file_path: &str, file_size: u64) -> bool {
+    file_size == 0 && !file_path.is_empty() && file_path.ends_with('/')
+}
+
+fn listed_object_is_directory_marker(object: &ObjectMeta, prefix: &ObjPath) -> bool {
+    if prefix.as_ref().is_empty() || object.location != *prefix {
+        return false;
+    }
+
+    // object_store::Path strips the trailing slash while parsing S3 list
+    // responses. A listed object that normalizes to the requested prefix came
+    // from the otherwise unrepresentable "<prefix>/" marker key.
+    file_is_directory_marker(&format!("{}/", object.location), object.size)
+}
 
 fn basename(path: &str) -> &str {
     match path.rsplit_once('/') {
@@ -491,6 +535,7 @@ pub mod factory {
 mod tests {
     use super::*;
     use futures::stream;
+    use object_store::memory::InMemory;
     use tempfile::TempDir;
 
     fn body_from(bytes: &'static [u8]) -> BoxStream<'static, Result<Bytes, MlflowError>> {
@@ -622,6 +667,66 @@ mod tests {
 
         // Deleting an absent path is a no-op.
         repo.delete("never-existed").await.unwrap();
+    }
+
+    #[test]
+    fn object_key_path_boundary_matches_python() {
+        for (object_key, path, expected) in [
+            ("anything", "", true),
+            ("root/foo", "root/foo", true),
+            ("root/foo/file.txt", "root/foo", true),
+            ("root/foo", "root/foo/", false),
+            ("root/foo/", "root/foo/", true),
+            ("root/foo/file.txt", "root/foo/", true),
+            ("root/foobar", "root/foo", false),
+            ("root/foo_baz", "root/foo", false),
+            ("/root/foo", "root/foo", false),
+        ] {
+            assert_eq!(is_object_key_within_path(object_key, path), expected);
+        }
+    }
+
+    #[test]
+    fn s3_directory_marker_filter_matches_python() {
+        for (file_path, file_size, expected) in [
+            ("some/path/", 0, true),
+            ("some/path", 0, false),
+            ("some/path/", 1, false),
+            ("", 0, false),
+        ] {
+            assert_eq!(file_is_directory_marker(file_path, file_size), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_exact_object_and_subtree_preserves_prefix_siblings() {
+        let repo = ObjectStoreRepo::new(Arc::new(InMemory::new()), ObjPath::default());
+        repo.put("foo", body_from(b"exact")).await.unwrap();
+        repo.put("foo/a", body_from(b"child")).await.unwrap();
+        repo.put("foobar", body_from(b"sibling")).await.unwrap();
+        repo.put("foo_baz", body_from(b"sibling")).await.unwrap();
+
+        repo.delete("foo").await.unwrap();
+
+        assert!(repo.get("foo").await.is_err());
+        assert!(repo.get("foo/a").await.is_err());
+        assert_eq!(collect(repo.get("foobar").await.unwrap()).await, b"sibling");
+        assert_eq!(
+            collect(repo.get("foo_baz").await.unwrap()).await,
+            b"sibling"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_trailing_slash_is_a_pure_prefix() {
+        let repo = ObjectStoreRepo::new(Arc::new(InMemory::new()), ObjPath::default());
+        repo.put("foo", body_from(b"exact")).await.unwrap();
+        repo.put("foo/a", body_from(b"child")).await.unwrap();
+
+        repo.delete("foo/").await.unwrap();
+
+        assert_eq!(collect(repo.get("foo").await.unwrap()).await, b"exact");
+        assert!(repo.get("foo/a").await.is_err());
     }
 
     #[tokio::test]

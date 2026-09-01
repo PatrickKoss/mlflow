@@ -30,8 +30,9 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::repo::{
-    store_error, ArtifactDownload, ArtifactFileInfo, ArtifactRepo, CreateMultipartUploadResult,
-    MultipartUploadCredential, MultipartUploadPart, ObjectStoreRepo, PresignedDownloadResult,
+    file_is_directory_marker, is_object_key_within_path, store_error, ArtifactDownload,
+    ArtifactFileInfo, ArtifactRepo, CreateMultipartUploadResult, MultipartUploadCredential,
+    MultipartUploadPart, ObjectStoreRepo, PresignedDownloadResult,
 };
 
 const PRESIGNED_PART_TTL: Duration = Duration::from_secs(3600);
@@ -160,6 +161,10 @@ impl S3RuntimeConfig {
     }
 
     fn object_url(&self, path: &ObjPath) -> Result<Url, MlflowError> {
+        self.object_url_for_key(path.as_ref())
+    }
+
+    fn object_url_for_key(&self, key: &str) -> Result<Url, MlflowError> {
         let endpoint = if let Some(endpoint) = self.virtual_endpoint()? {
             if self.addressing_style == AddressingStyle::Path {
                 format!("{}/{}", endpoint.trim_end_matches('/'), self.bucket)
@@ -172,7 +177,7 @@ impl S3RuntimeConfig {
             format!("https://s3.{}.amazonaws.com/{}", self.region, self.bucket)
         };
         let endpoint = endpoint.trim_end_matches('/');
-        let encoded_path = aws_uri_encode(path.as_ref(), false);
+        let encoded_path = aws_uri_encode(key, false);
         let url = if encoded_path.is_empty() {
             format!("{endpoint}/")
         } else {
@@ -267,7 +272,18 @@ impl S3ArtifactRepo {
         query: &[(&str, &str)],
         body: Vec<u8>,
     ) -> Result<reqwest::Response, MlflowError> {
-        let mut url = self.config.object_url(path)?;
+        self.signed_request_for_key(method, path.as_ref(), query, body)
+            .await
+    }
+
+    async fn signed_request_for_key(
+        &self,
+        method: Method,
+        key: &str,
+        query: &[(&str, &str)],
+        body: Vec<u8>,
+    ) -> Result<reqwest::Response, MlflowError> {
+        let mut url = self.config.object_url_for_key(key)?;
         set_query(&mut url, query);
         let credential = self.credential().await?;
         let now = Utc::now();
@@ -285,6 +301,44 @@ impl S3ArtifactRepo {
             return Ok(response);
         }
         Err(s3_response_error(response).await)
+    }
+
+    async fn directory_markers_within(&self, path: &str) -> Result<Vec<String>, MlflowError> {
+        let full = self.full_path(path);
+        let deletion_path = if path.ends_with('/') && !full.as_ref().is_empty() {
+            format!("{full}/")
+        } else {
+            full.to_string()
+        };
+        let mut continuation_token = None;
+        let mut markers = Vec::new();
+
+        loop {
+            let mut query = vec![("list-type", "2"), ("prefix", deletion_path.as_str())];
+            if let Some(token) = continuation_token.as_deref() {
+                query.push(("continuation-token", token));
+            }
+            let response = self
+                .signed_request_for_key(Method::GET, "", &query, Vec::new())
+                .await?;
+            let body = response.bytes().await.map_err(|e| {
+                MlflowError::internal_error(format!("Failed to read S3 list response: {e}"))
+            })?;
+            let listing: ListBucketResult =
+                quick_xml::de::from_reader(body.as_ref()).map_err(|e| {
+                    MlflowError::internal_error(format!("Invalid S3 ListObjects response: {e}"))
+                })?;
+            markers.extend(listing.contents.into_iter().filter_map(|object| {
+                (is_object_key_within_path(&object.key, &deletion_path)
+                    && file_is_directory_marker(&object.key, object.size))
+                .then_some(object.key)
+            }));
+            let Some(token) = listing.next_continuation_token else {
+                break;
+            };
+            continuation_token = Some(token);
+        }
+        Ok(markers)
     }
 }
 
@@ -315,7 +369,13 @@ impl ArtifactRepo for S3ArtifactRepo {
     }
 
     async fn delete(&self, path: &str) -> Result<(), MlflowError> {
-        self.inner.delete(path).await
+        let markers = self.directory_markers_within(path).await?;
+        self.inner.delete(path).await?;
+        for marker in markers {
+            self.signed_request_for_key(Method::DELETE, &marker, &[], Vec::new())
+                .await?;
+        }
+        Ok(())
     }
 
     async fn create_multipart_upload(
@@ -437,6 +497,21 @@ impl ArtifactRepo for S3ArtifactRepo {
 #[serde(rename_all = "PascalCase")]
 struct InitiateMultipartUploadResult {
     upload_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ListBucketResult {
+    #[serde(default)]
+    contents: Vec<ListBucketObject>,
+    next_continuation_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ListBucketObject {
+    key: String,
+    size: u64,
 }
 
 async fn s3_response_error(response: reqwest::Response) -> MlflowError {
