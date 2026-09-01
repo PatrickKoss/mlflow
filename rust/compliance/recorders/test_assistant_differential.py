@@ -1,9 +1,4 @@
-"""T20.1 Assistant HTTP/SSE differential against an in-process provider.
-
-The 27 comparisons cover all nine routes, FastAPI errors, session lifecycle,
-and full SSE frames. No CLI process or live provider is used; T20.2 owns that
-provider execution layer.
-"""
+"""Assistant HTTP/SSE differential against an in-process provider."""
 
 from __future__ import annotations
 
@@ -52,6 +47,10 @@ class ScriptedProvider(AssistantProvider):
     @property
     def description(self):
         return "AI-powered assistant using Claude Code CLI"
+
+    @property
+    def client_tool_delivery(self):
+        return "structured"
 
     def is_available(self):
         return True
@@ -263,6 +262,7 @@ def test_python_rust_assistant_route_differential(tmp_path):
                 "auto_selected": True,
                 "requires_api_key": False,
                 "has_api_key": False,
+                "client_tool_delivery": "structured",
                 "model_provider": None,
                 "model_options": [],
                 "provider_model": None,
@@ -349,6 +349,22 @@ def test_python_rust_assistant_route_differential(tmp_path):
             rs = rust.get(rust_base + f"{PREFIX}/sessions/{rs_session}/stream", timeout=10)
             _compare(py, rs, py_session, rs_session)
             comparisons += 1  # 27
+            py = python.post(
+                python_base + f"{PREFIX}/sessions/{py_session}/tool-result",
+                json={"request_id": "view-1", "content": "rendered", "is_error": False},
+                timeout=10,
+            )
+            rs = rust.post(
+                rust_base + f"{PREFIX}/sessions/{rs_session}/tool-result",
+                json={"request_id": "view-1", "content": "rendered", "is_error": False},
+                timeout=10,
+            )
+            _compare(py, rs, py_session, rs_session)
+            comparisons += 1  # 28
+            py = python.get(python_base + f"{PREFIX}/sessions/{py_session}/stream", timeout=10)
+            rs = rust.get(rust_base + f"{PREFIX}/sessions/{rs_session}/stream", timeout=10)
+            _compare(py, rs, py_session, rs_session)
+            comparisons += 1  # 29
             py = python.patch(
                 python_base + f"{PREFIX}/sessions/{py_session}",
                 json={"status": "cancelled"},
@@ -360,12 +376,12 @@ def test_python_rust_assistant_route_differential(tmp_path):
                 timeout=10,
             )
             _compare(py, rs, py_session, rs_session)
-            comparisons += 1  # 28
+            comparisons += 1  # 30
             compare(
                 "PUT",
                 f"{PREFIX}/config",
                 json={"projects": {"7": {"location": "/definitely/missing/path"}}},
-            )  # 29
+            )  # 31
 
             _, gateway = compare(
                 "PUT",
@@ -378,17 +394,18 @@ def test_python_rust_assistant_route_differential(tmp_path):
                         }
                     }
                 },
-            )  # 30
+            )  # 32
             assert gateway.json()["providers"]["mlflow_gateway"]["model"] == (
                 "mlflow-assistant-openai"
             )
-            _, providers = compare("GET", f"{PREFIX}/providers")  # 31
+            _, providers = compare("GET", f"{PREFIX}/providers")  # 33
             assert providers.json()["resolved"] == {
                 "name": "mlflow_gateway",
                 "model": "mlflow-assistant-openai",
                 "auto_selected": False,
                 "requires_api_key": False,
                 "has_api_key": True,
+                "client_tool_delivery": "tool",
                 "model_provider": "openai",
                 "model_options": ["gpt-5.5"],
                 "provider_model": "gpt-5.5",
@@ -424,7 +441,7 @@ def test_python_rust_assistant_route_differential(tmp_path):
                 assert response.status_code == 400
                 assert response.json() == {"detail": detail}
 
-            assert comparisons == 35
+            assert comparisons == 37
 
 
 def test_python_rust_assistant_remote_access_matrix(tmp_path):

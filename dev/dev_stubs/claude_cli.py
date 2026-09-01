@@ -1,29 +1,12 @@
-"""Credential-free stub `claude` CLI for reviewing provider-gated Assistant UI.
+"""Credential-free `claude` CLI stub for Assistant UI reviews.
 
-The MLflow Assistant's "Claude Code" provider only reveals its chat panel after
-an auth probe succeeds: it shells out to
-``claude -p hi --max-turns 1 --output-format json`` and unlocks the UI when that
-exits 0 (see ``mlflow/assistant/providers/claude_code.py``). When the dev server
-runs without ``ANTHROPIC_API_KEY`` -- the CI ui-review bot (to keep secrets out
-of PR backend code), or a local dev who hasn't installed/authed the real CLI --
-the provider reports "not authenticated" and the panel never renders, leaving
-provider-gated UI (e.g. restore-chat-on-reload) unreviewable.
+`run_dev_server.py --stub-providers claude` puts a shim for this script on the
+dev server's PATH. The script never contacts Anthropic and supports the calls
+the Claude Code provider makes during a review:
 
-This script stands in for ``claude``. ``run_dev_server.py --stub-providers claude``
-wraps it in a ``claude`` shim and prepends its directory to the dev server's PATH
-(only the dev server process and its children; a real ``claude`` elsewhere on the
-machine -- e.g. the ui-review bot's own review step -- is untouched).
-
-It never contacts Anthropic, so it costs nothing, needs no credentials, and is
-deterministic:
-
-- ``--output-format json`` (the auth probe): print one success result and exit 0.
-- ``--output-format stream-json`` (a live chat turn): emit canned stream-json
-  events -- an assistant text message plus a closing result -- so the chat panel
-  can be exercised end to end and its messages persisted for restore-on-reload.
-
-The reply is clearly labeled synthetic so reviewers don't mistake it for a real
-model response. Real provider behavior stays covered by unit/integration tests.
+- `--output-format json` returns a successful authentication probe.
+- `--output-format stream-json` returns a synthetic chat response.
+- `--json-schema` changes that response to a structured Custom View envelope.
 """
 
 from __future__ import annotations
@@ -48,8 +31,10 @@ def _emit(obj: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def _result_event(session_id: str) -> dict[str, Any]:
-    return {
+def _result_event(
+    session_id: str, structured_output: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    event = {
         "type": "result",
         "subtype": "success",
         "is_error": False,
@@ -65,6 +50,9 @@ def _result_event(session_id: str) -> dict[str, Any]:
             "cache_read_input_tokens": 0,
         },
     }
+    if structured_output is not None:
+        event["structured_output"] = structured_output
+    return event
 
 
 def main(argv: list[str]) -> int:
@@ -75,6 +63,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--output-format", default="text")
     parser.add_argument("--resume", default=None)
+    parser.add_argument("--json-schema", default=None)
     args, _ = parser.parse_known_args(argv)
 
     if args.version:
@@ -92,11 +81,35 @@ def main(argv: list[str]) -> int:
             "model": STUB_MODEL,
             "tools": [],
         })
-        _emit({
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [{"type": "text", "text": STUB_REPLY}]},
-        })
-        _emit(_result_event(session_id))
+        if args.json_schema:
+            json.loads(args.json_schema)
+            _emit({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": json.dumps({"type": "message"})}],
+                },
+            })
+            _emit(
+                _result_event(
+                    session_id,
+                    structured_output={
+                        "type": "render_custom_view",
+                        "text": "Created a synthetic Custom View.",
+                        "title": "Synthetic Custom View",
+                        "messages": [{"beginRendering": {"surfaceId": "main"}}],
+                    },
+                )
+            )
+        else:
+            _emit({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": STUB_REPLY}],
+                },
+            })
+            _emit(_result_event(session_id))
         return 0
 
     # Auth probe (`--output-format json`) and any other invocation: the provider

@@ -259,6 +259,54 @@ def test_permission_pause_resume_transcript_is_identical(tmp_path):
     ]
 
 
+def test_client_tool_pause_resume_transcript_is_identical(tmp_path):
+    paused = _compare(
+        tmp_path,
+        [
+            [
+                _delta(
+                    tool_calls=[
+                        {
+                            "index": 0,
+                            "id": "view-1",
+                            "function": {
+                                "name": "render_custom_view",
+                                "arguments": json.dumps({
+                                    "title": "Trace summary",
+                                    "messages": [{"beginRendering": {"surfaceId": "main"}}],
+                                }),
+                            },
+                        }
+                    ]
+                )
+            ]
+        ],
+        lambda base: _request(tmp_path, base),
+    )
+    assert [frame.split("\n", 1)[0] for frame in paused] == [
+        "event: message",
+        "event: client_tool_call",
+        "event: done",
+    ]
+    history = _done_session(paused)
+
+    resumed = _compare(
+        tmp_path,
+        [[_delta(content="View applied")]],
+        lambda base: _request(
+            tmp_path,
+            base,
+            session_id=history,
+            context={"client_tool_results": {"view-1": {"content": "Rendered", "is_error": False}}},
+        ),
+    )
+    assert [frame.split("\n", 1)[0] for frame in resumed] == [
+        "event: message",
+        "event: stream_event",
+        "event: done",
+    ]
+
+
 def test_trim_boundary_transcript_is_identical(tmp_path):
     big = "x" * 180_000
     history = json.dumps([

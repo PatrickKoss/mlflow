@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::assistant::{AssistantEvent, AssistantProviderRequest};
+use crate::assistant_custom_view::RENDER_CUSTOM_VIEW_TOOL_NAME;
 use crate::assistant_providers::{format_system_prompt, python_json, PermissionsConfig};
 use crate::assistant_tools::{execute_tool, static_permission_error, tools_schema};
 use crate::gateway_provider_matrix::{model_accounting, supported_provider_names};
@@ -152,7 +153,14 @@ async fn run(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
-    let mut is_resuming = !decisions.is_empty() && !pending.is_empty();
+    let client_results = request
+        .context
+        .get("client_tool_results")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut is_resuming =
+        (!decisions.is_empty() || !client_results.is_empty()) && !pending.is_empty();
     if !is_resuming {
         for call in &pending {
             messages.push(json!({
@@ -221,6 +229,42 @@ async fn run(
                 }
                 value => value,
             };
+            let input = if input.is_object() { input } else { json!({}) };
+            if tool_name == RENDER_CUSTOM_VIEW_TOOL_NAME {
+                let client_result = client_results.get(id).and_then(Value::as_object);
+                let Some(client_result) = client_result else {
+                    send(
+                        sender,
+                        AssistantEvent::new(
+                            "message",
+                            json!({"message":{"role":"assistant","content":[{"id":id,"name":tool_name,"input":input}]}}),
+                        ),
+                    )
+                    .await?;
+                    send(
+                        sender,
+                        AssistantEvent::client_tool_call(id, tool_name, input, false),
+                    )
+                    .await?;
+                    paused = true;
+                    break;
+                };
+                let content = client_result
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let is_error = client_result
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                send_tool_result(sender, id, content, is_error).await?;
+                messages.push(json!({
+                    "role":"tool",
+                    "tool_call_id":id,
+                    "content":content,
+                }));
+                continue;
+            }
             let needs_prompt = static_permission_error(
                 tool_name,
                 &input,
@@ -819,6 +863,25 @@ mod tests {
         assert_eq!(
             (second, remaining, state),
             (String::new(), String::new(), false)
+        );
+    }
+
+    #[test]
+    fn tools_schema_contains_render_custom_view_verbatim() {
+        let schema = tools_schema();
+        let tool = schema
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["function"]["name"] == RENDER_CUSTOM_VIEW_TOOL_NAME)
+            .unwrap();
+        assert_eq!(
+            tool["function"]["parameters"]["required"],
+            json!(["title", "messages"])
+        );
+        assert_eq!(
+            tool["function"]["parameters"]["properties"]["messages"]["items"],
+            json!({"type":"object"})
         );
     }
 }

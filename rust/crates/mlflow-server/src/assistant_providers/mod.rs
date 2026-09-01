@@ -22,6 +22,11 @@ use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
+use crate::assistant_custom_view::{
+    custom_view_response_events, custom_view_response_schema, parse_custom_view_response,
+    stringified_custom_view_response_schema, CUSTOM_VIEW_STRUCTURED_OUTPUT_INSTRUCTIONS,
+    STRINGIFIED_CUSTOM_VIEW_STRUCTURED_OUTPUT_INSTRUCTIONS,
+};
 use crate::gateway_provider_matrix::model_accounting;
 
 const CLAUDE_SYSTEM_PROMPT: &str = include_str!("claude_system_prompt.txt");
@@ -150,6 +155,7 @@ pub enum EventType {
     Error,
     Interrupted,
     PermissionRequest,
+    ClientToolCall,
 }
 
 impl EventType {
@@ -161,6 +167,7 @@ impl EventType {
             Self::Error => "error",
             Self::Interrupted => "interrupted",
             Self::PermissionRequest => "permission_request",
+            Self::ClientToolCall => "client_tool_call",
         }
     }
 }
@@ -174,10 +181,28 @@ pub struct Event {
 
 impl Event {
     pub fn from_error(error: impl Into<String>) -> Self {
+        Self::from_error_with_session(error, None)
+    }
+
+    pub fn from_error_with_session(error: impl Into<String>, session_id: Option<&str>) -> Self {
         let error = error.into();
+        let mut data = Map::from_iter([(
+            "error".to_string(),
+            Value::String(if error.is_empty() {
+                "Exception()".to_string()
+            } else {
+                error
+            }),
+        )]);
+        if let Some(session_id) = session_id.filter(|session_id| !session_id.is_empty()) {
+            data.insert(
+                "session_id".to_string(),
+                Value::String(session_id.to_string()),
+            );
+        }
         Self {
             event_type: EventType::Error,
-            data: json!({"error": if error.is_empty() { "Exception()" } else { &error }}),
+            data: Value::Object(data),
         }
     }
 
@@ -357,7 +382,7 @@ pub fn build_invocation(
     let executable = executable.into();
     match provider {
         ProviderKind::ClaudeCode => build_claude_invocation(executable, config, request),
-        ProviderKind::Codex => Ok(build_codex_invocation(executable, config, request)),
+        ProviderKind::Codex => build_codex_invocation(executable, config, request),
     }
 }
 
@@ -368,6 +393,8 @@ pub async fn spawn(
 ) -> Result<SpawnedProvider, SpawnError> {
     let executable = find_executable(provider.binary())
         .ok_or_else(|| SpawnError::CliNotFound(provider.stream_not_found_message()))?;
+    let structured_custom_view = is_custom_view_request(request.context.as_ref());
+    let previous_session_id = request.session_id.clone();
     let invocation = build_invocation(provider, executable, &config, &request)?;
     let mut command = Command::new(&invocation.program);
     command
@@ -425,6 +452,8 @@ pub async fn spawn(
         process,
         sender,
         shutdown_receiver,
+        structured_custom_view,
+        previous_session_id,
     ));
 
     Ok(SpawnedProvider {
@@ -479,7 +508,12 @@ fn build_claude_invocation(
     config: &ProviderConfig,
     request: &StreamRequest,
 ) -> io::Result<Invocation> {
-    let user_message = message_with_context(&request.prompt, request.context.as_ref());
+    let mut user_message = message_with_context(&request.prompt, request.context.as_ref());
+    let structured_custom_view = is_custom_view_request(request.context.as_ref());
+    if structured_custom_view {
+        user_message.push_str("\n\n");
+        user_message.push_str(CUSTOM_VIEW_STRUCTURED_OUTPUT_INSTRUCTIONS);
+    }
     let system_prompt = format_system_prompt(CLAUDE_SYSTEM_PROMPT, &request.tracking_uri);
     let mut args = vec![
         OsString::from("-p"),
@@ -489,6 +523,13 @@ fn build_claude_invocation(
         OsString::from("stream-json"),
         OsString::from("--verbose"),
     ];
+    if structured_custom_view {
+        push_pair(
+            &mut args,
+            "--json-schema",
+            python_json(&custom_view_response_schema()),
+        );
+    }
 
     if config.permissions.full_access {
         push_pair(&mut args, "--permission-mode", "bypassPermissions");
@@ -558,8 +599,13 @@ fn build_codex_invocation(
     executable: PathBuf,
     config: &ProviderConfig,
     request: &StreamRequest,
-) -> Invocation {
-    let user_text = message_with_context(&request.prompt, request.context.as_ref());
+) -> io::Result<Invocation> {
+    let mut user_text = message_with_context(&request.prompt, request.context.as_ref());
+    let structured_custom_view = is_custom_view_request(request.context.as_ref());
+    if structured_custom_view {
+        user_text.push_str("\n\n");
+        user_text.push_str(STRINGIFIED_CUSTOM_VIEW_STRUCTURED_OUTPUT_INSTRUCTIONS);
+    }
     let user_message = if request
         .session_id
         .as_deref()
@@ -577,6 +623,21 @@ fn build_codex_invocation(
         OsString::from("danger-full-access"),
         OsString::from("--skip-git-repo-check"),
     ];
+    let mut temporary_files = Vec::new();
+    if structured_custom_view {
+        use std::io::Write as _;
+
+        let mut schema_file = tempfile::Builder::new()
+            .prefix("mlflow-custom-view-")
+            .suffix(".schema.json")
+            .tempfile()?;
+        schema_file
+            .write_all(python_json(&stringified_custom_view_response_schema()).as_bytes())?;
+        schema_file.flush()?;
+        let schema_path = schema_file.into_temp_path();
+        push_pair(&mut args, "--output-schema", schema_path.as_os_str());
+        temporary_files.push(schema_path);
+    }
     if !config.model.is_empty() && config.model != "default" {
         push_pair(&mut args, "-m", &config.model);
     }
@@ -590,14 +651,14 @@ fn build_codex_invocation(
     }
     args.push(OsString::from("-"));
 
-    Invocation {
+    Ok(Invocation {
         program: executable,
         args,
         stdin: Some(user_message.into_bytes()),
         environment: tracking_environment(&request.tracking_uri),
         cwd: request.cwd.clone(),
-        temporary_files: Vec::new(),
-    }
+        temporary_files,
+    })
 }
 
 fn tracking_environment(tracking_uri: &str) -> BTreeMap<OsString, OsString> {
@@ -620,6 +681,12 @@ fn message_with_context(prompt: &str, context: Option<&Map<String, Value>>) -> S
         ),
         None => prompt.to_string(),
     }
+}
+
+fn is_custom_view_request(context: Option<&Map<String, Value>>) -> bool {
+    context
+        .and_then(|context| context.get("customTraceView"))
+        .is_some_and(python_truthy)
 }
 
 pub(crate) fn format_system_prompt(template: &str, tracking_uri: &str) -> String {
@@ -645,6 +712,8 @@ async fn run_process<R, E>(
     process: RunningProcess<R, E>,
     sender: mpsc::Sender<Event>,
     mut shutdown: oneshot::Receiver<()>,
+    structured_custom_view: bool,
+    previous_session_id: Option<String>,
 ) where
     R: AsyncRead + Unpin,
     E: AsyncRead + Unpin,
@@ -659,6 +728,9 @@ async fn run_process<R, E>(
     let mut thread_id = String::new();
     let mut buffer = Vec::new();
     let mut stream_error = None;
+    let mut structured_response = None;
+    let mut structured_session_id = None;
+    let mut codex_error = None;
 
     loop {
         buffer.clear();
@@ -697,8 +769,64 @@ async fn run_process<R, E>(
         }
 
         let events = match provider {
+            ProviderKind::ClaudeCode if structured_custom_view => {
+                match serde_json::from_str::<Value>(line) {
+                    Err(_) => vec![Event::from_message("user", Value::String(line.to_string()))],
+                    Ok(data) if !data.is_object() => Vec::new(),
+                    Ok(data) if data.get("type").and_then(Value::as_str) == Some("result") => {
+                        let mut events = Vec::new();
+                        if let Some(usage) = data.get("usage").filter(|value| python_truthy(value))
+                        {
+                            events.push(claude_usage_event(
+                                usage,
+                                data.get("total_cost_usd").cloned().unwrap_or(Value::Null),
+                            ));
+                        }
+                        structured_response = Some(
+                            data.get("structured_output")
+                                .or_else(|| data.get("result"))
+                                .cloned()
+                                .unwrap_or(Value::Null),
+                        );
+                        structured_session_id = data
+                            .get("session_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        events
+                    }
+                    Ok(mut data) => match filter_structured_claude_text(&mut data) {
+                        Some(data) => parse_claude_line(&serde_json::to_string(data).unwrap()),
+                        None => Vec::new(),
+                    },
+                }
+            }
             ProviderKind::ClaudeCode => parse_claude_line(line),
-            ProviderKind::Codex => parse_codex_line(line, &config, &mut thread_id),
+            ProviderKind::Codex => {
+                let data = serde_json::from_str::<Value>(line).ok();
+                if let Some(data) = data.as_ref() {
+                    match data.get("type").and_then(Value::as_str) {
+                        Some("error") => {
+                            codex_error = unwrap_error_message(data.get("message"));
+                            Vec::new()
+                        }
+                        Some("turn.failed") => {
+                            codex_error = unwrap_error_message(data.pointer("/error/message"));
+                            Vec::new()
+                        }
+                        Some("item.completed")
+                            if structured_custom_view
+                                && data.pointer("/item/type").and_then(Value::as_str)
+                                    == Some("agent_message") =>
+                        {
+                            structured_response = data.pointer("/item/text").cloned();
+                            Vec::new()
+                        }
+                        _ => parse_codex_line(line, &config, &mut thread_id),
+                    }
+                } else {
+                    Vec::new()
+                }
+            }
         };
         for event in events {
             if sender.send(event).await.is_err() {
@@ -729,16 +857,146 @@ async fn run_process<R, E>(
         let mut stderr_bytes = Vec::new();
         let _ = stderr.read_to_end(&mut stderr_bytes).await;
         let detail = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
-        let detail = if detail.is_empty() {
-            format!("Process exited with code {}", exit_code(&status))
-        } else {
-            detail
+        let detail = match (provider, codex_error) {
+            (ProviderKind::Codex, Some(error)) => error,
+            _ if detail.is_empty() => format!("Process exited with code {}", exit_code(&status)),
+            _ => detail,
         };
         let _ = sender.send(Event::from_error(detail)).await;
+    } else if structured_custom_view {
+        match provider {
+            ProviderKind::ClaudeCode => {
+                let Some(session_id) = structured_session_id else {
+                    let _ = sender
+                        .send(Event::from_error(
+                            "Claude Code result did not include a session ID",
+                        ))
+                        .await;
+                    return;
+                };
+                let response =
+                    parse_custom_view_response(structured_response.unwrap_or(Value::Null));
+                match response {
+                    Ok(response) => {
+                        for event in custom_view_response_events(response) {
+                            let _ = sender.send(map_assistant_event(event)).await;
+                        }
+                        let _ = sender
+                            .send(Event::from_result(Value::Null, session_id))
+                            .await;
+                    }
+                    Err(error) => {
+                        let _ = sender
+                            .send(Event::from_error_with_session(
+                                format!("Claude Code returned invalid Custom View output: {error}"),
+                                Some(&session_id),
+                            ))
+                            .await;
+                    }
+                }
+            }
+            ProviderKind::Codex => {
+                let known_session_id = if thread_id.is_empty() {
+                    previous_session_id.as_deref()
+                } else {
+                    Some(thread_id.as_str())
+                };
+                let Some(structured_response) = structured_response else {
+                    let _ = sender
+                        .send(Event::from_error_with_session(
+                            "Codex did not return a structured Custom View response",
+                            known_session_id,
+                        ))
+                        .await;
+                    return;
+                };
+                match parse_custom_view_response(structured_response) {
+                    Ok(response) => {
+                        for event in custom_view_response_events(response) {
+                            let _ = sender.send(map_assistant_event(event)).await;
+                        }
+                        let _ = sender
+                            .send(Event::from_result(Value::Null, thread_id))
+                            .await;
+                    }
+                    Err(error) => {
+                        let _ = sender
+                            .send(Event::from_error_with_session(
+                                format!("Codex returned invalid Custom View output: {error}"),
+                                known_session_id,
+                            ))
+                            .await;
+                    }
+                }
+            }
+        }
     } else if provider == ProviderKind::Codex {
         let _ = sender
             .send(Event::from_result(Value::Null, thread_id))
             .await;
+    }
+}
+
+fn filter_structured_claude_text(data: &mut Value) -> Option<&Value> {
+    if data.get("type").and_then(Value::as_str) != Some("assistant") {
+        return Some(data);
+    }
+    let content = data.pointer_mut("/message/content")?.as_array_mut()?;
+    let original_len = content.len();
+    content.retain(|block| block.get("type").and_then(Value::as_str) != Some("text"));
+    if original_len > 0 && content.is_empty() {
+        None
+    } else {
+        Some(data)
+    }
+}
+
+fn unwrap_error_message(message: Option<&Value>) -> Option<String> {
+    let mut value = message?.clone();
+    for _ in 0..4 {
+        match value {
+            Value::String(ref text) => match serde_json::from_str(text) {
+                Ok(parsed) => value = parsed,
+                Err(_) => return Some(text.clone()),
+            },
+            Value::Object(ref object) => {
+                if let Some(message) = object
+                    .get("error")
+                    .and_then(Value::as_object)
+                    .and_then(|error| error.get("message"))
+                    .filter(|message| python_truthy(message))
+                {
+                    value = message.clone();
+                } else if let Some(message) = object
+                    .get("message")
+                    .filter(|message| python_truthy(message))
+                {
+                    value = message.clone();
+                } else {
+                    return Some(python_json(&value));
+                }
+            }
+            Value::Null => return None,
+            _ => return Some(value_as_string(&value)),
+        }
+    }
+    Some(value_as_string(&value))
+}
+
+fn map_assistant_event(event: crate::assistant::AssistantEvent) -> Event {
+    let event_type = match event.event_type.as_str() {
+        "message" => EventType::Message,
+        "stream_event" => EventType::StreamEvent,
+        "done" => EventType::Done,
+        "error" => EventType::Error,
+        "interrupted" => EventType::Interrupted,
+        "permission_request" => EventType::PermissionRequest,
+        "client_tool_call" => EventType::ClientToolCall,
+        _ => EventType::Error,
+    };
+    Event {
+        event_type,
+        data: event.data,
     }
 }
 
@@ -1466,6 +1724,58 @@ mod tests {
     }
 
     #[test]
+    fn structured_custom_view_invocations_pin_schema_flags_and_instructions() {
+        let mut custom_request = request();
+        custom_request.context = Some(Map::from_iter([(
+            "customTraceView".to_string(),
+            json!({"surfaceId":"main"}),
+        )]));
+
+        let claude = build_invocation(
+            ProviderKind::ClaudeCode,
+            "/fixture/claude",
+            &ProviderConfig::default(),
+            &custom_request,
+        )
+        .unwrap();
+        let claude_argv = argv_strings(&claude);
+        let schema_index = claude_argv
+            .iter()
+            .position(|argument| argument == "--json-schema")
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&claude_argv[schema_index + 1]).unwrap(),
+            custom_view_response_schema()
+        );
+        assert!(String::from_utf8(claude.stdin.unwrap())
+            .unwrap()
+            .ends_with(CUSTOM_VIEW_STRUCTURED_OUTPUT_INSTRUCTIONS));
+
+        let codex = build_invocation(
+            ProviderKind::Codex,
+            "/fixture/codex",
+            &ProviderConfig::default(),
+            &custom_request,
+        )
+        .unwrap();
+        let codex_argv = argv_strings(&codex);
+        let schema_index = codex_argv
+            .iter()
+            .position(|argument| argument == "--output-schema")
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &std::fs::read_to_string(&codex_argv[schema_index + 1]).unwrap()
+            )
+            .unwrap(),
+            stringified_custom_view_response_schema()
+        );
+        assert!(String::from_utf8(codex.stdin.unwrap())
+            .unwrap()
+            .ends_with(STRINGIFIED_CUSTOM_VIEW_STRUCTURED_OUTPUT_INSTRUCTIONS));
+    }
+
+    #[test]
     fn claude_uses_stdin_and_temporary_system_prompt_file() {
         let mut request = request();
         request.prompt = "why?".to_string();
@@ -1623,6 +1933,21 @@ mod tests {
             json!(2.97e-5)
         );
         assert_eq!(usage[0].data["event"]["usage"]["cache_read_tokens"], 4);
+    }
+
+    #[test]
+    fn unwrap_error_message_handles_codex_envelopes() {
+        for (value, expected) in [
+            (json!("plain"), Some("plain")),
+            (json!(r#"{"message":"nested"}"#), Some("nested")),
+            (
+                json!({"error":{"message":"provider failed"}}),
+                Some("provider failed"),
+            ),
+            (Value::Null, None),
+        ] {
+            assert_eq!(unwrap_error_message(Some(&value)).as_deref(), expected);
+        }
     }
 
     #[test]

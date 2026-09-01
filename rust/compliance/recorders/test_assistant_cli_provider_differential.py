@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -445,6 +446,42 @@ def test_dev_claude_stub_frames_are_identical(tmp_path):
     assert [frame.split("\n", 1)[0] for frame in rust_frames] == [
         "event: message",
         "event: stream_event",
+        "event: done",
+    ]
+
+
+def _normalize_client_tool_ids(frames: list[str]) -> list[str]:
+    return [
+        re.sub(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            "<client-tool-id>",
+            frame,
+        )
+        for frame in frames
+    ]
+
+
+def test_dev_claude_stub_structured_custom_view_frames_are_identical(tmp_path):
+    stubs = dev_stubs.install_stubs(["claude"])
+    try:
+        environment = dict(os.environ)
+        prepend = os.pathsep.join(str(path) for path in stubs.path_prepend)
+        environment["PATH"] = f"{prepend}{os.pathsep}{environment.get('PATH', '')}"
+        config = _config("claude_code")
+        request = _stream_request(tmp_path, session_id="mlflow-dev-stub-session")
+        request["context"] = {"customTraceView": {"surfaceId": "main"}}
+        python_frames = _python_stream("claude_code", config, request, environment)
+        rust_frames = _rust_stream("claude_code", config, request, environment)
+    finally:
+        for path in stubs.cleanup_paths:
+            shutil.rmtree(path, ignore_errors=True)
+
+    assert _normalize_client_tool_ids(rust_frames) == _normalize_client_tool_ids(python_frames)
+    assert [frame.split("\n", 1)[0] for frame in rust_frames] == [
+        "event: stream_event",
+        "event: message",
+        "event: message",
+        "event: client_tool_call",
         "event: done",
     ]
 

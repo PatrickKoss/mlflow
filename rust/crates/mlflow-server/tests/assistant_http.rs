@@ -65,7 +65,15 @@ impl AssistantProvider for ScriptedProvider {
     }
 
     fn stream(&self, request: AssistantProviderRequest) -> BoxStream<'static, AssistantEvent> {
+        let error_only = request.prompt == "error only";
         self.requests.lock().unwrap().push(request);
+        if error_only {
+            return stream::iter(vec![AssistantEvent::error_with_session(
+                "scripted error",
+                Some("provider-error-session"),
+            )])
+            .boxed();
+        }
         stream::iter(vec![
             AssistantEvent::new(
                 "message",
@@ -100,6 +108,14 @@ struct FailingProvider {
 impl AssistantProvider for FailingProvider {
     fn name(&self) -> &str {
         self.name
+    }
+
+    fn client_tool_delivery(&self) -> &'static str {
+        if self.name == "mlflow_gateway" {
+            "tool"
+        } else {
+            "unsupported"
+        }
     }
 
     fn resolve_skills_path(&self, base_directory: &Path) -> PathBuf {
@@ -406,6 +422,7 @@ async fn gateway_api_keys_validate_and_create_idempotent_llm_connections() {
             "auto_selected":false,
             "requires_api_key":false,
             "has_api_key":true,
+            "client_tool_delivery":"tool",
             "model_provider":"openai",
             "model_options":["gpt-5.5"],
             "provider_model":"gpt-5.5",
@@ -486,6 +503,7 @@ async fn remote_access_policy_covers_all_routes_and_accepts_ipv6_loopback() {
         (Method::GET, format!("{PREFIX}/sessions/id/stream")),
         (Method::PATCH, format!("{PREFIX}/sessions/id")),
         (Method::POST, format!("{PREFIX}/sessions/id/permission")),
+        (Method::POST, format!("{PREFIX}/sessions/id/tool-result")),
         (Method::GET, format!("{PREFIX}/providers/id/health")),
         (Method::PUT, format!("{PREFIX}/config")),
         (Method::POST, format!("{PREFIX}/skills/install")),
@@ -713,7 +731,7 @@ async fn message_stream_permission_and_cancel_lifecycle_is_persistent() {
     assert_eq!(
         stored,
         format!(
-            "{{\"context\": {{\"traceId\": \"tr-1\"}}, \"messages\": [{{\"role\": \"user\", \"content\": \"hello\"}}], \"pending_message\": {{\"role\": \"user\", \"content\": \"hello\"}}, \"provider_session_id\": null, \"working_dir\": null, \"pending_tool_decisions\": {{}}}}"
+            "{{\"context\": {{\"traceId\": \"tr-1\"}}, \"messages\": [{{\"role\": \"user\", \"content\": \"hello\"}}], \"pending_message\": {{\"role\": \"user\", \"content\": \"hello\"}}, \"provider_session_id\": null, \"working_dir\": null, \"pending_tool_decisions\": {{}}, \"pending_client_tool_results\": {{}}}}"
         )
     );
 
@@ -832,6 +850,148 @@ async fn message_stream_permission_and_cancel_lifecycle_is_persistent() {
         .root()
         .join(format!("{session_id}.process.json"))
         .exists());
+}
+
+#[tokio::test]
+async fn client_tool_result_resumes_once_and_a_new_message_supersedes_stale_state() {
+    let fixture = Fixture::new().await;
+    fixture.select_provider().await;
+    let project = fixture._directory.path().join("late-project");
+    std::fs::create_dir_all(&project).unwrap();
+    let (status, _, _) = fixture
+        .local(
+            Method::PUT,
+            &format!("{PREFIX}/config"),
+            Some(json!({"projects":{"7":{"location":project}}})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, body) = fixture
+        .local(
+            Method::POST,
+            &format!("{PREFIX}/message"),
+            Some(json!({
+                "message":"build a view",
+                "context":{"customTraceView":{"surfaceId":"main"}}
+            })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = json_body(&body)["session_id"].as_str().unwrap().to_string();
+    let (status, _, _) = fixture
+        .local(
+            Method::GET,
+            &format!("{PREFIX}/sessions/{session_id}/stream"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, body) = fixture
+        .local(
+            Method::POST,
+            &format!("{PREFIX}/sessions/{session_id}/tool-result"),
+            Some(json!({"request_id":"view-1","content":"applied","is_error":false})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json_body(&body)["stream_url"],
+        format!("{PREFIX}/sessions/{session_id}/stream")
+    );
+    let (status, _, _) = fixture
+        .local(
+            Method::GET,
+            &format!("{PREFIX}/sessions/{session_id}/stream"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    {
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(
+            requests[1].context["client_tool_results"],
+            json!({"view-1":{"content":"applied","is_error":false}})
+        );
+    }
+    let session = fixture
+        .runtime
+        .sessions()
+        .load(&session_id)
+        .unwrap()
+        .unwrap();
+    assert!(session.pending_client_tool_results.is_empty());
+
+    fixture
+        .local(
+            Method::POST,
+            &format!("{PREFIX}/sessions/{session_id}/tool-result"),
+            Some(json!({"request_id":"stale","content":"old"})),
+        )
+        .await;
+    fixture
+        .local(
+            Method::POST,
+            &format!("{PREFIX}/message"),
+            Some(json!({
+                "session_id":session_id,
+                "message":"new turn",
+                "experiment_id":"7"
+            })),
+        )
+        .await;
+    let (status, _, _) = fixture
+        .local(
+            Method::GET,
+            &format!("{PREFIX}/sessions/{session_id}/stream"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let requests = fixture.requests.lock().unwrap();
+    assert_eq!(requests[2].prompt, "new turn");
+    assert_eq!(requests[2].cwd.as_deref(), Some(project.as_path()));
+    assert!(requests[2].context.get("client_tool_results").is_none());
+    assert!(requests[2].context.get("customTraceView").is_none());
+}
+
+#[tokio::test]
+async fn provider_session_id_is_persisted_when_a_stream_ends_in_error() {
+    let fixture = Fixture::new().await;
+    fixture.select_provider().await;
+    let (status, _, body) = fixture
+        .local(
+            Method::POST,
+            &format!("{PREFIX}/message"),
+            Some(json!({"message":"error only"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = json_body(&body)["session_id"].as_str().unwrap().to_string();
+
+    let (status, _, body) = fixture
+        .local(
+            Method::GET,
+            &format!("{PREFIX}/sessions/{session_id}/stream"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        "event: error\ndata: {\"error\": \"scripted error\", \"session_id\": \"provider-error-session\"}\n\n"
+    );
+    let session = fixture
+        .runtime
+        .sessions()
+        .load(&session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        session.provider_session_id.as_deref(),
+        Some("provider-error-session")
+    );
+    assert!(session.pending_message.is_none());
 }
 
 #[tokio::test]

@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
+use crate::assistant_custom_view::{custom_view_response_events, CustomViewResponse};
 use crate::assistant_providers::{self, ProviderKind};
 use crate::openai_compatible::{self, Preset};
 use crate::state::AppState;
@@ -70,6 +71,8 @@ pub struct AssistantSession {
     pub working_dir: Option<PathBuf>,
     #[serde(default)]
     pub pending_tool_decisions: Map<String, Value>,
+    #[serde(default)]
+    pub pending_client_tool_results: Map<String, Value>,
 }
 
 impl Default for AssistantSession {
@@ -81,6 +84,7 @@ impl Default for AssistantSession {
             provider_session_id: None,
             working_dir: None,
             pending_tool_decisions: Map::new(),
+            pending_client_tool_results: Map::new(),
         }
     }
 }
@@ -244,11 +248,46 @@ impl AssistantEvent {
     }
 
     pub fn error(error: impl Into<String>) -> Self {
+        Self::error_with_session(error, None)
+    }
+
+    pub fn error_with_session(error: impl Into<String>, session_id: Option<&str>) -> Self {
         let error = error.into();
-        Self::new(
-            "error",
-            json!({"error": if error.is_empty() { "Exception()" } else { &error }}),
-        )
+        let mut data = Map::from_iter([(
+            "error".to_string(),
+            Value::String(if error.is_empty() {
+                "Exception()".to_string()
+            } else {
+                error
+            }),
+        )]);
+        if let Some(session_id) = session_id.filter(|session_id| !session_id.is_empty()) {
+            data.insert(
+                "session_id".to_string(),
+                Value::String(session_id.to_string()),
+            );
+        }
+        Self::new("error", Value::Object(data))
+    }
+
+    pub fn client_tool_call(
+        request_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        tool_input: Value,
+        terminal: bool,
+    ) -> Self {
+        let mut data = Map::from_iter([
+            ("request_id".to_string(), Value::String(request_id.into())),
+            ("tool_name".to_string(), Value::String(tool_name.into())),
+            ("tool_input".to_string(), tool_input),
+        ]);
+        if terminal {
+            data.insert(
+                "continuation".to_string(),
+                Value::String("terminal".to_string()),
+            );
+        }
+        Self::new("client_tool_call", Value::Object(data))
     }
 
     pub fn to_sse(&self) -> Bytes {
@@ -299,6 +338,9 @@ pub trait AssistantProvider: Send + Sync + Debug {
     }
     fn allows_remote_access(&self) -> bool {
         false
+    }
+    fn client_tool_delivery(&self) -> &'static str {
+        "unsupported"
     }
     fn resolve_skills_path(&self, base_directory: &FsPath) -> PathBuf;
     fn check_connection(
@@ -625,6 +667,10 @@ impl AssistantProvider for BuiltinProvider {
         matches!(self.kind, BuiltinKind::Gateway)
     }
 
+    fn client_tool_delivery(&self) -> &'static str {
+        "tool"
+    }
+
     fn resolve_skills_path(&self, base_directory: &FsPath) -> PathBuf {
         base_directory.join(self.skills_dir).join("skills")
     }
@@ -781,6 +827,10 @@ impl AssistantProvider for CliProvider {
         }
     }
 
+    fn client_tool_delivery(&self) -> &'static str {
+        "structured"
+    }
+
     fn is_available(
         &self,
         _tracking_store: TrackingStore,
@@ -889,6 +939,10 @@ impl AssistantProvider for DevClaudeProvider {
         "AI-powered assistant using Claude Code CLI"
     }
 
+    fn client_tool_delivery(&self) -> &'static str {
+        "structured"
+    }
+
     fn resolve_skills_path(&self, base_directory: &FsPath) -> PathBuf {
         base_directory.join(".claude/skills")
     }
@@ -913,6 +967,23 @@ impl AssistantProvider for DevClaudeProvider {
         let session_id = request
             .session_id
             .unwrap_or_else(|| format!("mlflow-dev-stub-{}", Uuid::new_v4().simple()));
+        if request
+            .context
+            .get("customTraceView")
+            .is_some_and(|value| value.as_bool().unwrap_or(!value.is_null()))
+        {
+            let mut events = custom_view_response_events(CustomViewResponse {
+                response_type: "render_custom_view".to_string(),
+                text: "Created a synthetic Custom View.".to_string(),
+                title: "Synthetic Custom View".to_string(),
+                messages: vec![json!({"beginRendering":{"surfaceId":"main"}})],
+            });
+            events.push(AssistantEvent::new(
+                "done",
+                json!({"result":Value::Null,"session_id":session_id}),
+            ));
+            return stream::iter(events).boxed();
+        }
         stream::iter(vec![
             AssistantEvent::new(
                 "message",
@@ -945,6 +1016,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             &format!("{PREFIX}/sessions/{{session_id}}/permission"),
             post(resolve_permission),
+        )
+        .route(
+            &format!("{PREFIX}/sessions/{{session_id}}/tool-result"),
+            post(resolve_client_tool_result),
         )
         .route(
             &format!("{PREFIX}/providers/{{provider}}/health"),
@@ -1083,15 +1158,21 @@ async fn send_message(
         Ok(Some(session)) => session,
         Ok(None) => AssistantSession {
             context: context.clone(),
-            working_dir,
+            working_dir: working_dir.clone(),
             ..Default::default()
         },
         Err(_) => return internal_error(),
     };
+    if !context.contains_key("customTraceView") {
+        session.context.shift_remove("customTraceView");
+    }
     if !context.is_empty() && !session.context.is_empty() {
         session.context.extend(context);
     } else if !context.is_empty() {
         session.context = context;
+    }
+    if session.working_dir.is_none() && working_dir.is_some() {
+        session.working_dir = working_dir;
     }
     let pending = AssistantMessage {
         role: "user".to_string(),
@@ -1132,7 +1213,8 @@ async fn stream_response(
     };
     let pending = session.pending_message.take();
     let decisions = std::mem::take(&mut session.pending_tool_decisions);
-    if pending.is_none() && decisions.is_empty() {
+    let client_results = std::mem::take(&mut session.pending_client_tool_results);
+    if pending.is_none() && decisions.is_empty() && client_results.is_empty() {
         return detail_response(StatusCode::BAD_REQUEST, "No pending message to process");
     }
     if runtime.sessions().save(&session_id, &session).is_err() {
@@ -1146,6 +1228,12 @@ async fn stream_response(
     let mut context = session.context.clone();
     if pending.is_none() && !decisions.is_empty() {
         context.insert("tool_decisions".to_string(), Value::Object(decisions));
+    }
+    if pending.is_none() && !client_results.is_empty() {
+        context.insert(
+            "client_tool_results".to_string(),
+            Value::Object(client_results),
+        );
     }
     let tracking_uri = tracking_uri(&headers);
     let source: BoxStream<'static, AssistantEvent> = match provider {
@@ -1168,13 +1256,13 @@ async fn stream_response(
         let session_id = session_id.clone();
         let mut session = session.clone();
         async move {
-            if event.event_type == "done" {
-                session.provider_session_id = event
-                    .data
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                let _ = runtime.sessions().save(&session_id, &session);
+            if matches!(event.event_type.as_str(), "done" | "error") {
+                if let Some(provider_session_id) =
+                    event.data.get("session_id").and_then(Value::as_str)
+                {
+                    session.provider_session_id = Some(provider_session_id.to_string());
+                    let _ = runtime.sessions().save(&session_id, &session);
+                }
             }
             Ok::<_, Infallible>(event.to_sse())
         }
@@ -1228,6 +1316,7 @@ async fn patch_session(
         Err(_) => return internal_error(),
     };
     session.pending_tool_decisions.clear();
+    session.pending_client_tool_results.clear();
     if runtime.sessions().save(&session_id, &session).is_err() {
         return internal_error();
     }
@@ -1288,6 +1377,66 @@ async fn resolve_permission(
     json_response(
         StatusCode::OK,
         json!({"session_id": session_id, "stream_url": format!("{PREFIX}/sessions/{session_id}/stream")}),
+    )
+}
+
+async fn resolve_client_tool_result(
+    State(state): State<AppState>,
+    Extension(client): Extension<AssistantClient>,
+    Path(session_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let runtime = state.assistant_runtime();
+    let config = runtime.load_config();
+    if let Some(response) = enforce_remote_opt_in(client) {
+        return response;
+    }
+    let provider = runtime
+        .resolve_provider(&config, state.tracking_store(), !client.is_localhost)
+        .await;
+    if let Some(response) = enforce_provider_remote_access(client, provider.as_deref()) {
+        return response;
+    }
+    let request = match parse_object_body(&body) {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let request_id = match required_string(&request, "request_id") {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let content = match required_string(&request, "content") {
+        Ok(value) => value,
+        Err(response) => return *response,
+    };
+    let is_error = match request.get("is_error") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        Some(value) => {
+            return field_type_error(
+                "is_error",
+                "bool_type",
+                "Input should be a valid boolean",
+                value.clone(),
+            )
+        }
+    };
+    if let Err(detail) = SessionStore::validate_session_id(&session_id) {
+        return detail_response(StatusCode::BAD_REQUEST, &detail);
+    }
+    let mut session = match runtime.sessions().load(&session_id) {
+        Ok(Some(session)) => session,
+        Ok(None) => return detail_response(StatusCode::NOT_FOUND, "Session not found"),
+        Err(_) => return internal_error(),
+    };
+    session.pending_client_tool_results =
+        Map::from_iter([(request_id, json!({"content":content,"is_error":is_error}))]);
+    if runtime.sessions().save(&session_id, &session).is_err() {
+        return internal_error();
+    }
+    json_response(
+        StatusCode::OK,
+        json!({"session_id":session_id,"stream_url":format!("{PREFIX}/sessions/{session_id}/stream")}),
     )
 }
 
@@ -1355,6 +1504,7 @@ async fn get_providers(
             "requires_api_key": false,
             "has_api_key": false,
             "allows_remote_access": provider.allows_remote_access(),
+            "client_tool_delivery": provider.client_tool_delivery(),
             "model_options": [],
         }));
     }
@@ -1410,6 +1560,7 @@ fn resolved_provider_value(
         "auto_selected": auto_selected,
         "requires_api_key": false,
         "has_api_key": gateway_vendor.is_some(),
+        "client_tool_delivery": provider.client_tool_delivery(),
         "model_provider": gateway_vendor,
         "model_options": provider_model.into_iter().collect::<Vec<_>>(),
         "provider_model": provider_model,
@@ -2216,11 +2367,12 @@ mod tests {
             provider_session_id: None,
             working_dir: Some(PathBuf::from("/tmp/project")),
             pending_tool_decisions: Map::new(),
+            pending_client_tool_results: Map::new(),
         };
         let value = serde_json::to_value(session).unwrap();
         assert_eq!(
             python_json_dumps(&value, false),
-            "{\"context\": {\"trace\": \"caf\\u00e9\"}, \"messages\": [{\"role\": \"user\", \"content\": \"hello\"}], \"pending_message\": {\"role\": \"user\", \"content\": \"hello\"}, \"provider_session_id\": null, \"working_dir\": \"/tmp/project\", \"pending_tool_decisions\": {}}"
+            "{\"context\": {\"trace\": \"caf\\u00e9\"}, \"messages\": [{\"role\": \"user\", \"content\": \"hello\"}], \"pending_message\": {\"role\": \"user\", \"content\": \"hello\"}, \"provider_session_id\": null, \"working_dir\": \"/tmp/project\", \"pending_tool_decisions\": {}, \"pending_client_tool_results\": {}}"
         );
     }
 
