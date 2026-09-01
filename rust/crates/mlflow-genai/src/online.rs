@@ -8,8 +8,8 @@ use crate::store::{
     trace_info_id, trace_info_metadata, trace_info_timestamp, TraceRecord, TrackingClient,
 };
 use crate::{
-    EngineError, EvaluationConfig, EvaluationEngine, NamedScorer, RateConfig, ScorerExecutor,
-    SerializedScorer, WorkerRequest,
+    EngineError, EvaluationConfig, EvaluationEngine, NamedScorer, ScorerExecutor, SerializedScorer,
+    WorkerRequest,
 };
 
 pub(crate) const TRACE_CHECKPOINT_TAG: &str = "mlflow.latestOnlineScoring.trace.checkpoint";
@@ -429,6 +429,31 @@ async fn score_session(
     Ok(())
 }
 
+/// `trace_processor.py` gates online scorer calls with the same rate/retry
+/// settings as programmatic evaluation (`_get_scorer_rate_config`,
+/// `MLFLOW_GENAI_EVAL_MAX_RETRIES`), scaled by the distinct scorers in the tick.
+fn distinct_scorer_count(named: &[NamedScorer]) -> usize {
+    named
+        .iter()
+        .map(NamedScorer::name)
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+}
+
+fn online_evaluation_config(
+    env: EvaluationConfig,
+    scorer_count: usize,
+    online_session_id: Option<&str>,
+) -> EvaluationConfig {
+    EvaluationConfig {
+        row_workers: 1,
+        scorer_workers: scorer_count.clamp(1, 10),
+        max_retries: env.max_retries,
+        scorer_rate: env.scorer_rate,
+        enable_scorer_tracing: online_session_id.is_none() && env.enable_scorer_tracing,
+    }
+}
+
 async fn score_and_log(
     client: &TrackingClient,
     experiment_id: &str,
@@ -441,18 +466,11 @@ async fn score_and_log(
         .iter()
         .map(|scorer| scorer.named.clone())
         .collect::<Vec<_>>();
-    let config = EvaluationConfig {
-        row_workers: 1,
-        scorer_workers: named.len().clamp(1, 10),
-        max_retries: 0,
-        scorer_rate: RateConfig {
-            requests_per_second: None,
-            adaptive: false,
-        },
-        enable_scorer_tracing: online_session_id.is_none()
-            && std::env::var("MLFLOW_GENAI_EVAL_ENABLE_SCORER_TRACING")
-                .is_ok_and(|value| value.eq_ignore_ascii_case("true") || value == "1"),
-    };
+    let config = online_evaluation_config(
+        EvaluationConfig::from_env(distinct_scorer_count(&named))?,
+        named.len(),
+        online_session_id,
+    );
     let engine = EvaluationEngine::with_executor(
         config.clone(),
         ScorerExecutor::new().with_tracking_client(client.clone()),
@@ -734,6 +752,7 @@ fn worker_gateway_url(base: &str, path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RateConfig;
     use serde_json::json;
 
     fn configured(name: &str, rate: f64) -> ConfiguredScorer {
@@ -751,6 +770,30 @@ mod tests {
             rate,
             filter: None,
         }
+    }
+
+    #[test]
+    fn online_config_keeps_env_rate_and_retries_but_scores_one_row() {
+        let env = EvaluationConfig {
+            row_workers: 7,
+            scorer_workers: 4,
+            max_retries: 3,
+            scorer_rate: RateConfig {
+                requests_per_second: Some(2.5),
+                adaptive: true,
+            },
+            enable_scorer_tracing: true,
+        };
+        let config = online_evaluation_config(env.clone(), 12, None);
+        assert_eq!(config.row_workers, 1);
+        assert_eq!(config.scorer_workers, 10);
+        assert_eq!(config.max_retries, 3);
+        assert_eq!(config.scorer_rate, env.scorer_rate);
+        assert!(config.enable_scorer_tracing);
+
+        let session = online_evaluation_config(env, 0, Some("session"));
+        assert_eq!(session.scorer_workers, 1);
+        assert!(!session.enable_scorer_tracing);
     }
 
     #[test]
