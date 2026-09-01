@@ -1,0 +1,34 @@
+# T-S8: FastAPI-native routers follow --static-prefix. Artifact routes remain
+# available at the bare native path and through the prefixed Flask-compatible path.
+cases:
+  - name: prefixed_tracking_route
+    method: GET
+    path: /p/api/2.0/mlflow/experiments/get
+    query: {experiment_id: "0"}
+    expect_status: 200
+
+  - name: bare_tracking_route_removed
+    method: GET
+    path: /api/2.0/mlflow/experiments/get
+    query: {experiment_id: "0"}
+    compare_body: false
+    expect_status: 404
+
+  - name: prefixed_assistant_route
+    method: GET
+    path: /p/ajax-api/3.0/mlflow/assistant/config
+    compare_body: false
+    expect_status: 200
+
+  - name: bare_artifact_upload
+    method: PUT
+    path: /api/2.0/mlflow-artifacts/artifacts/static-prefix/file.txt
+    raw_body: "bare artifact route"
+    compare_body: false
+    expect_status: 200
+
+  - name: prefixed_artifact_download
+    method: GET
+    path: /p/api/2.0/mlflow-artifacts/artifacts/static-prefix/file.txt
+    compare_body: true
+    expect_status: 200

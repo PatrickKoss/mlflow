@@ -63,6 +63,8 @@ const HEALTH_ENDPOINTS: [&str; 2] = ["/health", "/version"];
 /// `API_PATH_PREFIX` / `AJAX_API_PATH_PREFIX` (`security_utils.py:27-28`).
 const API_PATH_PREFIX: &str = "/api/";
 const AJAX_API_PATH_PREFIX: &str = "/ajax-api/";
+const ARTIFACT_API_PATH_PREFIX: &str = "/api/2.0/mlflow-artifacts/artifacts";
+const ARTIFACT_AJAX_API_PATH_PREFIX: &str = "/ajax-api/2.0/mlflow-artifacts/artifacts";
 
 /// `TEST_ENDPOINTS` (`security_utils.py:31`): excluded from `is_api_endpoint`.
 const TEST_ENDPOINTS: [&str; 2] = ["/test", "/api/test"];
@@ -100,6 +102,8 @@ pub struct SecurityConfig {
     /// The `X-Frame-Options` header value; `None` when the header is disabled
     /// (configured value `NONE`, case-insensitive).
     x_frame_options: Option<String>,
+    /// Prefix used by the Flask and non-artifact native routers.
+    static_prefix: Option<String>,
     /// Whether `allowed_origins` contains `*` (wildcard mode: reflect any
     /// origin, no credentials, no state-change block).
     wildcard_cors: bool,
@@ -132,9 +136,15 @@ impl SecurityConfig {
             allowed_hosts,
             allowed_origins,
             x_frame_options,
+            static_prefix: None,
             wildcard_cors,
             wildcard_hosts,
         }
+    }
+
+    pub fn with_static_prefix(mut self, static_prefix: Option<String>) -> Self {
+        self.static_prefix = static_prefix;
+        self
     }
 }
 
@@ -180,8 +190,16 @@ fn private_ip_patterns() -> Vec<String> {
 }
 
 /// `is_api_endpoint` (`security_utils.py:127`).
-fn is_api_endpoint(path: &str) -> bool {
-    (path.starts_with(API_PATH_PREFIX) || path.starts_with(AJAX_API_PATH_PREFIX))
+fn is_api_endpoint(path: &str, static_prefix: Option<&str>) -> bool {
+    let api_prefix = format!("{}{API_PATH_PREFIX}", static_prefix.unwrap_or_default());
+    let ajax_api_prefix = format!(
+        "{}{AJAX_API_PATH_PREFIX}",
+        static_prefix.unwrap_or_default()
+    );
+    (path.starts_with(&api_prefix)
+        || path.starts_with(&ajax_api_prefix)
+        || path.starts_with(ARTIFACT_API_PATH_PREFIX)
+        || path.starts_with(ARTIFACT_AJAX_API_PATH_PREFIX))
         && !TEST_ENDPOINTS.contains(&path)
 }
 
@@ -441,7 +459,7 @@ pub async fn security_middleware(
     // 2. Cross-origin state-change block (`block_cross_origin_state_changes`,
     //    `security.py:96`). Only for API endpoints, skipped in wildcard mode.
     if !config.wildcard_cors
-        && is_api_endpoint(&path)
+        && is_api_endpoint(&path, config.static_prefix.as_deref())
         && should_block_cors_request(&config, origin.as_deref(), &method)
     {
         return decorate(
@@ -617,8 +635,26 @@ mod tests {
             ("/health", false),
             ("/static/index.html", false),
         ] {
-            assert_eq!(is_api_endpoint(path), expected, "path={path}");
+            assert_eq!(is_api_endpoint(path, None), expected, "path={path}");
         }
+    }
+
+    #[test]
+    fn is_api_endpoint_handles_static_prefix_and_bare_artifacts() {
+        for path in [
+            "/p/api/2.0/mlflow/experiments/list",
+            "/p/ajax-api/3.0/jobs/search",
+            "/p/api/2.0/mlflow-artifacts/artifacts/x",
+            "/api/2.0/mlflow-artifacts/artifacts/x",
+            "/ajax-api/2.0/mlflow-artifacts/artifacts/x",
+        ] {
+            assert!(is_api_endpoint(path, Some("/p")), "path={path}");
+        }
+        assert!(!is_api_endpoint(
+            "/api/2.0/mlflow/experiments/list",
+            Some("/p")
+        ));
+        assert!(!is_api_endpoint("/p/health", Some("/p")));
     }
 
     #[test]

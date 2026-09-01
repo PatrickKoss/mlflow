@@ -65,9 +65,8 @@ pub struct AuthContext {
 const UNPROTECTED_PREFIXES: [&str; 5] =
     ["/static", "/favicon.ico", "/health", "/version", "/metrics"];
 
-/// `is_unprotected_route` (`__init__.py:457`). The static-prefix nesting strips
-/// the prefix before this middleware runs, so we match the bare forms; Python's
-/// prefixed-form handling is covered by the router's `nest`.
+/// `is_unprotected_route` (`__init__.py:457`). [`authorize`] removes the static
+/// prefix before calling this helper, so the table contains bare paths.
 pub fn is_unprotected_route(path: &str) -> bool {
     UNPROTECTED_PREFIXES.iter().any(|p| path.starts_with(p))
 }
@@ -97,8 +96,8 @@ fn forbidden_response() -> Response {
 
 /// Decode HTTP Basic credentials, mirroring `basic_credentials`
 /// (`auth_api/mod.rs`) — werkzeug splits the decoded pair on the first colon.
-fn basic_credentials(req: &Request<Body>) -> Option<(String, String)> {
-    let value = if req.uri().path().starts_with("/gateway/") {
+fn basic_credentials(req: &Request<Body>, routed_path: &str) -> Option<(String, String)> {
+    let value = if routed_path.starts_with("/gateway/") {
         req.headers()
             .get("x-mlflow-authorization")
             .and_then(|value| value.to_str().ok())
@@ -180,7 +179,14 @@ pub async fn authorize(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
-    let path = req.uri().path().to_string();
+    let path = req
+        .extensions()
+        .get::<crate::StaticPrefix>()
+        .map_or_else(
+            || req.uri().path(),
+            |static_prefix| static_prefix.strip(req.uri().path()),
+        )
+        .to_string();
 
     // 1. Unprotected routes pass through untouched.
     if is_unprotected_route(&path) {
@@ -198,7 +204,7 @@ pub async fn authorize(
     //    `__init__.py:402`) fronts the werkzeug hash comparison with the
     //    credential cache (off by default) and returns the resolved user, so the
     //    admin-bypass check below reuses it instead of a second `get_user` query.
-    let Some((username, password)) = basic_credentials(&req) else {
+    let Some((username, password)) = basic_credentials(&req, &path) else {
         return unauthenticated_response();
     };
     let Some(user) = auth_store

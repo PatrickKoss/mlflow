@@ -154,6 +154,13 @@ fn invalid_static_prefix_fails_loudly() {
         stderr.contains("--static-prefix"),
         "stderr did not name --static-prefix: {stderr}"
     );
+
+    let (code, _stdout, stderr) = run(&["--static-prefix", "/{user}"]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("--static-prefix must not contain '{' or '}'."),
+        "stderr did not match Python's template-prefix error: {stderr}"
+    );
 }
 
 #[test]

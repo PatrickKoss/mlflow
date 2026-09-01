@@ -143,6 +143,7 @@ class DualServers:
         serve_artifacts: bool = True,
         artifacts_only: bool = False,
         configure_artifacts_destination: bool = True,
+        static_prefix: str | None = None,
     ) -> None:
         self.workdir = workdir
         self.seed_db = seed_db
@@ -160,6 +161,7 @@ class DualServers:
         self.serve_artifacts = serve_artifacts
         self.artifacts_only = artifacts_only
         self.configure_artifacts_destination = configure_artifacts_destination
+        self.static_prefix = static_prefix
         self.python: ServerHandle | None = None
         self.rust: ServerHandle | None = None
 
@@ -253,6 +255,8 @@ class DualServers:
             rust_cmd.append("--artifacts-only")
             if self.extra_env.get("MLFLOW_ENABLE_WORKSPACES", "").lower() in {"true", "1"}:
                 rust_cmd.extend(["--workspace-store-uri", f"sqlite:///{rust_db}"])
+        if self.static_prefix:
+            rust_cmd.extend(["--static-prefix", self.static_prefix])
         self.rust = self._boot("rust", rust_cmd, f"sqlite:///{rust_db}", rust_art)
         return self
 
@@ -1255,6 +1259,7 @@ def _run_deployment_section(
     configure_artifacts_destination: bool = True,
     extra_env: dict[str, str] | None = None,
     python_asgi_app: str | None = None,
+    static_prefix: str | None = None,
 ) -> list[CaseResult]:
     """Run a corpus section under deployment flags that differ from the default pair."""
     seed_db = workroot / "seed.db"
@@ -1266,10 +1271,12 @@ def _run_deployment_section(
         seed_db,
         artifact_root,
         extra_env={"MLFLOW_SERVER_ENABLE_JOB_EXECUTION": "false", **(extra_env or {})},
+        python_extra_env={"_MLFLOW_STATIC_PREFIX": static_prefix} if static_prefix else None,
         python_asgi_app=python_asgi_app,
         serve_artifacts=serve_artifacts,
         artifacts_only=artifacts_only,
         configure_artifacts_destination=configure_artifacts_destination,
+        static_prefix=static_prefix,
     ) as servers:
         py_bindings: dict[str, Any] = {}
         rust_bindings: dict[str, Any] = {}
@@ -1315,6 +1322,7 @@ def main() -> int:
     presigned_artifacts_only_cases = sections.pop("presigned_download_artifacts_only", [])
     artifacts_only_workspace_cases = sections.pop("artifacts_only_workspaces", [])
     presigned_bad_env_cases = sections.pop("presigned_download_bad_env", [])
+    static_prefix_cases = sections.pop("static_prefix", [])
 
     all_results: list[CaseResult] = []
     if sections:
@@ -1400,6 +1408,17 @@ def main() -> int:
                     allow,
                     Path(td),
                     extra_env={"MLFLOW_PRESIGNED_DOWNLOAD_URL_TTL_SECONDS": "604801"},
+                )
+            )
+    if static_prefix_cases:
+        with tempfile.TemporaryDirectory(prefix="mlflow-t-s8-static-prefix-") as td:
+            all_results.extend(
+                _run_deployment_section(
+                    static_prefix_cases,
+                    allow,
+                    Path(td),
+                    python_asgi_app="mlflow.server.fastapi_app:app",
+                    static_prefix="/p",
                 )
             )
     if artifacts_only_auth_cases:

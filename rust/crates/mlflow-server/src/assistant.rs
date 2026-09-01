@@ -1109,6 +1109,7 @@ fn enforce_provider_remote_access(
 async fn send_message(
     State(state): State<AppState>,
     Extension(client): Extension<AssistantClient>,
+    Extension(static_prefix): Extension<crate::StaticPrefix>,
     body: Bytes,
 ) -> Response {
     let runtime = state.assistant_runtime();
@@ -1185,13 +1186,14 @@ async fn send_message(
     }
     json_response(
         StatusCode::OK,
-        json!({"session_id": session_id, "stream_url": format!("{PREFIX}/sessions/{session_id}/stream")}),
+        json!({"session_id": session_id, "stream_url": static_prefix.add(&format!("{PREFIX}/sessions/{session_id}/stream"))}),
     )
 }
 
 async fn stream_response(
     State(state): State<AppState>,
     Extension(client): Extension<AssistantClient>,
+    Extension(static_prefix): Extension<crate::StaticPrefix>,
     Path(session_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
@@ -1235,7 +1237,7 @@ async fn stream_response(
             Value::Object(client_results),
         );
     }
-    let tracking_uri = tracking_uri(&headers);
+    let tracking_uri = tracking_uri(&headers, &static_prefix);
     let source: BoxStream<'static, AssistantEvent> = match provider {
         Some(provider) => {
             let provider_config = config.providers.get(provider.name()).cloned();
@@ -1335,6 +1337,7 @@ async fn patch_session(
 async fn resolve_permission(
     State(state): State<AppState>,
     Extension(client): Extension<AssistantClient>,
+    Extension(static_prefix): Extension<crate::StaticPrefix>,
     Path(session_id): Path<String>,
     body: Bytes,
 ) -> Response {
@@ -1376,7 +1379,7 @@ async fn resolve_permission(
     }
     json_response(
         StatusCode::OK,
-        json!({"session_id": session_id, "stream_url": format!("{PREFIX}/sessions/{session_id}/stream")}),
+        json!({"session_id": session_id, "stream_url": static_prefix.add(&format!("{PREFIX}/sessions/{session_id}/stream"))}),
     )
 }
 
@@ -2254,7 +2257,7 @@ fn internal_error() -> Response {
         .into_response()
 }
 
-fn tracking_uri(headers: &HeaderMap) -> String {
+fn tracking_uri(headers: &HeaderMap, static_prefix: &crate::StaticPrefix) -> String {
     let scheme = headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
@@ -2263,7 +2266,10 @@ fn tracking_uri(headers: &HeaderMap) -> String {
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("localhost");
-    format!("{scheme}://{host}")
+    format!(
+        "{scheme}://{host}{}",
+        static_prefix.as_deref().unwrap_or_default()
+    )
 }
 
 fn home_dir() -> PathBuf {
@@ -2408,5 +2414,15 @@ mod tests {
             }
             GatewayConnectionError::Internal => panic!("expected a bad-request mapping"),
         }
+    }
+
+    #[test]
+    fn tracking_uri_includes_static_prefix() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:5000"));
+        assert_eq!(
+            tracking_uri(&headers, &crate::StaticPrefix::new(Some("/p".to_string()))),
+            "http://localhost:5000/p"
+        );
     }
 }

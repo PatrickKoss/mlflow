@@ -8,7 +8,7 @@
 //!
 //! Static-prefix validation matches `_validate_static_prefix`
 //! (`mlflow/cli/__init__.py:353-364`) exactly: must start with `/`, must not
-//! end with `/`.
+//! end with `/`, and must not contain `{` or `}`.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -183,6 +183,8 @@ pub enum ConfigError {
     StaticPrefixMissingLeadingSlash,
     #[error("--static-prefix should not end with a '/'.")]
     StaticPrefixTrailingSlash,
+    #[error("--static-prefix must not contain '{{' or '}}'.")]
+    StaticPrefixContainsTemplate,
     #[error(
         "--app-name {0:?} is not supported by the Rust MLflow server. \
          The only supported value is 'basic-auth' (enables the auth/RBAC API)."
@@ -477,7 +479,7 @@ fn env_bool(name: &'static str, default: bool) -> Result<bool, ConfigError> {
 
 /// Validates a static prefix the same way Python's `_validate_static_prefix`
 /// does: `None` passes through untouched, otherwise the value must start with
-/// `/` and must not end with `/`.
+/// `/`, must not end with `/`, and must not contain route-template braces.
 fn validate_static_prefix(value: Option<String>) -> Result<Option<String>, ConfigError> {
     let Some(value) = value else {
         return Ok(None);
@@ -487,6 +489,9 @@ fn validate_static_prefix(value: Option<String>) -> Result<Option<String>, Confi
     }
     if value.ends_with('/') {
         return Err(ConfigError::StaticPrefixTrailingSlash);
+    }
+    if value.contains(['{', '}']) {
+        return Err(ConfigError::StaticPrefixContainsTemplate);
     }
     Ok(Some(value))
 }
@@ -558,6 +563,16 @@ mod tests {
             validate_static_prefix(Some("/".to_string())),
             Err(ConfigError::StaticPrefixTrailingSlash)
         );
+    }
+
+    #[test]
+    fn route_template_braces_are_rejected() {
+        for prefix in ["/{user}", "/left{", "/right}"] {
+            assert_eq!(
+                validate_static_prefix(Some(prefix.to_string())),
+                Err(ConfigError::StaticPrefixContainsTemplate)
+            );
+        }
     }
 
     #[test]

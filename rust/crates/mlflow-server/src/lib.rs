@@ -65,7 +65,7 @@ pub mod webhooks;
 pub mod workspace;
 pub mod workspaces_api;
 
-use axum::extract::MatchedPath;
+use axum::extract::{Extension, MatchedPath};
 use axum::http::Request;
 use axum::middleware;
 use axum::routing::{get, MethodRouter};
@@ -82,13 +82,41 @@ pub use trace_archival_config::{
     TRACE_ARCHIVAL_CONFIG_CACHE_TTL,
 };
 
+/// The configured `--static-prefix`, available to handlers and middleware that
+/// construct server-local URLs or dispatch against unprefixed route templates.
+#[derive(Debug, Clone, Default)]
+pub struct StaticPrefix(Option<String>);
+
+impl StaticPrefix {
+    pub fn new(value: Option<String>) -> Self {
+        Self(value)
+    }
+
+    pub fn add(&self, path: &str) -> String {
+        match &self.0 {
+            Some(prefix) => format!("{prefix}{path}"),
+            None => path.to_string(),
+        }
+    }
+
+    pub fn strip<'a>(&self, path: &'a str) -> &'a str {
+        self.0
+            .as_deref()
+            .and_then(|prefix| path.strip_prefix(prefix))
+            .unwrap_or(path)
+    }
+
+    pub fn as_deref(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+
 /// Builds the full application `Router` (ops endpoints only — no store).
 /// Retained for the ops/skeleton tests that don't need a backend store.
 ///
-/// Request logging and metrics middleware are applied, and everything is nested
-/// under `config.static_prefix` when set (mirroring `_add_static_prefix`,
-/// `mlflow/server/handlers.py:6731-6734`, which prepends the prefix to every
-/// registered route).
+/// Request logging and metrics middleware are applied. Flask-compatible routes
+/// and native routers are nested under `config.static_prefix` when set. The
+/// native artifact proxy is also kept at its bare path.
 pub fn build_app(config: &ServerConfig) -> Router {
     let metrics_handle = metrics::install_recorder();
     build_app_with_recorder(config, metrics_handle, None)
@@ -140,6 +168,7 @@ pub fn build_app_with_recorder(
     // the `nest` rather than added to `api`. Only mounted when auth is
     // enabled, matching every other auth-app route.
     let signup_state = state.clone().filter(AppState::auth_enabled);
+    let artifact_state = state.clone();
     // Kept for the workspace-resolution layer below, which needs `AppState`
     // (its workspace store presence is the enabled/disabled signal). `state`
     // itself is moved into `register_proto_routes`.
@@ -166,10 +195,30 @@ pub fn build_app_with_recorder(
             }),
         );
 
-    let app = match &config.static_prefix {
+    let mut app = match &config.static_prefix {
         Some(prefix) => Router::new().nest(prefix, api),
         None => api,
     };
+
+    if let (Some(_), Some(state)) = (&config.static_prefix, artifact_state) {
+        let artifact_api = register_artifact_proxy_routes(state)
+            .layer(middleware::from_fn(metrics::track_metrics))
+            .layer(
+                TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
+                    let path = request
+                        .extensions()
+                        .get::<MatchedPath>()
+                        .map(MatchedPath::as_str)
+                        .unwrap_or_else(|| request.uri().path());
+                    info_span!(
+                        "http_request",
+                        method = %request.method(),
+                        path,
+                    )
+                }),
+            );
+        app = app.merge(artifact_api);
+    }
 
     let app = match signup_state {
         // Registered via `.route()` (not `.merge()` of a fresh router): merging
@@ -191,6 +240,8 @@ pub fn build_app_with_recorder(
         ),
         None => app,
     };
+
+    let app = app.layer(Extension(StaticPrefix::new(config.static_prefix.clone())));
 
     // Workspace-resolution middleware (plan T10.3, §3.17). Applied *after* the
     // auth layer (which is wrapped inside `register_proto_routes`) so it is the
@@ -228,7 +279,8 @@ pub fn build_app_with_recorder(
             config.allowed_hosts.clone(),
             config.cors_allowed_origins.clone(),
             &config.x_frame_options,
-        );
+        )
+        .with_static_prefix(config.static_prefix.clone());
         app.layer(middleware::from_fn_with_state(
             security_config,
             security::security_middleware,
@@ -537,6 +589,32 @@ fn register_proto_routes(state: AppState, artifacts_only: bool) -> Router {
     }
 
     register_role_and_auth_layers(router, state)
+}
+
+fn register_artifact_proxy_routes(state: AppState) -> Router {
+    let mut router: Router<AppState> = Router::new();
+    for spec in mlflow_proto::ROUTE_TABLE
+        .iter()
+        .filter(|spec| spec.service == "MlflowArtifactsService")
+    {
+        let Some(handler) = handler_for(spec.service, spec.method, spec.http_method) else {
+            continue;
+        };
+        for route in spec.expand("") {
+            router = router.route(&to_axum_path(&route.path), handler.clone());
+        }
+    }
+
+    let auth_enabled = state.auth_enabled();
+    let layer_state = state.clone();
+    let mut app = router.with_state(state);
+    if auth_enabled {
+        app = app.layer(middleware::from_fn_with_state(
+            layer_state,
+            auth_middleware::authorize,
+        ));
+    }
+    app
 }
 
 fn artifacts_only_workspace_handler(http_method: &str) -> Option<MethodRouter<AppState>> {
