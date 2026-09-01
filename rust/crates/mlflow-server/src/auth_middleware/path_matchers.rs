@@ -631,6 +631,16 @@ fn build_dispatch() -> Dispatch {
         d.exact.push(Route {
             matcher: TemplateMatcher::compile(path),
             method,
+            validator: Validator::IsJobOwner,
+        });
+    }
+    for (path, method) in [
+        ("/ajax-api/3.0/jobs/", "POST"),
+        ("/ajax-api/3.0/jobs/search", "POST"),
+    ] {
+        d.exact.push(Route {
+            matcher: TemplateMatcher::compile(path),
+            method,
             validator: Validator::Allow,
         });
     }
@@ -805,6 +815,10 @@ pub fn dispatch_request(path: &str, method: &str) -> Dispatched {
 
     if path.starts_with("/ajax-api/3.0/mlflow/assistant/") {
         return Dispatched::Validator(Validator::Allow, Vec::new());
+    }
+
+    if path.contains("/mlflow/jobs/") || path.starts_with("/ajax-api/3.0/jobs") {
+        return Dispatched::Deny;
     }
 
     if path.starts_with("/api/3.0/mlflow/datasets/")
@@ -1237,6 +1251,36 @@ mod tests {
                 )),
                 Validator::ReadMetricHistoryBulkInterval
             );
+        }
+    }
+
+    #[test]
+    fn generic_job_routes_are_owned_or_authenticated_and_fail_closed() {
+        for (path, method) in [
+            ("/ajax-api/3.0/mlflow/jobs/job-1", "GET"),
+            ("/ajax-api/3.0/mlflow/jobs/cancel/job-1", "PATCH"),
+            ("/ajax-api/3.0/jobs/job-1", "GET"),
+            ("/ajax-api/3.0/jobs/cancel/job-1", "PATCH"),
+        ] {
+            assert_eq!(
+                validator_of(dispatch_request(path, method)),
+                Validator::IsJobOwner
+            );
+        }
+        for (path, method) in [
+            ("/ajax-api/3.0/jobs/", "POST"),
+            ("/ajax-api/3.0/jobs/search", "POST"),
+        ] {
+            assert_eq!(
+                validator_of(dispatch_request(path, method)),
+                Validator::Allow
+            );
+        }
+        for path in [
+            "/ajax-api/3.0/mlflow/jobs/job-1/unknown",
+            "/ajax-api/3.0/jobs/job-1/unknown",
+        ] {
+            assert!(matches!(dispatch_request(path, "GET"), Dispatched::Deny));
         }
     }
 

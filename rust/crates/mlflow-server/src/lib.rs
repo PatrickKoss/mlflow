@@ -481,8 +481,8 @@ fn register_proto_routes(state: AppState, artifacts_only: bool) -> Router {
     // separate native FastAPI router (`job_api.py`) explicitly matched by
     // `_find_fastapi_validator`. Preserve both prefixes and their different
     // response shapes.
-    // Both families carry an explicit authenticated-only decision. Per-job
-    // ownership lands with the generic-jobs authorization task.
+    // Per-id reads and cancellation are creator-owned. Submit and search need
+    // authentication but have no per-resource gate.
     router = router.route(
         "/ajax-api/3.0/mlflow/jobs/{job_id}",
         get(jobs::flask_get_job),
@@ -492,6 +492,14 @@ fn register_proto_routes(state: AppState, artifacts_only: bool) -> Router {
         axum::routing::patch(jobs::flask_cancel_job),
     );
     router = router.route("/ajax-api/3.0/jobs/{job_id}", get(jobs::fastapi_get_job));
+    router = router.route(
+        "/ajax-api/3.0/jobs/",
+        axum::routing::post(jobs::fastapi_submit_job),
+    );
+    router = router.route(
+        "/ajax-api/3.0/jobs/search",
+        axum::routing::post(jobs::fastapi_search_jobs),
+    );
     router = router.route(
         "/ajax-api/3.0/jobs/cancel/{job_id}",
         axum::routing::patch(jobs::fastapi_cancel_job),

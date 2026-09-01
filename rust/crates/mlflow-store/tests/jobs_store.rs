@@ -15,6 +15,33 @@ async fn store(temp: &TempDb) -> JobStore {
 }
 
 #[tokio::test]
+async fn creator_round_trips_and_is_workspace_scoped() {
+    let temp = TempDb::new("jobs_creator").await;
+    let store = store(&temp).await;
+    let owned = store
+        .create_job_with_creator("team-a", "evaluate", "{}", None, Some("alice"))
+        .await
+        .unwrap();
+    assert_eq!(owned.creator.as_deref(), Some("alice"));
+    assert_eq!(
+        store
+            .get_job("team-a", &owned.job_id)
+            .await
+            .unwrap()
+            .creator
+            .as_deref(),
+        Some("alice")
+    );
+    assert!(store.get_job("team-b", &owned.job_id).await.is_err());
+
+    let anonymous = store
+        .create_job("team-b", "evaluate", "{}", None)
+        .await
+        .unwrap();
+    assert_eq!(anonymous.creator, None);
+}
+
+#[tokio::test]
 async fn lifecycle_retries_metadata_filters_and_workspace_scoping() {
     let temp = TempDb::new("jobs_lifecycle").await;
     let store = store(&temp).await;

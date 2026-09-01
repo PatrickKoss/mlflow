@@ -30,7 +30,7 @@ use hyper_util::rt::TokioExecutor;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use mlflow_auth::{AuthDb, AuthStore};
 use mlflow_server::{build_app_with_recorder, AppState, ServerConfig};
-use mlflow_store::{Db, PoolConfig, StartTraceInput, TrackingStore};
+use mlflow_store::{Db, JobStore, PoolConfig, StartTraceInput, TrackingStore};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 
@@ -811,6 +811,79 @@ async fn unknown_traces_subpath_fails_closed() {
     .await;
     assert_eq!(resp.status, StatusCode::FORBIDDEN);
     assert_eq!(resp.body, "Permission denied");
+}
+
+#[tokio::test]
+async fn generic_jobs_are_owned_and_unknown_paths_fail_closed() {
+    let srv = TestServer::start("job_ownership").await;
+    let jobs = JobStore::new(srv.tracking.db().clone());
+
+    for prefix in ["/ajax-api/3.0/mlflow/jobs", "/ajax-api/3.0/jobs"] {
+        let owner_get = jobs
+            .create_job_with_creator(WS, "auth_job", "{}", None, Some(BOB.0))
+            .await
+            .unwrap();
+        let owner = send(
+            &srv.base,
+            Method::GET,
+            &format!("{prefix}/{}", owner_get.job_id),
+            Some(BOB),
+            None,
+        )
+        .await;
+        assert_eq!(owner.status, StatusCode::OK, "{}", owner.body);
+
+        let owner_cancel = jobs
+            .create_job_with_creator(WS, "auth_job", "{}", None, Some(BOB.0))
+            .await
+            .unwrap();
+        let owner = send(
+            &srv.base,
+            Method::PATCH,
+            &format!("{prefix}/cancel/{}", owner_cancel.job_id),
+            Some(BOB),
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(owner.status, StatusCode::OK, "{}", owner.body);
+
+        let not_owned = jobs
+            .create_job_with_creator(WS, "auth_job", "{}", None, Some("someone_else"))
+            .await
+            .unwrap();
+        for (method, path) in [
+            (Method::GET, format!("{prefix}/{}", not_owned.job_id)),
+            (
+                Method::PATCH,
+                format!("{prefix}/cancel/{}", not_owned.job_id),
+            ),
+        ] {
+            let denied = send(&srv.base, method, &path, Some(BOB), None).await;
+            assert_eq!(denied.status, StatusCode::FORBIDDEN);
+            assert_eq!(denied.body, "Permission denied");
+        }
+
+        let admin = send(
+            &srv.base,
+            Method::GET,
+            &format!("{prefix}/{}", not_owned.job_id),
+            Some(ALICE),
+            None,
+        )
+        .await;
+        assert_eq!(admin.status, StatusCode::OK, "{}", admin.body);
+
+        let unknown = send(
+            &srv.base,
+            Method::GET,
+            &format!("{prefix}/{}/unknown", not_owned.job_id),
+            Some(BOB),
+            None,
+        )
+        .await;
+        assert_eq!(unknown.status, StatusCode::FORBIDDEN);
+        assert_eq!(unknown.body, "Permission denied");
+    }
 }
 
 #[tokio::test]

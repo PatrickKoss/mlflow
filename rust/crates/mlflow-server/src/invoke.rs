@@ -99,6 +99,7 @@ pub async fn invoke_genai_evaluate(
         )
         .await?;
     let run_id = run.info.run_id;
+    let creator = authenticated_username(&parts);
     let username = request_username(&parts);
     let params = ordered_object([
         ("trace_ids", Value::Array(trace_ids.clone())),
@@ -109,7 +110,15 @@ pub async fn invoke_genai_evaluate(
         ("run_id", Value::String(run_id.clone())),
         ("username", username.map_or(Value::Null, Value::String)),
     ]);
-    let job = match create_job(&state, workspace.name(), "invoke_genai_evaluate", params).await {
+    let job = match create_job(
+        &state,
+        workspace.name(),
+        "invoke_genai_evaluate",
+        params,
+        creator.as_deref(),
+    )
+    .await
+    {
         Ok(job) => job,
         Err(error) => {
             let _ = state
@@ -209,6 +218,7 @@ pub async fn invoke_scorer(
         fixed_batches(&trace_ids)?
     };
 
+    let creator = authenticated_username(&parts);
     let username = request_username(&parts);
     let mut jobs = Vec::with_capacity(batches.len());
     for batch in batches {
@@ -228,7 +238,14 @@ pub async fn invoke_scorer(
                 username.clone().map_or(Value::Null, Value::String),
             ),
         ]);
-        let job = create_job(&state, workspace.name(), "invoke_scorer", params).await?;
+        let job = create_job(
+            &state,
+            workspace.name(),
+            "invoke_scorer",
+            params,
+            creator.as_deref(),
+        )
+        .await?;
         jobs.push(json!({"job_id": job.job_id, "trace_ids": batch}));
     }
     flask_json(json!({"jobs": jobs}))
@@ -343,7 +360,15 @@ pub async fn invoke_issue_detection(
             Value::String(workspace.name().to_string()),
         );
     }
-    let job = create_job(&state, workspace.name(), "invoke_issue_detection", params).await?;
+    let creator = authenticated_username(&parts);
+    let job = create_job(
+        &state,
+        workspace.name(),
+        "invoke_issue_detection",
+        params,
+        creator.as_deref(),
+    )
+    .await?;
     state
         .tracking_store()
         .set_tag(
@@ -371,11 +396,25 @@ async fn create_job(
     workspace: &str,
     name: &str,
     params: Value,
+    creator: Option<&str>,
 ) -> Result<mlflow_store::Job, MlflowError> {
     state
         .job_store()
-        .create_job(workspace, name, &python_json_dumps(&params, false), None)
+        .create_job_with_creator(
+            workspace,
+            name,
+            &python_json_dumps(&params, false),
+            None,
+            creator,
+        )
         .await
+}
+
+fn authenticated_username(parts: &Parts) -> Option<String> {
+    parts
+        .extensions
+        .get::<AuthContext>()
+        .map(|auth| auth.username.clone())
 }
 
 async fn session_batches(

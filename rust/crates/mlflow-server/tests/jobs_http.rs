@@ -95,14 +95,32 @@ impl Fixture {
         path: &str,
         authorization: Option<&str>,
     ) -> (StatusCode, String, String) {
+        self.request_json_with_auth(method, path, authorization, None)
+            .await
+    }
+
+    async fn request_json_with_auth(
+        &self,
+        method: Method,
+        path: &str,
+        authorization: Option<&str>,
+        body: Option<Value>,
+    ) -> (StatusCode, String, String) {
         let mut request = Request::builder().method(method).uri(path);
         if let Some(authorization) = authorization {
             request = request.header("authorization", authorization);
         }
+        let body = match body {
+            Some(body) => {
+                request = request.header("content-type", "application/json");
+                Body::from(body.to_string())
+            }
+            None => Body::empty(),
+        };
         let response = self
             .app
             .clone()
-            .oneshot(request.body(Body::empty()).unwrap())
+            .oneshot(request.body(body).unwrap())
             .await
             .unwrap();
         let status = response.status();
@@ -193,6 +211,7 @@ async fn fastapi_alias_returns_the_complete_job_model() {
     assert_eq!(body["result"], Value::Null);
     assert_eq!(body["retry_count"], 0);
     assert_eq!(body["status_details"], json!({"progress": 10}));
+    assert!(body.get("creator").is_none());
     assert!(body["creation_time"].is_i64());
     assert!(body["last_update_time"].is_i64());
 }
@@ -239,26 +258,109 @@ async fn fastapi_alias_errors_use_http_exception_shape() {
 }
 
 #[tokio::test]
-async fn both_prefixes_are_authenticated_only_without_a_resource_gate() {
+async fn native_submit_records_creator_and_search_only_requires_authentication() {
     let fixture = Fixture::new_with_auth("auth", true).await;
-    let job = fixture
-        .jobs
-        .create_job(WS, "auth_job", "{}", None)
-        .await
-        .unwrap();
-    let paths = [
-        format!("/ajax-api/3.0/mlflow/jobs/{}", job.job_id),
-        format!("/ajax-api/3.0/jobs/{}", job.job_id),
-    ];
     let credentials =
         base64::engine::general_purpose::STANDARD.encode("bob_pbkdf2:bob-password-4567");
     let authorization = format!("Basic {credentials}");
-    for path in paths {
-        let (status, _, _) = fixture.request(Method::GET, &path).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let (status, _, _) = fixture
-            .request_with_auth(Method::GET, &path, Some(&authorization))
+    let payload = json!({
+        "job_name": "run_online_trace_scorer",
+        "params": {"experiment_id": "0", "online_scorers": []}
+    });
+
+    let (status, _, _) = fixture
+        .request_json_with_auth(
+            Method::POST,
+            "/ajax-api/3.0/jobs/",
+            None,
+            Some(payload.clone()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body, _) = fixture
+        .request_json_with_auth(
+            Method::POST,
+            "/ajax-api/3.0/jobs/",
+            Some(&authorization),
+            Some(payload),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert!(body.get("creator").is_none());
+    let job = fixture
+        .jobs
+        .get_job(WS, body["job_id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(job.creator.as_deref(), Some("bob_pbkdf2"));
+
+    let (status, _, _) = fixture
+        .request_json_with_auth(
+            Method::POST,
+            "/ajax-api/3.0/jobs/search",
+            None,
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, body, _) = fixture
+        .request_json_with_auth(
+            Method::POST,
+            "/ajax-api/3.0/jobs/search",
+            Some(&authorization),
+            Some(json!({"job_name": "run_online_trace_scorer"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["jobs"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn owner_and_admin_pass_while_non_owner_is_forbidden() {
+    let fixture = Fixture::new_with_auth("ownership", true).await;
+    let bob = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("bob_pbkdf2:bob-password-4567")
+    );
+    let admin = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode("alice_scrypt:alice-password-123")
+    );
+
+    for path in ["/ajax-api/3.0/mlflow/jobs/{}", "/ajax-api/3.0/jobs/{}"] {
+        let owned = fixture
+            .jobs
+            .create_job_with_creator(WS, "auth_job", "{}", None, Some("bob_pbkdf2"))
+            .await
+            .unwrap();
+        let path = path.replace("{}", &owned.job_id);
+        assert_eq!(
+            fixture
+                .request_with_auth(Method::GET, &path, Some(&bob))
+                .await
+                .0,
+            StatusCode::OK
+        );
+
+        let other = fixture
+            .jobs
+            .create_job_with_creator(WS, "auth_job", "{}", None, Some("someone_else"))
+            .await
+            .unwrap();
+        let path = path.replace(&owned.job_id, &other.job_id);
+        let (status, body, _) = fixture
+            .request_with_auth(Method::GET, &path, Some(&bob))
             .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body, "Permission denied");
+        assert_eq!(
+            fixture
+                .request_with_auth(Method::GET, &path, Some(&admin))
+                .await
+                .0,
+            StatusCode::OK
+        );
     }
 }

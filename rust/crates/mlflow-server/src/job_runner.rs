@@ -38,9 +38,9 @@ pub struct JobExecutionRequest {
     /// Python propagates the persisted row workspace only when workspace mode
     /// is enabled; single-tenant workers receive no workspace context.
     pub workspace: Option<String>,
-    /// Python persists the authenticated username inside supported job params
-    /// (the T16.5 jobs schema has no separate subject column). The runner
-    /// exposes that persisted value explicitly for T17.2's worker protocol.
+    /// Python persists the worker's authenticated subject inside supported job
+    /// params. This is separate from the row's creator, which gates job access.
+    /// The runner exposes the subject explicitly for T17.2's worker protocol.
     pub subject: Value,
 }
 

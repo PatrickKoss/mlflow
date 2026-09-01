@@ -88,6 +88,7 @@ pub struct Job {
     pub retry_count: i64,
     pub last_update_time: i64,
     pub status_details: Option<Value>,
+    pub creator: Option<String>,
 }
 
 impl Job {
@@ -124,13 +125,25 @@ impl JobStore {
         params: &str,
         timeout: Option<f64>,
     ) -> Result<Job, MlflowError> {
+        self.create_job_with_creator(workspace, job_name, params, timeout, None)
+            .await
+    }
+
+    pub async fn create_job_with_creator(
+        &self,
+        workspace: &str,
+        job_name: &str,
+        params: &str,
+        timeout: Option<f64>,
+        creator: Option<&str>,
+    ) -> Result<Job, MlflowError> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = now_millis();
         let p = |index| self.db.dialect().placeholder(index);
         let sql = format!(
             "INSERT INTO {JOBS} (id, creation_time, job_name, params, workspace, timeout, \
-             status, result, retry_count, last_update_time, status_details) \
-             VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+             status, result, retry_count, last_update_time, status_details, creator) \
+             VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             p(1),
             p(2),
             p(3),
@@ -141,7 +154,8 @@ impl JobStore {
             p(8),
             p(9),
             p(10),
-            p(11)
+            p(11),
+            p(12)
         );
         self.db
             .exec(
@@ -158,6 +172,7 @@ impl JobStore {
                     Val::Int(0),
                     Val::Int(now),
                     Val::OptJson(None),
+                    Val::OptText(creator.map(str::to_string)),
                 ],
             )
             .await
@@ -757,7 +772,7 @@ async fn fetch_job_tx(
 
 fn job_columns() -> &'static str {
     "id, creation_time, job_name, params, workspace, timeout, status, result, \
-     retry_count, last_update_time, status_details"
+     retry_count, last_update_time, status_details, creator"
 }
 
 fn job_columns_qualified(table: &str) -> String {
@@ -787,6 +802,7 @@ fn row_to_job(row: &dyn RowLike) -> Result<Job, sqlx::Error> {
         retry_count: row.get_int("retry_count")?,
         last_update_time: row.get_i64("last_update_time")?,
         status_details: row.get_opt_json("status_details")?,
+        creator: row.get_opt_string("creator")?,
     })
 }
 

@@ -10,3 +10,9 @@ cases:
   - {surface: demo, name: auth_user_demo_generate_allowed}
   - {surface: demo, name: auth_user_demo_delete_admin_only}
   - {surface: presigned, name: auth_user_presigned_upload_requires_update}
+  - {surface: jobs, name: auth_job_owner_get_200}
+  - {surface: jobs, name: auth_job_owner_cancel_200}
+  - {surface: jobs, name: auth_job_non_owner_get_403}
+  - {surface: jobs, name: auth_job_non_owner_cancel_403}
+  - {surface: jobs, name: auth_job_admin_get_200}
+  - {surface: jobs, name: auth_job_admin_cancel_200}

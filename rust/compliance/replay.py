@@ -898,7 +898,7 @@ def _run_sqlite_sections(
 
     results: list[CaseResult] = []
     creds: dict[str, tuple[str, str]] = {}
-    submission_sections = {"prompt_optimization", "invoke"} & sections.keys()
+    submission_sections = {"prompt_optimization", "invoke", "jobs"} & sections.keys()
     # Discovery parity must use the checked-in catalog on both sides. Python's
     # default points at a mutable GitHub release and would make a historical
     # corpus depend on network availability and release timing.
@@ -1020,6 +1020,10 @@ def _run_auth_section(
             seed_db,
             artifact_root,
             extra_env=extra_env,
+            python_extra_env={
+                "MLFLOW_SERVER_ENABLE_JOB_EXECUTION": "true",
+                "_MLFLOW_HUEY_STORAGE_PATH": str(workroot),
+            },
             # The auth endpoints exist only in the auth app factory; the base
             # `mlflow.server:app` 404s them all.
             python_asgi_app="mlflow.server.auth:create_app",
@@ -1311,6 +1315,7 @@ def main() -> int:
     invoke_cases = sections.pop("invoke", [])
     issue_credentials_cases = sections.pop("issue_credentials", [])
     traces_cases = sections.pop("traces", [])
+    jobs_cases = sections.pop("jobs", [])
     gateway_cases = sections.pop("gateway", [])
     gateway_proxy_validation_cases = sections.pop("gateway_proxy_validation", [])
     mcp_server_registry_cases = sections.pop("mcp_server_registry", [])
@@ -1441,6 +1446,16 @@ def main() -> int:
             all_results.extend(
                 _run_sqlite_sections(
                     {"traces": traces_cases},
+                    allow,
+                    Path(td),
+                    python_asgi_app="mlflow.server.fastapi_app:app",
+                )
+            )
+    if jobs_cases:
+        with tempfile.TemporaryDirectory(prefix="t-s3-jobs-") as td:
+            all_results.extend(
+                _run_sqlite_sections(
+                    {"jobs": jobs_cases},
                     allow,
                     Path(td),
                     python_asgi_app="mlflow.server.fastapi_app:app",

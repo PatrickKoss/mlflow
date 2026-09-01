@@ -214,6 +214,8 @@ pub enum Validator {
     ReadPromptOptimizationJob,
     UpdatePromptOptimizationJob,
     DeletePromptOptimizationJob,
+    // ---- Generic jobs (owned by the authenticated submitter) ----
+    IsJobOwner,
     // ---- Logged models (inherit experiment) ----
     ReadLoggedModel,
     UpdateLoggedModel,
@@ -391,6 +393,7 @@ impl Validator {
             DeletePromptOptimizationJob => Ok(experiment_perm_from_prompt_optimization_job(ctx)
                 .await?
                 .can_delete),
+            IsJobOwner => validate_is_job_owner(ctx).await,
             // Logged models inherit experiment.
             ReadLoggedModel => Ok(experiment_perm_from_model(ctx).await?.can_read),
             UpdateLoggedModel => Ok(experiment_perm_from_model(ctx).await?.can_update),
@@ -1290,6 +1293,21 @@ async fn experiment_perm_from_prompt_optimization_job(
             ))
         })?;
     experiment_permission(ctx, experiment_id).await
+}
+
+/// `validate_is_job_owner` (`mlflow/server/auth/__init__.py`): generic jobs
+/// have no experiment scope, so only their recorded creator may read or cancel
+/// them. Missing jobs and legacy rows with no creator are denied.
+async fn validate_is_job_owner(ctx: &RequestCtx<'_>) -> Result<bool, MlflowError> {
+    let job_id = require_param(ctx, "job_id")?;
+    match mlflow_store::JobStore::new(ctx.tracking_store()?.db().clone())
+        .get_job(ctx.workspace, &job_id)
+        .await
+    {
+        Ok(job) => Ok(job.creator.as_deref() == Some(ctx.username)),
+        Err(error) if error.error_code == ErrorCode::ResourceDoesNotExist => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 async fn experiment_perm_from_model(

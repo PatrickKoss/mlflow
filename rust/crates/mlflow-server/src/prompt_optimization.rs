@@ -17,6 +17,7 @@ use mlflow_proto::mlflow as pb;
 use mlflow_store::{python_json_dumps, DatasetInputSpec, Job, JobStatus, RunStatus};
 use serde_json::{json, Map, Value};
 
+use crate::auth_middleware::AuthContext;
 use crate::proto_http::{parse_request_lenient, proto_response};
 use crate::schema_validation::{SchemaEntry, Validator};
 use crate::state::AppState;
@@ -172,13 +173,18 @@ pub async fn create_prompt_optimization_job(
         &config.scorers,
     );
     let serialized_params = python_json_dumps(&params, false);
+    let creator = parts
+        .extensions
+        .get::<AuthContext>()
+        .map(|auth| auth.username.as_str());
     let job = state
         .job_store()
-        .create_job(
+        .create_job_with_creator(
             workspace.name(),
             OPTIMIZE_PROMPTS_JOB_NAME,
             &serialized_params,
             None,
+            creator,
         )
         .await?;
     // The D20 database row is the only queue. The Phase 17 runner claims it and
@@ -652,6 +658,7 @@ mod tests {
             retry_count: 0,
             last_update_time: 123,
             status_details: None,
+            creator: None,
         }
     }
 

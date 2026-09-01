@@ -19,4 +19,5 @@ pub struct Job {
     pub retry_count: i64,
     pub last_update_time: i64,
     pub status_details: Option<serde_json::Value>,
+    pub creator: Option<String>,
 }

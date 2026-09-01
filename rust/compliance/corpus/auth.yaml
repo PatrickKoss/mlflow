@@ -508,3 +508,105 @@ cases:
     body: '{"experiment_id":"${auth_scoped_experiment_id}","name":"Encoded issue","description":"Legacy request body"}'
     auth: user
     expect_status: 200
+
+  - name: auth_jobs_create_experiment
+    method: POST
+    path: /api/2.0/mlflow/experiments/create
+    body: {name: auth_jobs_experiment}
+    auth: admin
+    bind:
+      - {bind: auth_jobs_experiment_id, from: $.experiment_id}
+    expect_status: 200
+
+  - name: auth_jobs_grant_owner_edit
+    method: POST
+    path: /api/3.0/mlflow/users/permissions/grant
+    body:
+      username: alice
+      resource_type: experiment
+      resource_id: "${auth_jobs_experiment_id}"
+      permission: EDIT
+    auth: admin
+    compare_body: false
+    expect_status: 200
+    shared_db_rust_second_write:
+      expect_status: 400
+      expect_error_code: RESOURCE_ALREADY_EXISTS
+      reason: Python inserts first into the shared auth DB; Rust observes the exact grant as a duplicate.
+
+  - name: auth_jobs_submit_as_owner
+    method: POST
+    path: /api/3.0/mlflow/prompt-optimization/jobs
+    body:
+      experiment_id: "${auth_jobs_experiment_id}"
+      source_prompt_uri: prompts:/auth-owner/1
+      config:
+        optimizer_type: OPTIMIZER_TYPE_METAPROMPT
+        scorers: []
+        optimizer_config_json: '{"reflection_model":"openai:/fixture"}'
+    auth: user
+    bind:
+      - {bind: auth_owner_job_id, from: $.job.job_id}
+    expect_status: 200
+
+  - name: auth_job_owner_get_200
+    method: GET
+    path: /ajax-api/3.0/mlflow/jobs/${auth_owner_job_id}
+    auth: user
+    expect_status: 200
+
+  - name: auth_job_owner_cancel_200
+    method: PATCH
+    path: /ajax-api/3.0/jobs/cancel/${auth_owner_job_id}
+    body: {}
+    auth: user
+    expect_status: 200
+
+  - name: auth_job_admin_get_owner_job_200
+    method: GET
+    path: /ajax-api/3.0/jobs/${auth_owner_job_id}
+    auth: admin
+    expect_status: 200
+
+  - name: auth_jobs_submit_as_admin
+    method: POST
+    path: /ajax-api/3.0/mlflow/prompt-optimization/jobs
+    body:
+      experiment_id: "${auth_jobs_experiment_id}"
+      source_prompt_uri: prompts:/auth-admin/1
+      config:
+        optimizer_type: OPTIMIZER_TYPE_METAPROMPT
+        scorers: []
+        optimizer_config_json: '{"reflection_model":"openai:/fixture"}'
+    auth: admin
+    bind:
+      - {bind: auth_admin_job_id, from: $.job.job_id}
+    expect_status: 200
+
+  - name: auth_job_non_owner_get_403
+    method: GET
+    path: /ajax-api/3.0/mlflow/jobs/${auth_admin_job_id}
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_job_non_owner_cancel_403
+    method: PATCH
+    path: /ajax-api/3.0/jobs/cancel/${auth_admin_job_id}
+    body: {}
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_job_admin_get_200
+    method: GET
+    path: /ajax-api/3.0/jobs/${auth_admin_job_id}
+    auth: admin
+    expect_status: 200
+
+  - name: auth_job_admin_cancel_200
+    method: PATCH
+    path: /ajax-api/3.0/mlflow/jobs/cancel/${auth_admin_job_id}
+    body: {}
+    auth: admin
+    expect_status: 200

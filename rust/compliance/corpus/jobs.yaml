@@ -1,0 +1,49 @@
+# Generic job API parity. Python needs job execution enabled to accept a
+# submission. The replay harness keeps both queues idle so the row remains
+# pending until the cancel case.
+cases:
+  - name: jobs_submit_pending
+    method: POST
+    path: /ajax-api/3.0/jobs/
+    body:
+      job_name: run_online_trace_scorer
+      params: {experiment_id: "0", online_scorers: []}
+    bind:
+      - {bind: generic_job_id, from: $.job_id}
+    expect_status: 200
+
+  - name: jobs_get_native_pending
+    method: GET
+    path: /ajax-api/3.0/jobs/${generic_job_id}
+    expect_status: 200
+
+  - name: jobs_get_flask_pending
+    method: GET
+    path: /ajax-api/3.0/mlflow/jobs/${generic_job_id}
+    expect_status: 200
+
+  - name: jobs_search_authenticated_surface
+    method: POST
+    path: /ajax-api/3.0/jobs/search
+    body:
+      job_name: run_online_trace_scorer
+      params: {experiment_id: "0"}
+      statuses: [PENDING]
+    expect_status: 200
+
+  - name: jobs_cancel_native
+    method: PATCH
+    path: /ajax-api/3.0/jobs/cancel/${generic_job_id}
+    body: {}
+    expect_status: 200
+
+  - name: jobs_get_flask_canceled
+    method: GET
+    path: /ajax-api/3.0/mlflow/jobs/${generic_job_id}
+    expect_status: 200
+
+  - name: jobs_submit_invalid_name
+    method: POST
+    path: /ajax-api/3.0/jobs/
+    body: {job_name: invalid_job_name, params: {}}
+    expect_status: 400

@@ -4,15 +4,17 @@
 //! the Flask `/mlflow/jobs` handlers return lifecycle details only, while the
 //! native FastAPI `/jobs` router returns the complete job model.
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use mlflow_error::MlflowError;
-use mlflow_store::{Job, JobStatus};
-use serde::Serialize;
+use mlflow_genai::JobKind;
+use mlflow_store::{python_json_dumps, Job, JobStatus};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::auth_middleware::AuthContext;
 use crate::state::AppState;
 use crate::workspace::Workspace;
 
@@ -48,6 +50,25 @@ impl FastApiJob {
             status_details: job.status_details,
         })
     }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SubmitJobPayload {
+    job_name: String,
+    params: Value,
+    timeout: Option<f64>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SearchJobPayload {
+    job_name: Option<String>,
+    params: Option<Value>,
+    statuses: Option<Vec<JobStatus>>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SearchJobsResponse {
+    jobs: Vec<FastApiJob>,
 }
 
 /// Python's native job router catches `MlflowException` and raises FastAPI's
@@ -104,6 +125,58 @@ pub(crate) async fn fastapi_get_job(
 ) -> Result<Json<FastApiJob>, FastApiJobError> {
     let job = state.job_store().get_job(workspace.name(), &job_id).await?;
     Ok(Json(FastApiJob::from_job(job)?))
+}
+
+pub(crate) async fn fastapi_submit_job(
+    State(state): State<AppState>,
+    workspace: Workspace,
+    auth: Option<Extension<AuthContext>>,
+    Json(payload): Json<SubmitJobPayload>,
+) -> Result<Json<FastApiJob>, FastApiJobError> {
+    payload.job_name.parse::<JobKind>().map_err(|_| {
+        MlflowError::invalid_parameter_value(format!("Invalid job name: {}", payload.job_name))
+    })?;
+    if !payload.params.is_object() {
+        return Err(MlflowError::invalid_parameter_value(
+            "When calling 'submit_job', the 'params' argument must be a dict.",
+        )
+        .into());
+    }
+    let creator = auth.as_ref().map(|Extension(auth)| auth.username.as_str());
+    let job = state
+        .job_store()
+        .create_job_with_creator(
+            workspace.name(),
+            &payload.job_name,
+            &python_json_dumps(&payload.params, false),
+            payload.timeout,
+            creator,
+        )
+        .await?;
+    Ok(Json(FastApiJob::from_job(job)?))
+}
+
+pub(crate) async fn fastapi_search_jobs(
+    State(state): State<AppState>,
+    workspace: Workspace,
+    Json(payload): Json<SearchJobPayload>,
+) -> Result<Json<SearchJobsResponse>, FastApiJobError> {
+    let statuses = payload.statuses.unwrap_or_default();
+    let jobs = state
+        .job_store()
+        .list_jobs(
+            workspace.name(),
+            payload.job_name.as_deref(),
+            &statuses,
+            None,
+            None,
+            payload.params.as_ref(),
+        )
+        .await?
+        .into_iter()
+        .map(FastApiJob::from_job)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(SearchJobsResponse { jobs }))
 }
 
 pub(crate) async fn fastapi_cancel_job(
