@@ -41,8 +41,8 @@ use crate::schema::traces::{
 /// `MAX_TRACE_LINKS_PER_REQUEST` (`mlflow/store/tracking/__init__.py:30`).
 pub const MAX_TRACE_LINKS_PER_REQUEST: usize = 100;
 
-/// `_TRACE_WRITE_MAX_DEADLOCK_RETRIES` (`sqlalchemy_store.py:275`).
-pub(crate) const TRACE_WRITE_MAX_DEADLOCK_RETRIES: u32 = 2;
+/// `_DB_WRITE_MAX_DEADLOCK_RETRIES` (`sqlalchemy_store.py:279`).
+pub(crate) const DB_WRITE_MAX_DEADLOCK_RETRIES: u32 = 2;
 
 /// Subdirectory under an experiment's artifact location that isolates trace
 /// artifacts (`SqlAlchemyStore.TRACE_FOLDER_NAME`).
@@ -1148,10 +1148,10 @@ impl TrackingStore {
         Ok(rows.into_iter().collect())
     }
 
-    /// Run a trace-write closure, retrying on DB deadlocks and SQLite writer
-    /// lock conflicts
-    /// (`_run_with_deadlock_retry`, `sqlalchemy_store.py:3469`). Retries up to
-    /// [`TRACE_WRITE_MAX_DEADLOCK_RETRIES`] times with exponential backoff +
+    /// Run a DB-write closure, retrying on DB deadlocks and SQLite writer lock
+    /// conflicts (`_run_with_deadlock_retry`,
+    /// `sqlalchemy_store.py:_run_with_deadlock_retry`). Retries up to
+    /// [`DB_WRITE_MAX_DEADLOCK_RETRIES`] times with exponential backoff +
     /// jitter. PostgreSQL/MySQL deadlocks are identified by their error text.
     /// SQLite has one writer and no row-level `FOR UPDATE`; when two deferred
     /// transactions race to upgrade from readers, the loser reports
@@ -1174,7 +1174,7 @@ impl TrackingStore {
                     let retryable = message.contains("deadlock")
                         || message.contains("database is locked")
                         || message.contains("database table is locked");
-                    if !retryable || attempt >= TRACE_WRITE_MAX_DEADLOCK_RETRIES {
+                    if !retryable || attempt >= DB_WRITE_MAX_DEADLOCK_RETRIES {
                         return Err(e);
                     }
                     // Exponential backoff with jitter, matching Python's

@@ -84,6 +84,83 @@ async fn listing_returns_latest_version_per_name_in_name_order() {
 }
 
 #[tokio::test]
+async fn scorer_experiment_ids_use_integer_binds_and_workspace_scope() {
+    let (_temp, store) = store("scorer_experiment_id_binds").await;
+    let experiment_id = store
+        .create_experiment(WS, "scorer-integer-id", None, &[])
+        .await
+        .unwrap();
+    let other_experiment_id = store
+        .create_experiment("team-b", "scorer-integer-id", None, &[])
+        .await
+        .unwrap();
+
+    store
+        .register_scorer(WS, &experiment_id, "judge", r#"{"v": 1}"#)
+        .await
+        .unwrap();
+    store
+        .register_scorer(WS, &experiment_id, "judge", r#"{"v": 2}"#)
+        .await
+        .unwrap();
+    store
+        .register_scorer("team-b", &other_experiment_id, "other-judge", r#"{"v": 1}"#)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .list_scorers(WS, Some(&experiment_id))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(store.list_scorers(WS, None).await.unwrap().len(), 1);
+    assert_eq!(
+        store
+            .get_scorer(WS, &experiment_id, "judge", None)
+            .await
+            .unwrap()
+            .scorer_version,
+        2
+    );
+    assert_eq!(
+        store
+            .list_scorer_versions(WS, &experiment_id, "judge")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    store
+        .upsert_online_scoring_config(WS, &experiment_id, "judge", 0.0, None)
+        .await
+        .unwrap();
+    store
+        .delete_scorer(WS, &experiment_id, "judge", Some(1))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn list_scorers_rejects_non_integer_experiment_id() {
+    let (_temp, store) = store("scorer_invalid_experiment_id").await;
+    let err = store
+        .list_scorers(WS, Some("not-a-number"))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.error_code,
+        mlflow_error::ErrorCode::InvalidParameterValue
+    );
+    assert_eq!(
+        err.message,
+        "Invalid experiment IDs: experiment IDs must be valid integers."
+    );
+}
+
+#[tokio::test]
 async fn gateway_name_is_stored_as_id_and_resolved_on_read() {
     let (_temp, store) = store("scorer_gateway_rewrite").await;
     let experiment_id = store

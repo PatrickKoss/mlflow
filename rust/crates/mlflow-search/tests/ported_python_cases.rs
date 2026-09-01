@@ -136,6 +136,32 @@ fn runs_filter_conjunction() {
     );
 }
 
+#[test]
+fn dataset_in_values_keep_digits_and_uppercase() {
+    for (input, key, values) in [
+        (
+            "datasets.name IN ('123', 'MyDataset')",
+            "name",
+            vec!["123".to_string(), "MyDataset".to_string()],
+        ),
+        (
+            "datasets.digest IN ('06409663', 'A1B2C3D4')",
+            "digest",
+            vec!["06409663".to_string(), "A1B2C3D4".to_string()],
+        ),
+        (
+            "datasets.context IN ('2024', 'Train')",
+            "context",
+            vec!["2024".to_string(), "Train".to_string()],
+        ),
+    ] {
+        assert_eq!(
+            parse::runs_filter(input).unwrap(),
+            vec![comp("dataset", key, "IN", Value::List(values))]
+        );
+    }
+}
+
 // ----- test_error_filter -----
 
 #[test]

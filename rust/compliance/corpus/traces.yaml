@@ -284,6 +284,14 @@ cases:
       drop_paths: ["$.traces"]
 
   # ---- Errors ----
+  - name: link_prompts_missing_trace
+    method: POST
+    path: /api/2.0/mlflow/traces/link-prompts
+    body:
+      trace_id: tr-does-not-exist
+      prompt_versions: [{name: my-prompt, version: "1"}]
+    expect_status: 404
+
   - name: trace_get_info_missing
     method: GET
     path: /api/3.0/mlflow/traces/tr-does-not-exist

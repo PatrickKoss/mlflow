@@ -246,10 +246,8 @@ fn entity_is_numeric(entity_type: SqlaEntityType, key: &str) -> bool {
 const NUMERIC_OPS: &[&str] = &["<", "<=", ">", ">=", "=", "!="];
 const STRING_OPS: &[&str] = &["=", "!=", "LIKE", "ILIKE", "IN", "NOT IN"];
 
-/// `Entity.validate_op`. Note the Python source has a genuine bug reproduced
-/// here verbatim: the error message always renders `string_ops` in the
-/// "Expected one of ..." text, even when the entity is numeric and the
-/// actually-accepted set was `numeric_ops`.
+/// `Entity.validate_op`: reject operators outside the entity's numeric or
+/// string operator set and report that same set in the error.
 fn validate_op(entity_type: SqlaEntityType, key: &str, op: &str) -> Result<()> {
     let numeric = entity_is_numeric(entity_type, key);
     let ops: &[&str] = if numeric { NUMERIC_OPS } else { STRING_OPS };
@@ -259,7 +257,7 @@ fn validate_op(entity_type: SqlaEntityType, key: &str, op: &str) -> Result<()> {
             entity_type.repr_value(),
             key,
             crate::literal_eval::py_repr_str(op),
-            py_tuple_repr(STRING_OPS),
+            py_tuple_repr(ops),
         )));
     }
     Ok(())
@@ -313,9 +311,7 @@ fn python_float(s: &str) -> Option<f64> {
 }
 
 /// `search_logged_model_utils.parse_filter_string`: the SqlAlchemyStore's
-/// logged-model filter parser. Ported field-for-field from the Python source,
-/// including its dead (overwritten) intermediate assignment and its
-/// `validate_op` message bug (see [`validate_op`]).
+/// logged-model filter parser.
 pub fn parse_filter_string_sqlalchemy(filter_string: Option<&str>) -> Result<Vec<SqlaComparison>> {
     let Some(filter_string) = filter_string.filter(|s| !s.is_empty()) else {
         return Ok(Vec::new());
@@ -533,16 +529,19 @@ mod sqla_filter_tests {
     }
 
     #[test]
-    fn invalid_operator_for_numeric_entity_still_quotes_string_ops() {
-        // The Python bug: even on the numeric branch, the message always
-        // lists `string_ops`, not the `numeric_ops` that were actually
-        // enforced.
+    fn invalid_operator_for_numeric_entity_lists_numeric_ops() {
         let err = parse("metrics.loss LIKE '0.1'").unwrap_err();
         assert_eq!(
             err.message,
             "Invalid comparison operator for metrics.loss: 'LIKE'. Expected one of \
-             ('=', '!=', 'LIKE', 'ILIKE', 'IN', 'NOT IN')."
+             ('<', '<=', '>', '>=', '=', '!=')."
         );
+    }
+
+    #[test]
+    fn quoted_parenthesized_string_is_stripped_once() {
+        let got = parse("params.shape = '(1, 2)'").unwrap();
+        assert_eq!(got[0].value, SqlaValue::Str("(1, 2)".to_string()));
     }
 
     #[test]

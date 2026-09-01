@@ -322,6 +322,39 @@ async fn link_traces_to_run_dedups_and_limits() {
     );
 }
 
+#[tokio::test]
+async fn link_prompts_to_missing_or_inaccessible_trace_errors() {
+    let tmp = TempDb::new("link_prompts_missing").await;
+    let s = store(&tmp).await;
+    let prompts = [("my-prompt".to_string(), "1".to_string())];
+
+    let err = s
+        .link_prompts_to_trace(WS, "tr-does-not-exist", &prompts)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.error_code,
+        mlflow_error::ErrorCode::ResourceDoesNotExist
+    );
+    assert_eq!(err.message, "Trace with ID 'tr-does-not-exist' not found.");
+
+    let experiment_id = s
+        .create_experiment("team-a", "team-a-trace", None, &[])
+        .await
+        .unwrap();
+    let input = trace_input("tr-team-a", &experiment_id, 1, Some(1), "OK", &[], &[]);
+    s.start_trace("team-a", &input).await.unwrap();
+    let err = s
+        .link_prompts_to_trace("team-b", "tr-team-a", &prompts)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.error_code,
+        mlflow_error::ErrorCode::ResourceDoesNotExist
+    );
+    assert_eq!(err.message, "Trace with ID 'tr-team-a' not found.");
+}
+
 // ---------------------------------------------------------------------------
 // delete_traces — both modes + HasField edges
 // ---------------------------------------------------------------------------

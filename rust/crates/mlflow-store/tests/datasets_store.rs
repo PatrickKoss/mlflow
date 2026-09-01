@@ -6,7 +6,7 @@
 //! `mlflow-test-support`), so the same test bodies run across all three
 //! dialects (plan T2.2).
 
-use mlflow_store::{DatasetInputSpec, LoggedModelOutput, MetricInput, TrackingStore};
+use mlflow_store::{DatasetInputSpec, LoggedModelOutput, MetricInput, TrackingStore, ViewType};
 use mlflow_test_support::TempDb;
 
 const WS: &str = "default";
@@ -86,6 +86,83 @@ async fn log_inputs_and_get_run_assembly() {
         .iter()
         .any(|t| t.key == "mlflow.data.context" && t.value == "training"));
     assert!(di.tags.iter().any(|t| t.key == "custom" && t.value == "v"));
+}
+
+#[tokio::test]
+async fn search_runs_dataset_context_in_keeps_values_and_workspace_scope() {
+    let tmp = TempDb::new("dataset_context_in_workspace").await;
+    let s = store(&tmp).await;
+
+    let experiment_a = s
+        .create_experiment("team-a", "dataset-context-a", None, &[])
+        .await
+        .unwrap();
+    let run_a = s
+        .create_run("team-a", &experiment_a, None, Some(1), Some("run-a"), &[])
+        .await
+        .unwrap();
+    let mut dataset_a = ds("123", "06409663");
+    dataset_a.tags = vec![("mlflow.data.context".to_string(), "2024".to_string())];
+    s.log_inputs("team-a", &run_a.info.run_id, &[dataset_a], &[])
+        .await
+        .unwrap();
+
+    let experiment_b = s
+        .create_experiment("team-b", "dataset-context-b", None, &[])
+        .await
+        .unwrap();
+    let run_b = s
+        .create_run("team-b", &experiment_b, None, Some(2), Some("run-b"), &[])
+        .await
+        .unwrap();
+    let mut dataset_b = ds("MyDataset", "A1B2C3D4");
+    dataset_b.tags = vec![("mlflow.data.context".to_string(), "Train".to_string())];
+    s.log_inputs("team-b", &run_b.info.run_id, &[dataset_b], &[])
+        .await
+        .unwrap();
+
+    let filter = Some("datasets.context IN ('2024', 'Train')");
+    let page_a = s
+        .search_runs(
+            "team-a",
+            std::slice::from_ref(&experiment_a),
+            filter,
+            ViewType::ActiveOnly,
+            Some(10),
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page_a
+            .runs
+            .iter()
+            .map(|run| run.info.run_id.as_str())
+            .collect::<Vec<_>>(),
+        [run_a.info.run_id.as_str()]
+    );
+
+    let page_b = s
+        .search_runs(
+            "team-b",
+            std::slice::from_ref(&experiment_b),
+            filter,
+            ViewType::ActiveOnly,
+            Some(10),
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        page_b
+            .runs
+            .iter()
+            .map(|run| run.info.run_id.as_str())
+            .collect::<Vec<_>>(),
+        [run_b.info.run_id.as_str()]
+    );
 }
 
 #[tokio::test]

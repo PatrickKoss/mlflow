@@ -248,11 +248,11 @@ fn get_value(
             } else if token.is_parenthesis() {
                 if !matches!(key, "name" | "digest" | "context") {
                     return Err(SearchError::invalid_parameter_value(
-                        "Only the dataset 'name' and 'digest' supports comparison with a list of \
-                         quoted string values.",
+                        "Only the dataset 'name', 'digest', and 'context' support comparison \
+                         with a list of quoted string values.",
                     ));
                 }
-                Ok(Value::List(parse_run_ids(token)?))
+                Ok(Value::List(parse_list_from_token(token)?))
             } else {
                 Err(SearchError::invalid_parameter_value(format!(
                     "Expected a quoted string value for dataset attributes. Got value {}",

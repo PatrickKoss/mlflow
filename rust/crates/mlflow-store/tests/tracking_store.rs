@@ -752,6 +752,68 @@ async fn log_batch_duplicate_metrics_ok() {
     assert_eq!(hist.len(), 1);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interleaved_log_batch_uses_consistent_metric_key_order() {
+    let tmp = TempDb::new("batch_metric_key_order").await;
+    let s = store(&tmp).await;
+    let workspace = "team-a";
+    let experiment_id = s
+        .create_experiment(workspace, "batch-metric-key-order", None, &[])
+        .await
+        .unwrap();
+    let rid = s
+        .create_run(workspace, &experiment_id, None, Some(0), Some("run"), &[])
+        .await
+        .unwrap()
+        .info
+        .run_id;
+    let metric_count = 520i64;
+
+    let mut descending = (0..metric_count)
+        .rev()
+        .map(|index| m(&format!("m{index:05}"), index as f64, 1, 0))
+        .collect::<Vec<_>>();
+    descending.push(m("m00000", 999.0, 2, 5));
+    let ascending = (0..metric_count)
+        .map(|index| m(&format!("m{index:05}"), 10_000.0 + index as f64, 3, 1))
+        .collect::<Vec<_>>();
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let first = {
+        let store = s.clone();
+        let run_id = rid.clone();
+        let barrier = barrier.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .log_batch(workspace, &run_id, &descending, &[], &[])
+                .await
+        })
+    };
+    let second = {
+        let store = s.clone();
+        let run_id = rid.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            store
+                .log_batch(workspace, &run_id, &ascending, &[], &[])
+                .await
+        })
+    };
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+
+    let run = s.get_run(workspace, &rid).await.unwrap();
+    assert_eq!(run.data.metrics.len(), metric_count as usize);
+    assert_eq!(metric_val(&run, "m00000"), Some(999.0));
+    for index in [1, 499, 500, metric_count - 1] {
+        assert_eq!(
+            metric_val(&run, &format!("m{index:05}")),
+            Some(10_000.0 + index as f64)
+        );
+    }
+}
+
 #[tokio::test]
 async fn log_batch_unchanged_and_new_params_ok() {
     let tmp = TempDb::new("batch_unchanged").await;

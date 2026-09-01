@@ -48,6 +48,13 @@ cases:
     path: /ajax-api/3.0/mlflow/scorers/list
     expect_status: 200
 
+  - name: scorer_list_invalid_experiment_id
+    method: GET
+    path: /api/3.0/mlflow/scorers/list
+    query: {experiment_id: not-a-number}
+    normalize: {drop_paths: ["$.message"]}
+    expect_status: 400
+
   - name: scorer_versions
     method: GET
     path: /api/3.0/mlflow/scorers/versions

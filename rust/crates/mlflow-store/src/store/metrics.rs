@@ -13,10 +13,11 @@
 //!
 //! The `metrics` table PK is `(key, timestamp, step, run_uuid, value, is_nan)`.
 //! Re-logging an identical row is silently OK, implemented with an
-//! `ON CONFLICT DO NOTHING` (Python catches the IntegrityError and drops the
-//! duplicate — same observable result). Because `is_nan` is part of the PK and
-//! NaN is stored as `0.0`, two identical NaN entries dedup naturally here (an
-//! edge Python's Python-side set-dedup does *not* collapse, but the DB does).
+//! `ON CONFLICT DO NOTHING`. Python catches the integrity error, then checks
+//! exact metric identities in chunks of `_METRIC_DEDUP_CHUNK_SIZE = 100`.
+//! Rust needs no recovery query because each conflicting insert is already a
+//! no-op at the six-column primary key. Both paths bound work to the submitted
+//! batch and produce the same history, including sanitized NaN values.
 //!
 //! ## `latest_metrics` atomic upsert (plan Q5)
 //!
@@ -36,9 +37,11 @@
 //!   `VALUES(step) > step OR (VALUES(step)=step AND (VALUES(timestamp)>timestamp
 //!    OR (VALUES(timestamp)=timestamp AND VALUES(value)>value)))`.
 //!
-//! Within one `log_batch`, metrics sharing a key are upserted in sequence in the
-//! same transaction, so each comparison sees the running maximum — matching
-//! Python's in-loop `new_latest_metric_dict` behavior.
+//! Within one `log_batch`, the newest metric for each key is selected first,
+//! then the deduplicated keys are upserted in global sort order. Concurrent
+//! batches therefore acquire `latest_metrics` locks in the same order.
+
+use std::collections::{btree_map::Entry, BTreeMap};
 
 use mlflow_error::MlflowError;
 
@@ -109,26 +112,29 @@ impl TrackingStore {
         )?;
         let row = self.resolve_run_row(workspace, run_id).await?;
         check_run_active(&row)?;
-        let mut tx = self.db().begin_tx().await.map_err(internal)?;
-        if metric.model_id.is_some() {
-            self.log_model_metrics_tx(
+        self.run_with_deadlock_retry(|| async {
+            let mut tx = self.db().begin_tx().await.map_err(internal)?;
+            if metric.model_id.is_some() {
+                self.log_model_metrics_tx(
+                    &mut tx,
+                    workspace,
+                    row.experiment_id,
+                    run_id,
+                    None,
+                    std::slice::from_ref(metric),
+                )
+                .await?;
+            }
+            insert_metrics(
                 &mut tx,
-                workspace,
-                row.experiment_id,
+                self.db().dialect(),
                 run_id,
-                None,
                 std::slice::from_ref(metric),
             )
             .await?;
-        }
-        insert_metrics(
-            &mut tx,
-            self.db().dialect(),
-            run_id,
-            std::slice::from_ref(metric),
-        )
-        .await?;
-        tx.commit().await.map_err(internal)
+            tx.commit().await.map_err(internal)
+        })
+        .await
     }
 
     /// `get_metric_history` with offset pagination. Ordered by
@@ -234,26 +240,29 @@ impl TrackingStore {
         check_run_active(&row)?;
 
         let dialect = self.db().dialect();
-        let mut tx = self.db().begin_tx().await.map_err(internal)?;
+        self.run_with_deadlock_retry(|| async {
+            let mut tx = self.db().begin_tx().await.map_err(internal)?;
 
-        // Params first (matches Python: immutability check aborts before
-        // metrics/tags are logged).
-        self.log_params_tx(&mut tx, run_id, params).await?;
-        // Metrics: run-scoped metrics/latest_metrics for every metric...
-        if !metrics.is_empty() {
-            insert_metrics(&mut tx, dialect, run_id, metrics).await?;
-        }
-        // ...and, for the subset carrying a model_id, also logged_model_metrics.
-        // `metrics` is passed through unfiltered/ungrouped — `log_model_metrics_tx`
-        // does its own `model_id is not None` filtering over the *whole* list,
-        // exactly like Python's `_log_model_metrics(run_id, metrics, ...)` (see
-        // its doc comment for why preserving the original list/indices matters).
-        self.log_model_metrics_tx(&mut tx, workspace, row.experiment_id, run_id, None, metrics)
-            .await?;
-        // Tags.
-        self.set_tags_tx(&mut tx, dialect, run_id, tags).await?;
+            // Params first (matches Python: immutability check aborts before
+            // metrics/tags are logged).
+            self.log_params_tx(&mut tx, run_id, params).await?;
+            // Metrics: run-scoped metrics/latest_metrics for every metric...
+            if !metrics.is_empty() {
+                insert_metrics(&mut tx, dialect, run_id, metrics).await?;
+            }
+            // ...and, for the subset carrying a model_id, also logged_model_metrics.
+            // `metrics` is passed through unfiltered/ungrouped — `log_model_metrics_tx`
+            // does its own `model_id is not None` filtering over the *whole* list,
+            // exactly like Python's `_log_model_metrics(run_id, metrics, ...)` (see
+            // its doc comment for why preserving the original list/indices matters).
+            self.log_model_metrics_tx(&mut tx, workspace, row.experiment_id, run_id, None, metrics)
+                .await?;
+            // Tags.
+            self.set_tags_tx(&mut tx, dialect, run_id, tags).await?;
 
-        tx.commit().await.map_err(internal)
+            tx.commit().await.map_err(internal)
+        })
+        .await
     }
 
     /// Load `latest_metrics` for a run into entities (used by `get_run`).
@@ -390,9 +399,9 @@ async fn insert_metrics(
     run_id: &str,
     metrics: &[MetricInput],
 ) -> Result<(), MlflowError> {
+    let mut latest_by_key: BTreeMap<&str, (&MetricInput, bool, f64)> = BTreeMap::new();
     for m in metrics {
         let (is_nan, value) = sanitize_metric_value(m.value);
-        // 1) Insert into metrics (dedup on the 6-col PK).
         let insert_sql = metrics_insert_sql(dialect);
         tx.exec(
             &insert_sql,
@@ -408,12 +417,28 @@ async fn insert_metrics(
         .await
         .map_err(internal)?;
 
-        // 2) Maintain latest_metrics via the atomic conditional upsert.
+        match latest_by_key.entry(&m.key) {
+            Entry::Vacant(entry) => {
+                entry.insert((m, is_nan, value));
+            }
+            Entry::Occupied(mut entry) => {
+                let (previous, _, previous_value) = *entry.get();
+                if metric_is_newer(m, value, previous, previous_value) {
+                    entry.insert((m, is_nan, value));
+                }
+            }
+        }
+    }
+
+    // Python locks globally sorted, deduplicated keys before updating
+    // `latest_metrics`. The atomic Rust upsert locks on write, so issuing one
+    // upsert per key from this BTreeMap provides the same lock order.
+    for (key, (m, is_nan, value)) in latest_by_key {
         let upsert_sql = latest_metric_upsert_sql(dialect);
         tx.exec(
             &upsert_sql,
             &[
-                Val::Text(m.key.clone()),
+                Val::Text(key.to_string()),
                 Val::Float(value),
                 Val::Int(m.timestamp),
                 Val::Int(m.step),
@@ -425,6 +450,18 @@ async fn insert_metrics(
         .map_err(internal)?;
     }
     Ok(())
+}
+
+fn metric_is_newer(
+    candidate: &MetricInput,
+    candidate_value: f64,
+    previous: &MetricInput,
+    previous_value: f64,
+) -> bool {
+    candidate.step > previous.step
+        || (candidate.step == previous.step
+            && (candidate.timestamp > previous.timestamp
+                || (candidate.timestamp == previous.timestamp && candidate_value > previous_value)))
 }
 
 /// `INSERT INTO metrics ... ON CONFLICT/DUPLICATE DO NOTHING` (6-col PK dedup).

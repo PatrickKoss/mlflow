@@ -24,10 +24,19 @@ cases:
     normalize:
       drop_paths: ["$.webhooks"]
 
-  - name: webhook_update
+  - name: webhook_update_disable
     method: PATCH
     path: /api/2.0/mlflow/webhooks/${webhook_id}
     body: {description: "updated description", status: DISABLED}
+
+  - name: webhook_update_without_status
+    method: PATCH
+    path: /api/2.0/mlflow/webhooks/${webhook_id}
+    body: {name: wh_compliance_renamed}
+
+  - name: webhook_get_after_partial_update
+    method: GET
+    path: /api/2.0/mlflow/webhooks/${webhook_id}
 
   - name: webhook_delete
     method: DELETE

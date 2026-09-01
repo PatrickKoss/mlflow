@@ -13,6 +13,8 @@ use crate::schema::scorers::{ONLINE_SCORING_CONFIGS, SCORERS, SCORER_VERSIONS};
 const ENDPOINTS: &str = "endpoints";
 const ENDPOINT_BINDINGS: &str = "endpoint_bindings";
 const REGISTER_RETRIES: usize = 32;
+const INVALID_EXPERIMENT_IDS: &str =
+    "Invalid experiment IDs: experiment IDs must be valid integers.";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScorerVersion {
@@ -310,10 +312,14 @@ impl TrackingStore {
         experiment_id: Option<&str>,
     ) -> Result<Vec<ScorerVersion>, MlflowError> {
         let experiment_id_num = match experiment_id.filter(|value| !value.is_empty()) {
-            Some(experiment_id) => Some(
-                self.require_active_scorer_experiment(workspace, experiment_id)
-                    .await?,
-            ),
+            Some(experiment_id) => {
+                parse_experiment_id(experiment_id)
+                    .map_err(|_| MlflowError::invalid_parameter_value(INVALID_EXPERIMENT_IDS))?;
+                Some(
+                    self.require_active_scorer_experiment(workspace, experiment_id)
+                        .await?,
+                )
+            }
             None => None,
         };
         let dialect = self.db().dialect();

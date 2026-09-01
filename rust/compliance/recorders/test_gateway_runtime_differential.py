@@ -401,7 +401,7 @@ def _selected_headers(response) -> dict[str, str]:
     }
 
 
-def test_python_rust_gateway_runtime_mock_differential(tmp_path: Path, monkeypatch):
+def test_python_rust_gateway_runtime_and_spans_mock_differential(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("MLFLOW_CRYPTO_KEK_PASSPHRASE", FAKE_PASSPHRASE)
     db_uri = f"sqlite:///{tmp_path / 'gateway.db'}"
     artifacts = tmp_path / "artifacts"

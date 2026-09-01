@@ -48,6 +48,27 @@ cases:
       params: [{key: beta, value: "0.2"}]
       tags: [{key: batch_tag, value: yes}]
 
+  - name: run_log_dataset_input_with_mixed_case_context
+    method: POST
+    path: /api/2.0/mlflow/runs/log-inputs
+    body:
+      run_id: "${run_id}"
+      datasets:
+        - dataset:
+            name: MyDataset
+            digest: A1B2C3D4
+            source_type: local
+            source: corpus
+          tags: [{key: mlflow.data.context, value: Train}]
+
+  - name: run_search_dataset_context_in
+    method: POST
+    path: /api/2.0/mlflow/runs/search
+    body:
+      experiment_ids: ["${runs_exp}"]
+      filter: datasets.context IN ('2024', 'Train')
+      max_results: 100
+
   - name: run_get_after_batch
     method: GET
     path: /api/2.0/mlflow/runs/get
