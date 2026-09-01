@@ -16,7 +16,7 @@ Upstream merge: branch `sync/upstream-2026-09-01`, merge commit `33dd378a3`
 both sides added a test at the same spot; kept both). 369 files changed under
 `mlflow/server/js`, so the production UI was rebuilt post-merge (Phase 1, see T-S11).
 
-Four `infra`-bucket commits carry server behavior and are pulled into tasks below rather
+Five `infra`-bucket commits carry server behavior and are pulled into tasks below rather
 than skipped: `847fca8031` (fail-closed default flips to on), `e6a3c71309` (dataset `IN`
 clause parsing), `c3bfb448d4` (`search_logged_models` quoted values / operator message),
 `cd13d3cdc9` (demo seeds a custom view).
@@ -95,11 +95,12 @@ tables and reads the new `jobs.creator` column). Everything else can run in para
   - **AC:** The changed UI builds and all affected surfaces work against Rust without Python-attributed responses: Traces V4 as the default traces page (saved views persisted via experiment tags, exact trace-id search footer), trace explorer v2, custom view tab (create/rename/delete/feedback against the T-S5 cap and T-S7 assistant flow), run pages, and the assistant floating button under `MLFLOW_ENABLE_REMOTE_ASSISTANT`.
   - **VER:** `bash rust/e2e/run.sh`
 
-- [ ] T-S12 Version and environment pin parity after the upstream version bump
+- [x] T-S12 Version and environment pin parity after the upstream version bump
   - **Upstream refs:** `ec8b88ac6` Update version to 3.15.2.dev0 (#25361) → `mlflow/version.py` now `3.15.3.dev0`; the phase-1 `uv sync` also moved the venv to pip 26.2.1 and wheel 0.48.0, which Python's `_PythonEnv.current()` writes into promptlab `conda.yaml`/`python_env.yaml`
   - **Rust target:** `rust/crates/mlflow-genai/src/payload.rs` (`PINNED_MLFLOW_VERSION`), `rust/crates/mlflow-genai/tests/{payload,phase19_contract}.rs`, `rust/crates/mlflow-server/src/promptlab.rs` (`conda_yaml`, `python_env_yaml`)
   - **AC:** Rust promptlab models are byte-identical to Python's (`rust/tools/promptlab_cross_language.py`), and scorer payloads default `mlflow_version` to the merged Python version.
   - **VER:** `cargo test -p mlflow-server --test promptlab_http -p mlflow-genai --test payload --test phase19_contract`.
+  - **DONE 2026-09-01** (coordinator, commit `b28c52490`): pins moved to `3.15.3.dev0`, `pip<=26.2.1`/`pip==26.2.1`, `wheel==0.48.0`; VER 3+6+3 tests green, `cargo fmt --check` and clippy clean.
 
 ## Skipped
 
