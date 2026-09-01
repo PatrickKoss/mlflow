@@ -156,7 +156,7 @@ async fn list_scorers_rejects_non_integer_experiment_id() {
     );
     assert_eq!(
         err.message,
-        "Invalid experiment IDs: experiment IDs must be valid integers."
+        "Invalid experiment ID 'not-a-number'. Experiment ID must be a valid integer."
     );
 }
 
