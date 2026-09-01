@@ -67,8 +67,14 @@ async def run_stream():
         strategy=FallbackStrategy.SEQUENTIAL,
         max_attempts=2,
     )
-    chunks = [chunk async for chunk in provider.chat_stream({})]
-    return {"attempts": attempts, "chunks": chunks}
+    chunks = []
+    error = None
+    try:
+        async for chunk in provider.chat_stream({}):
+            chunks.append(chunk)  # noqa: PERF401
+    except Exception as e:
+        error = {"type": type(e).__name__, "detail": str(e)}
+    return {"attempts": attempts, "chunks": chunks, "error": error}
 
 
 async def main():

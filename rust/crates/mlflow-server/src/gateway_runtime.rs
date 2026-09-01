@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::io::{Cursor, Read};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
@@ -41,6 +42,8 @@ const DURATION_HEADER: &str = "x-mlflow-gateway-duration-ms";
 const OVERHEAD_HEADER: &str = "x-mlflow-gateway-overhead-duration-ms";
 const ROUTE_TIMEOUT_ENV: &str = "MLFLOW_GATEWAY_ROUTE_TIMEOUT_SECONDS";
 const ALLOWED_PROVIDERS_ENV: &str = "MLFLOW_GATEWAY_ALLOWED_PROVIDERS";
+const MAX_DECOMPRESSED_REQUEST_SIZE_ENV: &str = "MLFLOW_GATEWAY_MAX_DECOMPRESSED_REQUEST_SIZE";
+const DEFAULT_MAX_DECOMPRESSED_REQUEST_SIZE: usize = 100 * 1024 * 1024;
 const TEST_FIXED_TIME_ENV: &str = "MLFLOW_GATEWAY_TEST_FIXED_TIME";
 const ACCEPT_ENCODING: &str = "gzip, deflate, identity";
 const MAX_TRACE_METADATA_VALUE_CHARS: usize = 8_000;
@@ -1242,12 +1245,12 @@ pub async fn gemini_passthrough_stream_generate_content(
 async fn passthrough_model_route(
     state: AppState,
     workspace: String,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: Bytes,
     action: PassthroughAction,
 ) -> Response {
     let start = Instant::now();
-    let mut payload = match parse_body(&body) {
+    let mut payload = match parse_request_body(&mut headers, &body) {
         Ok(payload) => payload,
         Err(error) => return error.response(start.elapsed()),
     };
@@ -1297,12 +1300,12 @@ async fn passthrough_path_route(
     state: AppState,
     workspace: String,
     endpoint_name: String,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: Bytes,
     action: PassthroughAction,
 ) -> Response {
     let start = Instant::now();
-    let payload = match parse_body(&body) {
+    let payload = match parse_request_body(&mut headers, &body) {
         Ok(payload) => payload,
         Err(error) => return error.response(start.elapsed()),
     };
@@ -1355,11 +1358,18 @@ async fn passthrough_value_route(
     let trace = endpoint.usage_tracking.then(|| GatewayTraceContext {
         state: state.clone(),
         workspace: workspace.clone(),
-        endpoint,
+        endpoint: endpoint.clone(),
         request: original_request,
         request_type: passthrough_request_type(action),
         started_ns: trace_started_ns,
     });
+    if streaming {
+        let plan = match build_routing_plan(&endpoint) {
+            Ok(plan) => plan,
+            Err(error) => return error.response(start.elapsed()),
+        };
+        return raw_fallback_stream_response(plan, action, payload, headers, trace, start);
+    }
     let mut request = match adapter.passthrough_request(&model, action, payload.clone(), &headers) {
         Ok(request) => request,
         Err(error) => return error.response(start.elapsed()),
@@ -1367,23 +1377,15 @@ async fn passthrough_value_route(
     if let Err(error) = prepare_dynamic_auth(&model, &mut request).await {
         return error.response(start.elapsed());
     }
-    if streaming {
-        raw_stream_response(
-            request,
-            trace.map(|trace| (trace, model, passthrough_method(action))),
-            start,
-        )
-    } else {
-        raw_non_stream_response(
-            request,
-            trace.map(|trace| (trace, model, passthrough_method(action))),
-            start,
-            guardrails,
-            payload,
-            action != PassthroughAction::OpenAiEmbeddings,
-        )
-        .await
-    }
+    raw_non_stream_response(
+        request,
+        trace.map(|trace| (trace, model, passthrough_method(action))),
+        start,
+        guardrails,
+        payload,
+        action != PassthroughAction::OpenAiEmbeddings,
+    )
+    .await
 }
 
 pub async fn raw_proxy(
@@ -1391,11 +1393,11 @@ pub async fn raw_proxy(
     Workspace(workspace): Workspace,
     Path((endpoint_name, path)): Path<(String, String)>,
     OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let start = Instant::now();
-    let payload = match parse_body(&body) {
+    let payload = match parse_request_body(&mut headers, &body) {
         Ok(payload) => payload,
         Err(error) => return error.response(start.elapsed()),
     };
@@ -2169,11 +2171,11 @@ pub async fn invocations(
 pub async fn chat_completions(
     State(state): State<AppState>,
     Workspace(workspace): Workspace,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let start = Instant::now();
-    let mut parsed = match parse_body(&body) {
+    let mut parsed = match parse_request_body(&mut headers, &body) {
         Ok(parsed) => parsed,
         Err(error) => return error.response(start.elapsed()),
     };
@@ -2211,12 +2213,12 @@ async fn invoke(
     state: AppState,
     workspace: String,
     endpoint_name: String,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: Bytes,
     _model_route: bool,
 ) -> Response {
     let start = Instant::now();
-    let parsed = match parse_body(&body) {
+    let parsed = match parse_request_body(&mut headers, &body) {
         Ok(parsed) => parsed,
         Err(error) => return error.response(start.elapsed()),
     };
@@ -2725,23 +2727,80 @@ impl Drop for RawProviderStream {
     }
 }
 
-fn raw_stream_response(
-    request: ProviderRequest,
-    trace: Option<(
-        GatewayTraceContext,
-        ResolvedGatewayModelConfig,
-        &'static str,
-    )>,
+struct FallbackRawProviderStream {
+    plan: RoutingPlan,
+    action: PassthroughAction,
+    payload: Value,
+    client_headers: HeaderMap,
+    trace: Option<GatewayTraceContext>,
+    next_attempt: usize,
+    active: Option<ActiveFallbackRawProviderStream>,
+    last_error: Option<GatewayRuntimeError>,
+    pending: Option<Bytes>,
+    emitted: bool,
+    done: bool,
+}
+
+struct ActiveFallbackRawProviderStream {
+    initial: Option<BoxFuture<'static, Result<reqwest::Response, reqwest::Error>>>,
+    upstream: Option<futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>>,
+    model: ResolvedGatewayModelConfig,
+    trace_bytes: Vec<u8>,
+}
+
+impl Drop for FallbackRawProviderStream {
+    fn drop(&mut self) {
+        if self.trace.is_none() {
+            return;
+        }
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let Some(mut upstream) = active.upstream.take() else {
+            return;
+        };
+        let trace = self.trace.take().expect("trace checked above");
+        let model = active.model.clone();
+        let mut trace_bytes = std::mem::take(&mut active.trace_bytes);
+        let method = passthrough_method(self.action);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            while let Some(chunk) = upstream.next().await {
+                match chunk {
+                    Ok(bytes) => trace_bytes.extend_from_slice(&bytes),
+                    Err(_) => return,
+                }
+            }
+            let output = stream_usage_output(&trace_bytes);
+            complete_gateway_trace(&trace, &model, method, &output, "OK").await;
+        });
+    }
+}
+
+fn raw_fallback_stream_response(
+    plan: RoutingPlan,
+    action: PassthroughAction,
+    payload: Value,
+    client_headers: HeaderMap,
+    trace: Option<GatewayTraceContext>,
     start: Instant,
 ) -> Response {
-    let state = RawProviderStream {
-        initial: Some(send_provider_request(request).boxed()),
-        upstream: None,
-        done: false,
+    let state = FallbackRawProviderStream {
+        plan,
+        action,
+        payload,
+        client_headers,
         trace,
-        trace_bytes: Vec::new(),
+        next_attempt: 0,
+        active: None,
+        last_error: None,
+        pending: None,
+        emitted: false,
+        done: false,
     };
-    let output = stream::unfold(state, next_raw_stream_chunk).map(Ok::<_, Infallible>);
+    let output = stream::unfold(state, next_fallback_raw_stream_chunk).map(Ok::<_, Infallible>);
     let mut response = Response::new(Body::from_stream(output));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
@@ -2750,6 +2809,182 @@ fn raw_stream_response(
     );
     insert_timing_header(&mut response, DURATION_HEADER, start.elapsed().as_millis());
     response
+}
+
+async fn next_fallback_raw_stream_chunk(
+    mut state: FallbackRawProviderStream,
+) -> Option<(Bytes, FallbackRawProviderStream)> {
+    loop {
+        if let Some(chunk) = state.pending.take() {
+            return Some((chunk, state));
+        }
+        if state.done {
+            return None;
+        }
+        if state.active.is_none() {
+            if state.next_attempt >= state.plan.attempt_limit {
+                let error = if let Some(attempts) = state.plan.fallback_attempt_label {
+                    fallback_error(attempts, state.last_error.as_ref())
+                } else {
+                    state.last_error.take().unwrap_or_else(|| {
+                        GatewayRuntimeError::internal("No provider was selected")
+                    })
+                };
+                state.done = true;
+                return Some((sse_error(&error.stream_message(), error.stream_type), state));
+            }
+            let attempt = state.next_attempt;
+            state.next_attempt += 1;
+            let model = match state.plan.model_for_attempt(attempt) {
+                Ok(model) => model,
+                Err(error) => {
+                    state.last_error = Some(error);
+                    continue;
+                }
+            };
+            if !supports_passthrough(&model.provider, state.action) {
+                state.last_error = Some(unsupported_passthrough(&model.provider, state.action));
+                continue;
+            }
+            let adapter = match adapter_for(&model.provider) {
+                Ok(adapter) => adapter,
+                Err(error) => {
+                    state.last_error = Some(error);
+                    continue;
+                }
+            };
+            let mut request = match adapter.passthrough_request(
+                &model,
+                state.action,
+                state.payload.clone(),
+                &state.client_headers,
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    state.last_error = Some(error);
+                    continue;
+                }
+            };
+            if let Err(error) = prepare_dynamic_auth(&model, &mut request).await {
+                state.last_error = Some(error);
+                continue;
+            }
+            state.active = Some(ActiveFallbackRawProviderStream {
+                initial: Some(send_provider_request(request).boxed()),
+                upstream: None,
+                model,
+                trace_bytes: Vec::new(),
+            });
+        }
+        let initial = state
+            .active
+            .as_mut()
+            .and_then(|active| active.initial.take());
+        if let Some(initial) = initial {
+            match initial.await {
+                Ok(response) if response.status().is_success() => {
+                    state.active.as_mut().expect("active attempt").upstream =
+                        Some(response.bytes_stream().boxed());
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let value = response.json::<Value>().await.unwrap_or(Value::Null);
+                    fail_fallback_raw_stream(
+                        &mut state,
+                        GatewayRuntimeError::http(
+                            status,
+                            value.pointer("/error/message").cloned().unwrap_or(value),
+                        ),
+                    );
+                }
+                Err(error) => fail_fallback_raw_stream(
+                    &mut state,
+                    GatewayRuntimeError {
+                        status: StatusCode::BAD_GATEWAY,
+                        detail: Value::String(error.to_string()),
+                        stream_type: "ClientError",
+                    },
+                ),
+            }
+            continue;
+        }
+        let next = state
+            .active
+            .as_mut()
+            .and_then(|active| active.upstream.as_mut())
+            .expect("connected active stream")
+            .next()
+            .await;
+        match next {
+            Some(Ok(bytes)) => {
+                let terminal = {
+                    let active = state.active.as_mut().expect("active attempt");
+                    active.trace_bytes.extend_from_slice(&bytes);
+                    stream_has_terminal_event(&active.trace_bytes).then(|| {
+                        (
+                            active.model.clone(),
+                            stream_usage_output(&active.trace_bytes),
+                        )
+                    })
+                };
+                if let Some((model, output)) = terminal {
+                    if let Some(trace) = state.trace.take() {
+                        complete_gateway_trace(
+                            &trace,
+                            &model,
+                            passthrough_method(state.action),
+                            &output,
+                            "OK",
+                        )
+                        .await;
+                    }
+                }
+                state.emitted = true;
+                return Some((bytes, state));
+            }
+            Some(Err(error)) => {
+                fail_fallback_raw_stream(
+                    &mut state,
+                    GatewayRuntimeError {
+                        status: StatusCode::INTERNAL_SERVER_ERROR,
+                        detail: Value::String(error.to_string()),
+                        stream_type: "ClientPayloadError",
+                    },
+                );
+            }
+            None => {
+                let completion = state.active.as_ref().map(|active| {
+                    (
+                        active.model.clone(),
+                        stream_usage_output(&active.trace_bytes),
+                    )
+                });
+                if let (Some(trace), Some((model, output))) = (state.trace.take(), completion) {
+                    complete_gateway_trace(
+                        &trace,
+                        &model,
+                        passthrough_method(state.action),
+                        &output,
+                        "OK",
+                    )
+                    .await;
+                }
+                state.done = true;
+            }
+        }
+    }
+}
+
+fn fail_fallback_raw_stream(state: &mut FallbackRawProviderStream, error: GatewayRuntimeError) {
+    if state.emitted {
+        state.pending = Some(sse_error(&error.stream_message(), error.stream_type));
+        state.last_error = Some(error);
+        state.trace = None;
+        state.done = true;
+        return;
+    }
+    state.last_error = Some(error);
+    state.active = None;
 }
 
 async fn next_raw_stream_chunk(mut state: RawProviderStream) -> Option<(Bytes, RawProviderStream)> {
@@ -2947,6 +3182,7 @@ struct ProviderStream {
     active: Option<ActiveProviderStream>,
     last_error: Option<GatewayRuntimeError>,
     pending: Vec<Bytes>,
+    emitted: bool,
     done: bool,
 }
 
@@ -2981,6 +3217,7 @@ async fn stream_response(
         active: None,
         last_error: None,
         pending: Vec::new(),
+        emitted: false,
         done: false,
     };
     let output = stream::unfold(state, next_stream_chunk).map(Ok::<_, Infallible>);
@@ -2998,6 +3235,7 @@ async fn next_stream_chunk(mut state: ProviderStream) -> Option<(Bytes, Provider
     loop {
         if !state.pending.is_empty() {
             let chunk = state.pending.remove(0);
+            state.emitted = true;
             return Some((chunk, state));
         }
         if state.done {
@@ -3173,6 +3411,14 @@ fn start_stream_attempt(state: &mut ProviderStream) {
 }
 
 fn fail_stream_attempt(state: &mut ProviderStream, error: GatewayRuntimeError) {
+    if state.emitted || !state.pending.is_empty() {
+        state
+            .pending
+            .push(sse_error(&error.stream_message(), error.stream_type));
+        state.done = true;
+        state.active = None;
+        return;
+    }
     state.last_error = Some(error);
     state.active = None;
     if state.next_attempt >= state.plan.attempt_limit {
@@ -3383,6 +3629,97 @@ fn parse_body(body: &[u8]) -> Result<Value, GatewayRuntimeError> {
             Value::String("Invalid JSON payload: request body must be an object".to_string()),
         ))
     }
+}
+
+fn parse_request_body(headers: &mut HeaderMap, body: &[u8]) -> Result<Value, GatewayRuntimeError> {
+    let is_zstd = headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("zstd"));
+    headers.remove(header::CONTENT_ENCODING);
+    if !is_zstd {
+        return parse_body(body);
+    }
+    parse_decompressed_json(&decompress_zstd(body)?)
+}
+
+fn parse_decompressed_json(body: &[u8]) -> Result<Value, GatewayRuntimeError> {
+    let value: Value = serde_json::from_slice(body).map_err(|error| {
+        let detail = body
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .filter(|index| {
+                let remaining = &body[*index..];
+                !match body[*index] {
+                    b'{' | b'[' | b'"' | b'-' | b'0'..=b'9' => true,
+                    b't' => remaining.starts_with(b"true"),
+                    b'f' => remaining.starts_with(b"false"),
+                    b'n' => remaining.starts_with(b"null"),
+                    _ => false,
+                }
+            })
+            .map(|index| {
+                let line = body[..index].iter().filter(|byte| **byte == b'\n').count() + 1;
+                let line_start = body[..index]
+                    .iter()
+                    .rposition(|byte| *byte == b'\n')
+                    .map_or(0, |position| position + 1);
+                let column = index - line_start + 1;
+                format!("Expecting value: line {line} column {column} (char {index})")
+            })
+            .unwrap_or_else(|| error.to_string());
+        GatewayRuntimeError::http(
+            StatusCode::BAD_REQUEST,
+            Value::String(format!("Invalid JSON payload: {detail}")),
+        )
+    })?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err(GatewayRuntimeError::http(
+            StatusCode::BAD_REQUEST,
+            Value::String("Invalid JSON payload: request body must be an object".to_string()),
+        ))
+    }
+}
+
+fn decompress_zstd(body: &[u8]) -> Result<Vec<u8>, GatewayRuntimeError> {
+    let max_size = std::env::var(MAX_DECOMPRESSED_REQUEST_SIZE_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_DECOMPRESSED_REQUEST_SIZE);
+    let decoder =
+        zstd::stream::read::Decoder::new(Cursor::new(body)).map_err(invalid_zstd_payload)?;
+    let limit = u64::try_from(max_size)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut decompressed = Vec::with_capacity(max_size.min(64 * 1024));
+    decoder
+        .take(limit)
+        .read_to_end(&mut decompressed)
+        .map_err(invalid_zstd_payload)?;
+    if decompressed.len() > max_size {
+        return Err(GatewayRuntimeError::http(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Value::String(format!(
+                "Decompressed request body exceeds the maximum allowed size of {max_size} bytes. Set {MAX_DECOMPRESSED_REQUEST_SIZE_ENV} to raise this limit."
+            )),
+        ));
+    }
+    Ok(decompressed)
+}
+
+fn invalid_zstd_payload(error: std::io::Error) -> GatewayRuntimeError {
+    let detail = error.to_string();
+    let detail = if detail.starts_with("zstd decompress error:") {
+        detail
+    } else {
+        format!("zstd decompress error: {detail}")
+    };
+    GatewayRuntimeError::http(
+        StatusCode::BAD_REQUEST,
+        Value::String(format!("Invalid zstd payload: {detail}")),
+    )
 }
 
 fn build_routing_plan(
@@ -3722,7 +4059,13 @@ fn provider_api_base(model: &ResolvedGatewayModelConfig) -> Result<Url, GatewayR
             .or_else(|| std::env::var("DATABRICKS_HOST").ok())
             .ok_or_else(|| missing_auth("api_base"))?;
         let base = base.trim_end_matches('/');
-        let normalized = if base.contains("/serving-endpoints") {
+        let normalized = if is_unity_catalog_model_name(&model.model_name) {
+            let host = base
+                .strip_suffix("/serving-endpoints")
+                .unwrap_or(base)
+                .trim_end_matches("/ai-gateway/mlflow/v1");
+            format!("{host}/ai-gateway/mlflow/v1")
+        } else if base.contains("/serving-endpoints") {
             base.to_string()
         } else {
             format!("{base}/serving-endpoints")
@@ -3740,6 +4083,10 @@ fn provider_api_base(model: &ResolvedGatewayModelConfig) -> Result<Url, GatewayR
             )
         })?;
     parse_url(&base)
+}
+
+fn is_unity_catalog_model_name(model_name: &str) -> bool {
+    model_name.bytes().filter(|byte| *byte == b'.').count() >= 2
 }
 
 fn append_provider_path(base: &Url, path: &str) -> Result<Url, GatewayRuntimeError> {
@@ -3780,7 +4127,11 @@ fn merged_passthrough_headers(
         let lower = name.as_str().to_ascii_lowercase();
         if matches!(
             lower.as_str(),
-            "host" | "content-length" | "accept-encoding" | "x-mlflow-authorization"
+            "host"
+                | "content-length"
+                | "content-encoding"
+                | "accept-encoding"
+                | "x-mlflow-authorization"
         ) || (!preserve_auth && is_auth_header(&lower))
         {
             continue;
@@ -5190,6 +5541,22 @@ fn chat_usage(usage: Option<&Value>) -> Value {
     if let Some(details) = usage.get("prompt_tokens_details") {
         result.insert("prompt_tokens_details".to_string(), details.clone());
     }
+    if let Some(usage) = usage.as_object() {
+        result.extend(
+            usage
+                .iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "prompt_tokens"
+                            | "completion_tokens"
+                            | "total_tokens"
+                            | "prompt_tokens_details"
+                    )
+                })
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+    }
     Value::Object(result)
 }
 
@@ -5202,6 +5569,24 @@ fn anthropic_usage(usage: Option<&Value>) -> Value {
         .get("cache_creation_input_tokens")
         .and_then(Value::as_u64);
     let prompt = input.map(|value| value + cached.unwrap_or(0) + created.unwrap_or(0));
+    let extras: Map<String, Value> = usage
+        .as_object()
+        .map(|usage| {
+            usage
+                .iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "input_tokens"
+                            | "output_tokens"
+                            | "cache_read_input_tokens"
+                            | "cache_creation_input_tokens"
+                    )
+                })
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut result = Map::new();
     result.insert(
         "prompt_tokens".to_string(),
@@ -5224,6 +5609,7 @@ fn anthropic_usage(usage: Option<&Value>) -> Value {
             json!({"cached_tokens":cached}),
         );
     }
+    result.extend(extras);
     if let Some(created) = created {
         result.insert("cache_creation_input_tokens".to_string(), json!(created));
     }
@@ -5232,6 +5618,24 @@ fn anthropic_usage(usage: Option<&Value>) -> Value {
 
 fn gemini_usage(usage: Option<&Value>) -> Value {
     let usage = usage.unwrap_or(&Value::Null);
+    let extras: Map<String, Value> = usage
+        .as_object()
+        .map(|usage| {
+            usage
+                .iter()
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "promptTokenCount"
+                            | "candidatesTokenCount"
+                            | "totalTokenCount"
+                            | "cachedContentTokenCount"
+                    )
+                })
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
     let mut result = Map::new();
     result.insert(
         "prompt_tokens".to_string(),
@@ -5257,6 +5661,7 @@ fn gemini_usage(usage: Option<&Value>) -> Value {
             json!({"cached_tokens":cached}),
         );
     }
+    result.extend(extras);
     Value::Object(result)
 }
 
@@ -5483,6 +5888,140 @@ mod tests {
             linkage_type: "PRIMARY".to_string(),
             fallback_order: None,
         }
+    }
+
+    #[test]
+    fn zstd_request_body_is_bounded_and_strips_content_encoding() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var(MAX_DECOMPRESSED_REQUEST_SIZE_ENV, "64");
+        let payload = br#"{"messages":[{"role":"user","content":"hi"}]}"#;
+        let compressed = zstd::stream::encode_all(Cursor::new(payload), 0).unwrap();
+        let mut headers =
+            HeaderMap::from_iter([(header::CONTENT_ENCODING, HeaderValue::from_static("ZSTD"))]);
+        assert_eq!(
+            parse_request_body(&mut headers, &compressed).unwrap(),
+            serde_json::from_slice::<Value>(payload).unwrap()
+        );
+        assert!(headers.get(header::CONTENT_ENCODING).is_none());
+
+        let invalid_json = zstd::stream::encode_all(Cursor::new(b"not json"), 0).unwrap();
+        headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+        let error = parse_request_body(&mut headers, &invalid_json).unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.detail,
+            "Invalid JSON payload: Expecting value: line 1 column 1 (char 0)"
+        );
+
+        std::env::set_var(MAX_DECOMPRESSED_REQUEST_SIZE_ENV, "8");
+        let compressed = zstd::stream::encode_all(Cursor::new(b"123456789"), 0).unwrap();
+        let error = decompress_zstd(&compressed).unwrap_err();
+        assert_eq!(error.status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            error.detail,
+            "Decompressed request body exceeds the maximum allowed size of 8 bytes. Set MLFLOW_GATEWAY_MAX_DECOMPRESSED_REQUEST_SIZE to raise this limit."
+        );
+
+        let error = decompress_zstd(b"not a valid zstd payload").unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error
+            .detail
+            .as_str()
+            .unwrap()
+            .starts_with("Invalid zstd payload: zstd decompress error: Unknown frame descriptor"));
+        std::env::remove_var(MAX_DECOMPRESSED_REQUEST_SIZE_ENV);
+    }
+
+    #[test]
+    fn provider_usage_extras_are_preserved_by_each_adapter() {
+        assert_eq!(
+            chat_usage(Some(&json!({
+                "prompt_tokens":10,
+                "completion_tokens":5,
+                "total_tokens":15,
+                "cost":0.001,
+                "cost_details":{"upstream_inference_cost":0.0008},
+                "prompt_tokens_details":{"cached_tokens":2}
+            }))),
+            json!({
+                "prompt_tokens":10,
+                "completion_tokens":5,
+                "total_tokens":15,
+                "cost":0.001,
+                "cost_details":{"upstream_inference_cost":0.0008},
+                "prompt_tokens_details":{"cached_tokens":2}
+            })
+        );
+        assert_eq!(
+            anthropic_usage(Some(&json!({
+                "input_tokens":50,
+                "output_tokens":20,
+                "server_tool_use":{"web_search_requests":1},
+                "service_tier":"standard_only"
+            }))),
+            json!({
+                "prompt_tokens":50,
+                "completion_tokens":20,
+                "total_tokens":70,
+                "server_tool_use":{"web_search_requests":1},
+                "service_tier":"standard_only"
+            })
+        );
+        assert_eq!(
+            gemini_usage(Some(&json!({
+                "promptTokenCount":10,
+                "candidatesTokenCount":5,
+                "totalTokenCount":15,
+                "trafficType":"ON_DEMAND"
+            }))),
+            json!({
+                "prompt_tokens":10,
+                "completion_tokens":5,
+                "total_tokens":15,
+                "trafficType":"ON_DEMAND"
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_stream_defaults_missing_finish_reason_to_null() {
+        let frame = openai_chat_stream_frame(
+            json!({
+                "id":"chatcmpl-1",
+                "object":"chat.completion.chunk",
+                "created":1,
+                "model":"fixture-model",
+                "choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"}}]
+            }),
+            "openai-compatible",
+        )
+        .unwrap();
+        assert_eq!(frame["choices"][0]["finish_reason"], Value::Null);
+    }
+
+    #[test]
+    fn databricks_uc_models_use_the_ai_gateway_base_url() {
+        let mut model = fixture_model("databricks");
+        model.auth_config.insert(
+            "api_base".to_string(),
+            "https://workspace.example.test".to_string(),
+        );
+        for name in [
+            "system.ai.claude-haiku-4-5",
+            "catalog_ml.schema_ml.my-opus5",
+            "my_catalog.my_schema.my_model",
+        ] {
+            model.model_name = name.to_string();
+            assert_eq!(
+                provider_api_base(&model).unwrap().as_str(),
+                "https://workspace.example.test/ai-gateway/mlflow/v1"
+            );
+        }
+        model.model_name = "catalog.model".to_string();
+        assert_eq!(
+            provider_api_base(&model).unwrap().as_str(),
+            "https://workspace.example.test/serving-endpoints"
+        );
     }
 
     #[test]

@@ -37,6 +37,7 @@ from mlflow.entities import (
     GatewayEndpointModelConfig,
     GatewayModelLinkageType,
 )
+from mlflow.entities.gateway_endpoint import FallbackConfig, FallbackStrategy
 from mlflow.gateway.providers.gemini import GeminiProvider
 from mlflow.server.fastapi_app import add_gateway_timing_middleware
 from mlflow.server.gateway_api import gateway_router
@@ -84,6 +85,9 @@ class MockProviderHandler(BaseHTTPRequestHandler):
         if text == "error-500":
             self._json(500, {"error": {"message": "fixture provider failure"}})
             return
+        if body.get("model") == "fixture-fail-before":
+            self._json(500, {"error": {"message": "fixture pre-stream failure"}})
+            return
 
         streaming = "streamGenerateContent" in self.path or body.get("stream") is True
         if streaming:
@@ -91,7 +95,7 @@ class MockProviderHandler(BaseHTTPRequestHandler):
             self.send_header("content-type", "text/event-stream")
             self.send_header("connection", "close")
             self.end_headers()
-            chunks = _stream_chunks(self.path, text == "mid-stream-error")
+            chunks = _stream_chunks(self.path, text)
             for chunk in chunks:
                 self.wfile.write(chunk)
                 self.wfile.flush()
@@ -107,6 +111,11 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 2, "output_tokens": 3},
             }
+            if text == "usage-extras":
+                value["usage"].update({
+                    "server_tool_use": {"web_search_requests": 1},
+                    "service_tier": "standard_only",
+                })
         elif "generateContent" in self.path:
             value = {
                 "candidates": [
@@ -121,6 +130,8 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                     "totalTokenCount": 5,
                 },
             }
+            if text == "usage-extras":
+                value["usageMetadata"]["trafficType"] = "ON_DEMAND"
         else:
             value = {
                 "id": "openai-fixture-id",
@@ -136,6 +147,12 @@ class MockProviderHandler(BaseHTTPRequestHandler):
                 ],
                 "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
             }
+            if text == "usage-extras":
+                value["usage"].update({
+                    "cost": 0.001,
+                    "cost_details": {"upstream_inference_cost": 0.0008},
+                    "prompt_tokens_details": {"cached_tokens": 1},
+                })
         self._json(200, value)
 
     def _json(self, status: int, value: dict):
@@ -195,7 +212,7 @@ def _find_text(body: dict) -> str:
         return body.get("contents", [{}])[0].get("parts", [{}])[0].get("text", "")
 
 
-def _stream_chunks(path: str, fail: bool) -> list[bytes]:
+def _stream_chunks(path: str, text: str) -> list[bytes]:
     if path.endswith("/messages"):
         chunks = [
             b": keep-alive\n\nevent: message_start\n",
@@ -214,17 +231,20 @@ def _stream_chunks(path: str, fail: bool) -> list[bytes]:
             b'"candidatesTokenCount":3,"totalTokenCount":5}}\n\ndata: [DONE]\n\n',
         ]
     else:
+        finish_reason = b"" if text == "missing-finish-reason" else b',"finish_reason":null'
         chunks = [
             b': keep-alive\n\ndata: {"id":"openai-stream-id","object":"chat.completion.chunk",'
             b'"created":7,"model":"fixture-model","choices":[{"index":0,"delta":'
-            b'{"role":"assistant","content":"fixture "},"finish_reason":null}]}\n',
+            b'{"role":"assistant","content":"fixture "}' + finish_reason + b"}]}\n",
             b'\ndata: {"id":"openai-stream-id","object":"chat.completion.chunk",'
             b'"created":7,"model":"fixture-model","choices":[{"index":0,"delta":'
             b'{"content":"answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,'
             b'"completion_tokens":3,"total_tokens":5}}\n\ndata: [DONE]\n\n',
         ]
-    if fail:
+    if text == "mid-stream-error":
         return [chunks[0], b"data: not-json\n\n"]
+    if text == "fallback-after-first-chunk":
+        return [*chunks[:3], b"data: not-json\n\n"]
     return chunks
 
 
@@ -283,6 +303,52 @@ def _seed(
             )
         ],
         usage_tracking=usage_tracking,
+    )
+
+
+def _seed_fallback(store: SqlAlchemyStore, mock_base: str, *, suffix: str, partial: bool):
+    providers = ("anthropic", "openai") if partial else ("openai", "openai")
+    model_names = (
+        ("fixture-partial-stream", "fixture-fallback-success")
+        if partial
+        else ("fixture-fail-before", "fixture-fallback-success")
+    )
+    models = []
+    for index, (provider, model_name) in enumerate(zip(providers, model_names, strict=True)):
+        auth_config = {
+            "openai": {"api_base": f"{mock_base}/v1"},
+            "anthropic": {"api_base": f"{mock_base}/v1"},
+        }[provider]
+        secret = store.create_gateway_secret(
+            secret_name=f"obvious-fake-{suffix}-{index}-secret",
+            secret_value={"api_key": f"obvious-fake-{suffix}-{index}-key"},
+            provider=provider,
+            auth_config=auth_config,
+        )
+        models.append(
+            store.create_gateway_model_definition(
+                name=f"{suffix}-{index}-definition",
+                secret_id=secret.secret_id,
+                provider=provider,
+                model_name=model_name,
+            )
+        )
+    return store.create_gateway_endpoint(
+        name=f"{suffix}-endpoint",
+        model_configs=[
+            GatewayEndpointModelConfig(
+                model_definition_id=models[0].model_definition_id,
+                linkage_type=GatewayModelLinkageType.PRIMARY,
+                weight=1.0,
+            ),
+            GatewayEndpointModelConfig(
+                model_definition_id=models[1].model_definition_id,
+                linkage_type=GatewayModelLinkageType.FALLBACK,
+                weight=1.0,
+                fallback_order=0,
+            ),
+        ],
+        fallback_config=FallbackConfig(strategy=FallbackStrategy.SEQUENTIAL, max_attempts=1),
     )
 
 
@@ -417,6 +483,8 @@ def test_python_rust_gateway_runtime_and_spans_mock_differential(tmp_path: Path,
             suffix="trace-normalization",
             usage_tracking=True,
         )
+        _seed_fallback(store, mock_base, suffix="fallback-before", partial=False)
+        _seed_fallback(store, mock_base, suffix="fallback-after", partial=True)
         # The merged Python tree already owns the additive T-S1 migration,
         # while this independent task branch still starts Rust at the prior
         # schema marker. Rust only validates the marker and does not migrate.
@@ -434,6 +502,7 @@ def test_python_rust_gateway_runtime_and_spans_mock_differential(tmp_path: Path,
                     for content, streaming in (
                         ("hello", False),
                         ("hello", True),
+                        ("usage-extras", False),
                         ("error-429", False),
                         ("error-500", False),
                         ("mid-stream-error", True),
@@ -458,6 +527,69 @@ def test_python_rust_gateway_runtime_and_spans_mock_differential(tmp_path: Path,
                         if "x-mlflow-gateway-overhead-duration-ms" in py_headers:
                             assert int(py_headers["x-mlflow-gateway-overhead-duration-ms"]) >= 0
                             assert int(rs_headers["x-mlflow-gateway-overhead-duration-ms"]) >= 0
+
+                missing_finish_body = {
+                    "messages": [{"role": "user", "content": "missing-finish-reason"}],
+                    "stream": True,
+                }
+                missing_finish_path = "/gateway/openai-differential-endpoint/mlflow/invocations"
+                py_response = python.post(
+                    f"{python_base}{missing_finish_path}", json=missing_finish_body, timeout=10
+                )
+                rs_response = rust.post(
+                    f"{rust_base}{missing_finish_path}", json=missing_finish_body, timeout=10
+                )
+                assert py_response.content == rs_response.content
+                first_frame = json.loads(
+                    next(
+                        line.removeprefix("data: ")
+                        for line in py_response.text.splitlines()
+                        if line.startswith("data: {")
+                    )
+                )
+                assert first_frame["choices"][0]["finish_reason"] is None
+
+                fallback_before_body = {
+                    "model": "fallback-before-endpoint",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "stream": True,
+                }
+                fallback_before_path = "/gateway/openai/v1/chat/completions"
+                py_response = python.post(
+                    f"{python_base}{fallback_before_path}",
+                    json=fallback_before_body,
+                    timeout=10,
+                )
+                rs_response = rust.post(
+                    f"{rust_base}{fallback_before_path}",
+                    json=fallback_before_body,
+                    timeout=10,
+                )
+                assert py_response.status_code == rs_response.status_code == 200
+                assert py_response.content == rs_response.content
+                assert b"fixture " in py_response.content
+                assert b"answer" in py_response.content
+                assert b"fixture pre-stream failure" not in py_response.content
+
+                fallback_after_body = {
+                    "messages": [{"role": "user", "content": "fallback-after-first-chunk"}],
+                    "stream": True,
+                }
+                fallback_after_path = "/gateway/fallback-after-endpoint/mlflow/invocations"
+                py_response = python.post(
+                    f"{python_base}{fallback_after_path}",
+                    json=fallback_after_body,
+                    timeout=10,
+                )
+                rs_response = rust.post(
+                    f"{rust_base}{fallback_after_path}",
+                    json=fallback_after_body,
+                    timeout=10,
+                )
+                assert py_response.status_code == rs_response.status_code == 200
+                assert py_response.content == rs_response.content
+                assert b'"provider":"anthropic"' in py_response.content
+                assert b'"provider":"openai"' not in py_response.content
 
                 multimodal_content = [
                     {"type": "text", "text": "multimodal-marker"},

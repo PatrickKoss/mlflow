@@ -20,6 +20,7 @@ but are reported prominently). A Markdown + JSON report is written under
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -288,6 +289,7 @@ class Case:
     compare_headers: list[str] = field(default_factory=list)
     expect_headers: dict[str, Any] = field(default_factory=dict)
     raw_body: str | None = None  # raw (non-JSON) request body, e.g. artifact upload
+    raw_body_base64: str | None = None
     response_json_format: str | None = None  # "pretty" or "compact", checked byte-for-byte
     shared_db_rust_second_write: dict[str, Any] | None = None
 
@@ -334,6 +336,7 @@ def _parse_case(raw: dict[str, Any], section: str) -> Case:
         compare_headers=raw.get("compare_headers", []) or [],
         expect_headers=raw.get("expect_headers", {}) or {},
         raw_body=raw.get("raw_body"),
+        raw_body_base64=raw.get("raw_body_base64"),
         response_json_format=raw.get("response_json_format"),
         shared_db_rust_second_write=raw.get("shared_db_rust_second_write"),
     )
@@ -425,6 +428,8 @@ def _do_request(
         kwargs["headers"] = headers
     if case.raw_body is not None:
         kwargs["data"] = substitute(case.raw_body, bindings).encode()
+    elif case.raw_body_base64 is not None:
+        kwargs["data"] = base64.b64decode(substitute(case.raw_body_base64, bindings))
     elif body is not None:
         kwargs["json"] = body
     auth = _auth_tuple(case.auth, creds)
@@ -1299,6 +1304,7 @@ def main() -> int:
     invoke_cases = sections.pop("invoke", [])
     issue_credentials_cases = sections.pop("issue_credentials", [])
     traces_cases = sections.pop("traces", [])
+    gateway_cases = sections.pop("gateway", [])
     gateway_proxy_validation_cases = sections.pop("gateway_proxy_validation", [])
     mcp_server_registry_cases = sections.pop("mcp_server_registry", [])
     artifacts_cases = sections.pop("artifacts", [])
@@ -1416,6 +1422,16 @@ def main() -> int:
             all_results.extend(
                 _run_sqlite_sections(
                     {"traces": traces_cases},
+                    allow,
+                    Path(td),
+                    python_asgi_app="mlflow.server.fastapi_app:app",
+                )
+            )
+    if gateway_cases:
+        with tempfile.TemporaryDirectory(prefix="t-s6-gateway-") as td:
+            all_results.extend(
+                _run_sqlite_sections(
+                    {"gateway": gateway_cases},
                     allow,
                     Path(td),
                     python_asgi_app="mlflow.server.fastapi_app:app",

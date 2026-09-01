@@ -1546,7 +1546,7 @@ async fn request_validation_propagates_before_any_fallback_attempt() {
 }
 
 #[tokio::test]
-async fn streaming_falls_back_before_and_after_the_first_emitted_chunk() {
+async fn streaming_falls_back_only_before_the_first_emitted_chunk() {
     let oracle = python_routing_oracle();
     let fixture = Fixture::new().await;
     let response = fixture
@@ -1571,6 +1571,34 @@ async fn streaming_falls_back_before_and_after_the_first_emitted_chunk() {
     );
 
     let response = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/gateway/openai/v1/chat/completions")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "model":"fallback-first-500",
+                        "messages":[{"role":"user","content":"hello"}],
+                        "stream":true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let stream = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(stream.windows(7).any(|window| window == b"fixture"));
+    assert_eq!(
+        script_attempts(fixture.take_attempts()),
+        ["fail-500", "fallback-success"]
+    );
+
+    let response = fixture
         .post("fallback-partial-stream", chat("hello", true))
         .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -1585,8 +1613,8 @@ async fn streaming_falls_back_before_and_after_the_first_emitted_chunk() {
     )
     .unwrap();
     assert!(stream.contains("anthropic"), "{stream}");
-    assert!(stream.contains("openai"), "{stream}");
-    assert!(!stream.contains("JSONDecodeError"), "{stream}");
+    assert!(!stream.contains("openai"), "{stream}");
+    assert!(stream.contains("JSONDecodeError"), "{stream}");
     assert_eq!(
         script_attempts(fixture.take_attempts()),
         serde_json::from_value::<Vec<String>>(oracle["partial_stream"]["attempts"].clone())

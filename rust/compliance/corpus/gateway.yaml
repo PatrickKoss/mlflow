@@ -218,6 +218,14 @@ cases:
     query: {endpoint_id: "${gateway_endpoint_id}"}
     expect_status: 200
 
+  - name: gateway_zstd_invocation_decompresses_before_validation
+    method: POST
+    path: /gateway/corpus-fake-endpoint/mlflow/invocations
+    headers: {Content-Encoding: zstd, Content-Type: application/json}
+    # zstd-compressed bytes for {"messages":[]}.
+    raw_body_base64: KLUv/SAPeQAAeyJtZXNzYWdlcyI6W119
+    expect_status: 400
+
   - name: gateway_update_endpoint_missing_linkage_type
     method: POST
     path: /api/3.0/mlflow/gateway/endpoints/update
