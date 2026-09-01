@@ -25,14 +25,23 @@ function surface(...ids) {
   return surfaceById.get(ids[0]);
 }
 
-async function openSurface(page, id) {
+async function openSurface(page, id, extraQuery = "") {
   const definition = surface(id);
   const separator = definition.route.includes("?") ? "&" : "?";
-  await page.goto(`/#${definition.route}${separator}workspace=default`, {
+  await page.goto(`/#${definition.route}${separator}workspace=default${extraQuery}`, {
     waitUntil: "domcontentloaded",
   });
   return definition;
 }
+
+// The merged issue-detection onboarding shows a first-visit modal popover on
+// every traces surface that aria-hides the page until dismissed. Mark it as
+// already shown (same versioned key the genai smoke spec uses).
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("mlflow.detectIssues.guidanceShown_v1", "true");
+  });
+});
 
 async function capture(page, definition) {
   await page.screenshot({ path: path.join(screenshotDir, definition.screenshot), fullPage: true });
@@ -104,17 +113,15 @@ test("artifact-browser", async ({ page }) => {
 });
 
 test("traces-list", async ({ page }) => {
-  const definition = await openSurface(page, "traces-list");
-  // The merged issue-detection onboarding shows a first-visit modal popover
-  // that aria-hides the traces table until dismissed.
-  await page.getByRole("button", { name: "Got it", exact: true }).click();
-  // With no traces in the default 7-day window, the merged UI re-anchors a
-  // CUSTOM window at the oldest trace's request_time and filters with a
-  // strict `timestamp_ms >` (useSetInitialTimeFilter + useMlflowTraces), so
-  // the oldest seeded trace is excluded by upstream design.
-  await expect(page.getByText("deterministic question 2", { exact: false }).first()).toBeVisible();
-  await expect(page.getByText("deterministic question 3", { exact: false }).first()).toBeVisible();
-  await expect(page.getByText("deterministic question 1", { exact: false })).toHaveCount(0);
+  // The merged traces-v4 tab defaults to a fixed "Last 7 days" window and no
+  // longer re-anchors to the oldest trace, so the 2026-07-20 seed would be
+  // empty; the URL `startTimeLabel` param (useTracesV4TimeRange) widens it.
+  const definition = await openSurface(page, "traces-list", "&startTimeLabel=ALL");
+  for (const index of [1, 2, 3]) {
+    await expect(
+      page.getByText(`deterministic question ${index}`, { exact: false }).first(),
+    ).toBeVisible();
+  }
   await capture(page, definition);
 });
 
@@ -131,7 +138,6 @@ test("trace-span-tree-and-attachment", async ({ page }) => {
   const response = await attachmentResponse;
   expect(response.status()).toBe(200);
   expect(await response.text()).toBe("T11.6 deterministic trace attachment");
-  await page.getByRole("tab", { name: "Details & Timeline", exact: true }).click();
   await expect(page.getByText("answer-question-1", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("deterministic-tool-1", { exact: true }).first()).toBeVisible();
   await capture(page, definition);
@@ -139,6 +145,7 @@ test("trace-span-tree-and-attachment", async ({ page }) => {
 
 test("trace-assessment", async ({ page }) => {
   const definition = await openSurface(page, "trace-assessment");
+  await page.getByRole("button", { name: /^Assess trace/ }).click();
   await expect(page.getByText("correctness", { exact: true }).first()).toBeVisible();
   await expect(page.locator('[role="status"]').filter({ hasText: "True" })).toBeVisible();
   await capture(page, definition);
