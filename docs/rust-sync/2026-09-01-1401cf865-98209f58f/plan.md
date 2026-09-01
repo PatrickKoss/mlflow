@@ -107,11 +107,12 @@ tables and reads the new `jobs.creator` column). Everything else can run in para
   - **VER:** `cargo test -p mlflow-server --test promptlab_http -p mlflow-genai --test payload --test phase19_contract`.
   - **DONE 2026-09-01** (coordinator, commit `b28c52490`): pins moved to `3.15.3.dev0`, `pip<=26.2.1`/`pip==26.2.1`, `wheel==0.48.0`; VER 3+6+3 tests green, `cargo fmt --check` and clippy clean.
 
-- [ ] T-S13 Online scoring: scorer rate limit and retries from `MLFLOW_GENAI_EVAL_*` (found during T-S8 review)
+- [x] T-S13 Online scoring: scorer rate limit and retries from `MLFLOW_GENAI_EVAL_*` (found during T-S8 review)
   - **Upstream refs:** `254c4e387c` feat: add rate limiting and retry support to automatic evaluation path (#24702); `df8df41036` Propagate eval_retry_context flags into the scorer thread pool (#25318). The T-S8 plan text assumed these only reach the Python worker; the Rust native online-scoring path (`mlflow-genai/src/online.rs` `score_and_log`) reimplements the evaluation harness and hardcoded `max_retries: 0` with no scorer rate limit.
   - **Rust target:** `rust/crates/mlflow-genai/src/online.rs`, `rust/crates/mlflow-genai/src/evaluation.rs` (`EvaluationConfig::from_env`)
   - **AC:** Online scoring derives its scorer rate limit the way `trace_processor.py` now does: `MLFLOW_GENAI_EVAL_SCORER_RATE_LIMIT` when set, else `MLFLOW_GENAI_EVAL_PREDICT_RATE_LIMIT` scaled by the number of distinct scorers in the tick (`_get_scorer_rate_config`), and `max_retries` comes from `MLFLOW_GENAI_EVAL_MAX_RETRIES` (default 3). `df8df41036` is a Python threading detail (contextvars copied into the scorer pool); the Rust engine passes `max_retries` to each scorer call directly, so no port is needed beyond the config.
   - **VER:** `cargo test -p mlflow-genai online` (new unit test for the online config derivation) and `cargo test -p mlflow-genai --test` suites touching `EvaluationConfig`; `cargo fmt --check` and clippy clean.
+  - **DONE 2026-09-01** (coordinator, commit `322760ae7`): `score_and_log` now builds its config from `EvaluationConfig::from_env(distinct scorer count)` via `online_evaluation_config` (row_workers stays 1, scorer tracing still off inside an online session). Unit test `online_config_keeps_env_rate_and_retries_but_scores_one_row`; full `cargo test -p mlflow-genai` 63 passed, fmt and clippy (`-D warnings`) clean.
 
 ## Skipped
 
