@@ -10,6 +10,7 @@
 //! the config per-store rather than process-global, so no cross-test env race
 //! remains.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -28,6 +29,7 @@ use tokio::net::TcpListener;
 
 const ART_ROOT: &str = "s3://bucket/mlruns";
 const WS: &str = "default";
+const ADMIN: (&str, &str) = ("alice_scrypt", "alice-password-123");
 
 fn no_permission_config() -> AuthConfig {
     AuthConfig {
@@ -220,6 +222,48 @@ impl TestServer {
             .info
             .run_id
     }
+
+    async fn create_dataset(&self, experiment_ids: &[String]) -> String {
+        self.tracking
+            .create_evaluation_dataset(WS, "auth-dataset", &serde_json::Map::new(), experiment_ids)
+            .await
+            .expect("create dataset")
+            .dataset_id
+    }
+
+    async fn create_issue(&self, experiment_id: &str) -> String {
+        self.tracking
+            .create_issue(
+                WS,
+                experiment_id,
+                "auth issue",
+                "auth issue description",
+                "open",
+                None,
+                &[],
+                None,
+                &[],
+                None,
+            )
+            .await
+            .expect("create issue")
+            .issue_id
+    }
+
+    async fn create_gateway_secret(&self) -> String {
+        self.tracking
+            .create_gateway_secret(
+                WS,
+                "auth-secret",
+                &HashMap::from([("api_key".to_string(), "secret".to_string())]),
+                Some("openai"),
+                &HashMap::new(),
+                None,
+            )
+            .await
+            .expect("create gateway secret")
+            .secret_id
+    }
 }
 
 impl Drop for TestServer {
@@ -304,6 +348,222 @@ async fn default_no_permission_denies_read_without_grant() {
     )
     .await;
     assert_ne!(ok.status, StatusCode::FORBIDDEN, "{}", ok.body);
+}
+
+#[tokio::test]
+async fn fail_closed_defaults_to_deny_for_routes_without_a_decision() {
+    let srv = TestServer::start("fail_closed_default").await;
+    let (user, password) = srv.create_user("fail_closed_user").await;
+    let response = send(
+        &srv.base,
+        Method::GET,
+        "/api/3.0/mlflow/unregistered-auth-route",
+        Some((&user, &password)),
+        None,
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::FORBIDDEN, "{}", response.body);
+    assert_eq!(response.body, "Permission denied");
+}
+
+#[tokio::test]
+async fn datasets_require_permissions_on_every_associated_experiment() {
+    let srv = TestServer::start("dataset_auth").await;
+    let exp_a = srv.create_experiment("dataset-auth-a").await;
+    let exp_b = srv.create_experiment("dataset-auth-b").await;
+    let dataset_id = srv.create_dataset(&[exp_a.clone(), exp_b.clone()]).await;
+    let (user, password) = srv.create_user("dataset_user").await;
+    let auth = Some((user.as_str(), password.as_str()));
+
+    let get_path = format!("/api/3.0/mlflow/datasets/{dataset_id}");
+    let denied = send(&srv.base, Method::GET, &get_path, auth, None).await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN, "{}", denied.body);
+
+    srv.grant(&user, "experiment", &exp_a, "READ").await;
+    let still_denied = send(&srv.base, Method::GET, &get_path, auth, None).await;
+    assert_eq!(
+        still_denied.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        still_denied.body
+    );
+
+    srv.grant(&user, "experiment", &exp_b, "READ").await;
+    let allowed = send(&srv.base, Method::GET, &get_path, auth, None).await;
+    assert_ne!(allowed.status, StatusCode::FORBIDDEN, "{}", allowed.body);
+
+    let empty_search = send(
+        &srv.base,
+        Method::POST,
+        "/api/3.0/mlflow/datasets/search",
+        auth,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(
+        empty_search.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        empty_search.body
+    );
+}
+
+#[tokio::test]
+async fn issues_resolve_their_experiment_and_normalize_create_bodies() {
+    let srv = TestServer::start("issue_auth").await;
+    let experiment_id = srv.create_experiment("issue-auth-exp").await;
+    let issue_id = srv.create_issue(&experiment_id).await;
+    let (user, password) = srv.create_user("issue_user").await;
+    let auth = Some((user.as_str(), password.as_str()));
+
+    let get_path = format!("/api/3.0/mlflow/issues/{issue_id}");
+    let denied = send(&srv.base, Method::GET, &get_path, auth, None).await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN, "{}", denied.body);
+
+    srv.grant(&user, "experiment", &experiment_id, "READ").await;
+    let allowed = send(&srv.base, Method::GET, &get_path, auth, None).await;
+    assert_ne!(allowed.status, StatusCode::FORBIDDEN, "{}", allowed.body);
+
+    let missing_experiment = send(
+        &srv.base,
+        Method::POST,
+        "/api/3.0/mlflow/issues/search",
+        auth,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(
+        missing_experiment.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        missing_experiment.body
+    );
+
+    srv.grant(&user, "experiment", &experiment_id, "EDIT").await;
+    let double_encoded = send(
+        &srv.base,
+        Method::POST,
+        "/api/3.0/mlflow/issues",
+        auth,
+        Some(Value::String(
+            json!({
+                "experiment_id": experiment_id,
+                "name": "double-encoded issue",
+                "description": "legacy request body"
+            })
+            .to_string(),
+        )),
+    )
+    .await;
+    assert_eq!(
+        double_encoded.status,
+        StatusCode::OK,
+        "{}",
+        double_encoded.body
+    );
+}
+
+#[tokio::test]
+async fn gateway_discovery_demo_invoke_and_presigned_rules_match_python() {
+    let srv = TestServer::start("misc_auth").await;
+    let experiment_id = srv.create_experiment("misc-auth-exp").await;
+    let run_id = srv.create_run(&experiment_id).await;
+    let (user, password) = srv.create_user("misc_user").await;
+    let auth = Some((user.as_str(), password.as_str()));
+    let secret_id = srv.create_gateway_secret().await;
+
+    let discovery = send(
+        &srv.base,
+        Method::GET,
+        "/ajax-api/3.0/mlflow/gateway/secrets/config",
+        auth,
+        None,
+    )
+    .await;
+    assert_eq!(discovery.status, StatusCode::OK, "{}", discovery.body);
+    assert!(!discovery.body.contains("using_default_passphrase"));
+    let admin_discovery = send(
+        &srv.base,
+        Method::GET,
+        "/ajax-api/3.0/mlflow/gateway/secrets/config",
+        Some(ADMIN),
+        None,
+    )
+    .await;
+    assert!(admin_discovery.body.contains("using_default_passphrase"));
+
+    let list_path = "/api/3.0/mlflow/gateway/secrets/list";
+    let filtered = send(&srv.base, Method::GET, list_path, auth, None).await;
+    assert_eq!(filtered.status, StatusCode::OK, "{}", filtered.body);
+    assert_eq!(
+        json!({"secrets": []}),
+        serde_json::from_str::<Value>(&filtered.body).unwrap()
+    );
+    srv.grant(&user, "gateway_secret", &secret_id, "READ").await;
+    let visible = send(&srv.base, Method::GET, list_path, auth, None).await;
+    assert_eq!(visible.status, StatusCode::OK, "{}", visible.body);
+    assert!(visible.body.contains(&secret_id));
+
+    let generated = send(
+        &srv.base,
+        Method::POST,
+        "/ajax-api/3.0/mlflow/demo/generate",
+        auth,
+        Some(json!({})),
+    )
+    .await;
+    assert_ne!(
+        generated.status,
+        StatusCode::FORBIDDEN,
+        "{}",
+        generated.body
+    );
+    let deleted = send(
+        &srv.base,
+        Method::POST,
+        "/ajax-api/3.0/mlflow/demo/delete",
+        auth,
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(deleted.status, StatusCode::FORBIDDEN, "{}", deleted.body);
+
+    for path in [
+        "/ajax-api/3.0/mlflow/issues/invoke",
+        "/ajax-api/3.0/mlflow/genai/evaluate/invoke",
+    ] {
+        let denied = send(
+            &srv.base,
+            Method::POST,
+            path,
+            auth,
+            Some(json!({"experiment_id": experiment_id})),
+        )
+        .await;
+        assert_eq!(denied.status, StatusCode::FORBIDDEN, "{}", denied.body);
+    }
+
+    let presigned_path = "/api/2.0/mlflow/artifacts/presigned-upload-url";
+    let denied = send(
+        &srv.base,
+        Method::POST,
+        presigned_path,
+        auth,
+        Some(json!({"run_id": run_id, "path": "artifact.bin"})),
+    )
+    .await;
+    assert_eq!(denied.status, StatusCode::FORBIDDEN, "{}", denied.body);
+
+    srv.grant(&user, "experiment", &experiment_id, "EDIT").await;
+    let allowed = send(
+        &srv.base,
+        Method::POST,
+        presigned_path,
+        auth,
+        Some(json!({"run_id": run_id, "path": "artifact.bin"})),
+    )
+    .await;
+    assert_ne!(allowed.status, StatusCode::FORBIDDEN, "{}", allowed.body);
 }
 
 #[tokio::test]

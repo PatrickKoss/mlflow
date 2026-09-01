@@ -344,3 +344,167 @@ cases:
     auth: user
     compare_body: false
     expect_status: 501
+
+  - name: auth_fail_closed_unknown_route
+    method: GET
+    path: /api/3.0/mlflow/unregistered-auth-route
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_admin_create_scoped_experiment
+    method: POST
+    path: /api/2.0/mlflow/experiments/create
+    body: {name: auth_scoped_resources}
+    auth: admin
+    bind:
+      - {bind: auth_scoped_experiment_id, from: $.experiment_id}
+    expect_status: 200
+
+  - name: auth_user_dataset_create_requires_update
+    method: POST
+    path: /api/3.0/mlflow/datasets/create
+    body:
+      name: auth-user-denied-dataset
+      experiment_ids: ["${auth_scoped_experiment_id}"]
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_admin_create_dataset
+    method: POST
+    path: /api/3.0/mlflow/datasets/create
+    body:
+      name: auth-admin-dataset
+      experiment_ids: ["${auth_scoped_experiment_id}"]
+    auth: admin
+    bind:
+      - {bind: auth_dataset_id, from: $.dataset.dataset_id}
+    normalize: {hash_fields: [digest]}
+    expect_status: 200
+
+  - name: auth_user_dataset_read_default_allowed
+    method: GET
+    path: /ajax-api/3.0/mlflow/datasets/${auth_dataset_id}
+    auth: user
+    normalize: {hash_fields: [digest]}
+    expect_status: 200
+
+  - name: auth_user_dataset_search_must_be_scoped
+    method: POST
+    path: /api/3.0/mlflow/datasets/search
+    body: {}
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_admin_create_issue
+    method: POST
+    path: /api/3.0/mlflow/issues
+    body:
+      experiment_id: "${auth_scoped_experiment_id}"
+      name: Auth corpus issue
+      description: Scoped issue for auth parity
+    auth: admin
+    bind:
+      - {bind: auth_issue_id, from: $.issue.issue_id}
+    expect_status: 200
+
+  - name: auth_user_issue_read_default_allowed
+    method: GET
+    path: /ajax-api/3.0/mlflow/issues/${auth_issue_id}
+    auth: user
+    expect_status: 200
+
+  - name: auth_user_issue_update_requires_update
+    method: PATCH
+    path: /api/3.0/mlflow/issues/${auth_issue_id}
+    body: {name: denied}
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_user_gateway_discovery_allowed
+    method: GET
+    path: /ajax-api/3.0/mlflow/gateway/secrets/config
+    auth: user
+    expect_status: 200
+
+  - name: auth_user_gateway_budget_list_allowed
+    method: GET
+    path: /api/3.0/mlflow/gateway/budgets/list
+    auth: user
+    expect_status: 200
+
+  - name: auth_user_gateway_guardrails_admin_only
+    method: GET
+    path: /api/3.0/mlflow/gateway/guardrails/list
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_user_demo_generate_allowed
+    method: POST
+    path: /ajax-api/3.0/mlflow/demo/generate
+    body: {features: []}
+    auth: user
+    compare_body: false
+    expect_status: 200
+
+  - name: auth_user_demo_delete_admin_only
+    method: POST
+    path: /ajax-api/3.0/mlflow/demo/delete
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_admin_create_scoped_run
+    method: POST
+    path: /api/2.0/mlflow/runs/create
+    body:
+      experiment_id: "${auth_scoped_experiment_id}"
+      start_time: 1
+      run_name: auth-scoped-run
+    auth: admin
+    bind:
+      - {bind: auth_scoped_run_id, from: $.run.info.run_id}
+    expect_status: 200
+
+  - name: auth_user_presigned_upload_requires_update
+    method: POST
+    path: /api/2.0/mlflow/artifacts/presigned-upload-url
+    body: {run_id: "${auth_scoped_run_id}", path: artifact.bin}
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_user_issue_invoke_requires_update
+    method: POST
+    path: /ajax-api/3.0/mlflow/issues/invoke
+    body: {experiment_id: "${auth_scoped_experiment_id}"}
+    auth: user
+    compare_body: false
+    expect_status: 403
+
+  - name: auth_admin_grant_scoped_experiment_edit
+    method: POST
+    path: /api/3.0/mlflow/users/permissions/grant
+    body:
+      username: alice
+      resource_type: experiment
+      resource_id: "${auth_scoped_experiment_id}"
+      permission: EDIT
+    auth: admin
+    compare_body: false
+    expect_status: 200
+    shared_db_rust_second_write:
+      expect_status: 400
+      expect_error_code: RESOURCE_ALREADY_EXISTS
+      reason: Python inserts first into the shared auth DB; Rust observes the exact grant as a duplicate.
+
+  - name: auth_user_create_issue_with_double_encoded_body
+    method: POST
+    path: /api/3.0/mlflow/issues
+    body: '{"experiment_id":"${auth_scoped_experiment_id}","name":"Encoded issue","description":"Legacy request body"}'
+    auth: user
+    expect_status: 200

@@ -94,6 +94,20 @@ fn forbidden_response() -> Response {
     (StatusCode::FORBIDDEN, "Permission denied").into_response()
 }
 
+/// `MLFLOW_BASIC_AUTH_FAIL_CLOSED`, defaulting to true. An explicit false
+/// restores the historical behavior for routes without an auth decision.
+fn fail_closed_enabled() -> bool {
+    fail_closed_from_value(
+        std::env::var("MLFLOW_BASIC_AUTH_FAIL_CLOSED")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn fail_closed_from_value(value: Option<&str>) -> bool {
+    value.is_none_or(|value| !matches!(value.trim().to_ascii_lowercase().as_str(), "false" | "0"))
+}
+
 /// Decode HTTP Basic credentials, mirroring `basic_credentials`
 /// (`auth_api/mod.rs`) — werkzeug splits the decoded pair on the first colon.
 fn basic_credentials(req: &Request<Body>, routed_path: &str) -> Option<(String, String)> {
@@ -281,8 +295,8 @@ pub async fn authorize(
         None
     } else {
         match dispatch_request(&path, &method) {
-            Dispatched::Allow => None,
-            Dispatched::Deny => return forbidden_response(),
+            Dispatched::NoDecision if !fail_closed_enabled() => None,
+            Dispatched::NoDecision | Dispatched::Deny => return forbidden_response(),
             Dispatched::Validator(v, params) => Some((v, params)),
         }
     };
@@ -401,4 +415,17 @@ pub async fn authorize(
 /// negligible divergence not exercised by the permission-matrix ACs).
 fn error_response(e: &mlflow_error::MlflowError) -> Response {
     e.clone().into_response()
+}
+
+#[cfg(test)]
+mod fail_closed_tests {
+    use super::fail_closed_from_value;
+
+    #[test]
+    fn defaults_on_and_accepts_explicit_false() {
+        assert!(fail_closed_from_value(None));
+        assert!(fail_closed_from_value(Some("true")));
+        assert!(!fail_closed_from_value(Some("false")));
+        assert!(!fail_closed_from_value(Some("0")));
+    }
 }

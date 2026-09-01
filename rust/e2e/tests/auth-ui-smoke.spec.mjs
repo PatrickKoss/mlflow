@@ -52,6 +52,23 @@ async function rustJson(page, route, method = "GET", body) {
   );
 }
 
+async function basicAuthJson(page, route, method = "GET", body) {
+  const authorization = `Basic ${Buffer.from(`${username}:t11-password1234`).toString("base64")}`;
+  const response = await page.request.fetch(route, {
+    method,
+    headers: {
+      authorization,
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    data: body,
+  });
+  return {
+    status: response.status(),
+    backend: response.headers()["x-mlflow-backend"],
+    body: await response.json().catch(() => ({})),
+  };
+}
+
 test("auth-enabled admin/account functional flow", async ({ page, browserAudit }) => {
   annotate(
     "admin-users-crud",
@@ -76,6 +93,46 @@ test("auth-enabled admin/account functional flow", async ({ page, browserAudit }
   expect((await createUserResponse).status()).toBe(200);
   await expect(page.getByRole("link", { name: username, exact: true })).toBeVisible();
   await capture(page, "admin-users-crud");
+
+  const scopedExperiment = await rustJson(
+    page,
+    "/api/2.0/mlflow/experiments/create",
+    "POST",
+    { name: "t-s2-auth-e2e" },
+  );
+  expect(scopedExperiment).toMatchObject({ status: 200, backend: "rust" });
+  const experimentId = scopedExperiment.body.experiment_id;
+  const scopedRun = await rustJson(page, "/api/2.0/mlflow/runs/create", "POST", {
+    experiment_id: experimentId,
+    start_time: 1,
+    run_name: "t-s2-auth-e2e-run",
+  });
+  expect(scopedRun).toMatchObject({ status: 200, backend: "rust" });
+
+  const secretsConfig = await basicAuthJson(
+    page,
+    "/ajax-api/3.0/mlflow/gateway/secrets/config",
+  );
+  expect(secretsConfig).toMatchObject({ status: 200, backend: "rust" });
+  expect(secretsConfig.body).not.toHaveProperty("using_default_passphrase");
+  expect(
+    await basicAuthJson(page, "/api/3.0/mlflow/gateway/guardrails/list"),
+  ).toMatchObject({ status: 403, backend: "rust" });
+  expect(
+    await basicAuthJson(page, "/api/3.0/mlflow/unregistered-auth-route"),
+  ).toMatchObject({ status: 403, backend: "rust" });
+  expect(
+    await basicAuthJson(page, "/api/3.0/mlflow/datasets/create", "POST", {
+      name: "t-s2-denied-dataset",
+      experiment_ids: [experimentId],
+    }),
+  ).toMatchObject({ status: 403, backend: "rust" });
+  expect(
+    await basicAuthJson(page, "/api/2.0/mlflow/artifacts/presigned-upload-url", "POST", {
+      run_id: scopedRun.body.run.info.run_id,
+      path: "artifact.bin",
+    }),
+  ).toMatchObject({ status: 403, backend: "rust" });
 
   await page.getByRole("tab", { name: "Roles", exact: true }).click();
   const createRoleResponsePromise = page.waitForResponse((response) =>

@@ -7,13 +7,11 @@ use axum::response::Response;
 use mlflow_error::{ErrorCode, MlflowError};
 use mlflow_proto::mlflow::issues as pb;
 use mlflow_store::{Issue, IssueUpdate};
+use serde_json::Value;
 
 use crate::proto_http::{parse_request, parse_request_with_path_params, proto_response};
 use crate::state::AppState;
 use crate::workspace::Workspace;
-
-// AUTH GAP: issues (D21) — Python registers no per-resource validators for
-// these four RPCs. The shared middleware still requires authentication.
 
 pub async fn create_issue(
     State(state): State<AppState>,
@@ -21,6 +19,7 @@ pub async fn create_issue(
     parts: Parts,
     body: Bytes,
 ) -> Result<Response, MlflowError> {
+    let body = normalized_request_body(&body);
     let req: pb::CreateIssue = parse_request(&parts, &body, "mlflow.issues.CreateIssue")?;
     let experiment_id = required(req.experiment_id.as_deref(), "experiment_id")?;
     let name = required(req.name.as_deref(), "name")?;
@@ -126,6 +125,7 @@ pub async fn search_issues(
     parts: Parts,
     body: Bytes,
 ) -> Result<Response, MlflowError> {
+    let body = normalized_request_body(&body);
     let req: pb::SearchIssues = parse_request(&parts, &body, "mlflow.issues.SearchIssues")?;
     let page = state
         .tracking_store()
@@ -149,6 +149,15 @@ pub async fn search_issues(
         },
         "mlflow.issues.SearchIssues.Response",
     )
+}
+
+/// Match `_get_normalized_request_json` for the two issue handlers that accept
+/// legacy double-encoded request objects.
+fn normalized_request_body(body: &Bytes) -> Bytes {
+    match serde_json::from_slice::<Value>(body) {
+        Ok(Value::String(encoded)) => Bytes::from(encoded),
+        _ => body.clone(),
+    }
 }
 
 fn to_proto(issue: Issue) -> pb::Issue {

@@ -11,14 +11,14 @@
 //! 4. `TRACE_PARAMETERIZED_BEFORE_REQUEST_VALIDATORS` — regex-matched, for
 //!    `/mlflow/traces/` **with fail-closed** on an unknown subpath.
 //! 5. Otherwise: proxy-artifact path inspection (`_is_proxy_artifact_path` +
-//!    `_get_proxy_artifact_validator`), else no validator (allow).
+//!    `_get_proxy_artifact_validator`), else no authorization decision.
 //!
 //! We reproduce the same order and the same matching. The exact-path and
 //! regex maps are derived once from the proto `ROUTE_TABLE` keyed on
 //! `(service, method)` — exactly as Python keys `BEFORE_REQUEST_HANDLERS` on the
 //! proto request class — plus the hand-registered auth/artifact/trace routes.
 //! Only routes actually served by this Rust server are wired. Gateway discovery
-//! and the legacy Flask `gateway-proxy` bridge need no resource validator;
+//! and the legacy Flask `gateway-proxy` bridge are explicitly authenticated-only;
 //! native `/gateway/` routes resolve an endpoint name and require USE exactly
 //! like Python's FastAPI permission middleware.
 //! Prompt optimization and review queues are live and carry the same validators as Python
@@ -114,9 +114,12 @@ fn dispatch() -> &'static Dispatch {
 /// `(service, method)` -> the validator for that proto RPC, mirroring
 /// `BEFORE_REQUEST_HANDLERS` / `LOGGED_MODEL_BEFORE_REQUEST_HANDLERS` /
 /// `WEBHOOK_BEFORE_REQUEST_HANDLERS`. Returns `None` for RPCs this Rust server
-/// does not serve or that Python leaves ungated.
+/// does not serve through the ordinary protobuf router.
 fn proto_validator(service: &str, method: &str) -> Option<Validator> {
     use Validator::*;
+    if service == "MlflowArtifactsService" {
+        return None;
+    }
     let v = match (service, method) {
         // ---- Experiments (BEFORE_REQUEST_HANDLERS) ----
         ("MlflowService", "createExperiment") => CanCreateExperiment,
@@ -145,9 +148,20 @@ fn proto_validator(service: &str, method: &str) -> Option<Validator> {
         ("MlflowService", "getGatewayModelDefinition") => ReadGatewayModelDefinition,
         ("MlflowService", "updateGatewayModelDefinition") => UpdateGatewayModelDefinition,
         ("MlflowService", "deleteGatewayModelDefinition") => DeleteGatewayModelDefinition,
+        ("MlflowService", "getBudgetPolicy") => Allow,
+        ("MlflowService", "listBudgetPolicies") => Allow,
+        ("MlflowService", "listBudgetWindows") => Allow,
         ("MlflowService", "createBudgetPolicy") => SenderIsAdmin,
         ("MlflowService", "updateBudgetPolicy") => SenderIsAdmin,
         ("MlflowService", "deleteBudgetPolicy") => SenderIsAdmin,
+        ("MlflowService", "createGatewayGuardrail") => SenderIsAdmin,
+        ("MlflowService", "getGatewayGuardrail") => SenderIsAdmin,
+        ("MlflowService", "listGatewayGuardrails") => SenderIsAdmin,
+        ("MlflowService", "deleteGatewayGuardrail") => SenderIsAdmin,
+        ("MlflowService", "addGuardrailToEndpoint") => UpdateGatewayEndpointGuardrailConfig,
+        ("MlflowService", "removeGuardrailFromEndpoint") => UpdateGatewayEndpointGuardrailConfig,
+        ("MlflowService", "updateEndpointGuardrailConfig") => UpdateGatewayEndpointGuardrailConfig,
+        ("MlflowService", "listEndpointGuardrailConfigs") => ReadGatewayEndpointGuardrailConfig,
         ("MlflowService", "attachModelToEndpoint") => UpdateGatewayEndpoint,
         ("MlflowService", "detachModelFromEndpoint") => UpdateGatewayEndpoint,
         ("MlflowService", "createEndpointBinding") => UpdateGatewayEndpoint,
@@ -171,6 +185,8 @@ fn proto_validator(service: &str, method: &str) -> Option<Validator> {
         ("MlflowService", "logParam") => UpdateRun,
         ("MlflowService", "getMetricHistory") => ReadRun,
         ("MlflowService", "createPresignedDownloadUrl") => ReadRun,
+        ("MlflowService", "createPresignedUploadUrl") => UpdateRun,
+        ("MlflowService", "listArtifacts") => ReadRun,
         // ---- Prompt optimization jobs (inherit experiment) ----
         ("MlflowService", "createPromptOptimizationJob") => UpdateExperiment,
         ("MlflowService", "getPromptOptimizationJob") => ReadPromptOptimizationJob,
@@ -222,11 +238,25 @@ fn proto_validator(service: &str, method: &str) -> Option<Validator> {
         ("MlflowService", "GetAssessment") => ReadTraceByTraceId,
         ("MlflowService", "updateAssessment") => UpdateTraceByTraceId,
         ("MlflowService", "deleteAssessment") => UpdateTraceByTraceId,
-        // AUTH GAP: datasets (D21) — all evaluation-dataset RPCs intentionally
-        // have no before-request validator in Python. Authentication still runs
-        // before this dispatch, so leaving them unmatched is exact parity.
-        // AUTH GAP: issues (D21) — all four issue RPCs likewise have no
-        // per-resource validator in Python and intentionally remain unmatched.
+        // ---- Evaluation datasets ----
+        ("MlflowService", "createDataset") => CreateDataset,
+        ("MlflowService", "searchDatasets") => SearchDatasets,
+        ("MlflowService", "getDataset") => ReadDataset,
+        ("MlflowService", "deleteDataset") => DeleteDataset,
+        ("MlflowService", "searchEvaluationDatasets") => SearchEvaluationDatasets,
+        ("MlflowService", "setDatasetTags") => UpdateDataset,
+        ("MlflowService", "deleteDatasetTag") => UpdateDataset,
+        ("MlflowService", "upsertDatasetRecords") => UpdateDataset,
+        ("MlflowService", "getDatasetRecords") => ReadDataset,
+        ("MlflowService", "deleteDatasetRecords") => UpdateDataset,
+        ("MlflowService", "getDatasetExperimentIds") => ReadDataset,
+        ("MlflowService", "addDatasetToExperiments") => AddDatasetToExperiments,
+        ("MlflowService", "removeDatasetFromExperiments") => UpdateDataset,
+        // ---- Issues ----
+        ("MlflowService", "createIssue") => CreateIssue,
+        ("MlflowService", "getIssue") => ReadIssue,
+        ("MlflowService", "updateIssue") => UpdateIssue,
+        ("MlflowService", "searchIssues") => SearchIssues,
         // ---- Label schemas (BEFORE_REQUEST_HANDLERS) ----
         ("MlflowService", "createLabelSchema") => CreateLabelSchema,
         ("MlflowService", "getLabelSchema") => ReadLabelSchema,
@@ -271,6 +301,10 @@ fn proto_validator(service: &str, method: &str) -> Option<Validator> {
         ("WebhookService", "updateWebhook") => SenderIsAdmin,
         ("WebhookService", "deleteWebhook") => SenderIsAdmin,
         ("WebhookService", "testWebhook") => SenderIsAdmin,
+        // SearchRuns authorizes each returned run in the handler. Routes with
+        // an after-request hook are likewise authorized outside this table.
+        ("MlflowService", "searchRuns") => Allow,
+        _ if handler_for(service, method).is_some() => Allow,
         _ => return None,
     };
     Some(v)
@@ -333,6 +367,7 @@ fn build_dispatch() -> Dispatch {
     for (tail, method, validator) in [
         // Auth user routes.
         ("/mlflow/users/create", "POST", Validator::CanCreateUser),
+        ("/mlflow/users/create-ui", "POST", Validator::CanCreateUser),
         ("/mlflow/users/get", "GET", Validator::ReadUser),
         ("/mlflow/users/current", "GET", Validator::Allow),
         ("/mlflow/users/list", "GET", Validator::CanListUsers),
@@ -516,6 +551,90 @@ fn build_dispatch() -> Dispatch {
         validator: Validator::UpdateExperiment,
     });
 
+    for (path, method, validator) in [
+        ("/get-artifact", "GET", Validator::ReadRunArtifact),
+        (
+            "/model-versions/get-artifact",
+            "GET",
+            Validator::ReadModelVersionArtifact,
+        ),
+        ("/graphql", "GET", Validator::Allow),
+        ("/graphql", "POST", Validator::Allow),
+        (
+            "/ajax-api/2.0/mlflow/gateway-proxy",
+            "GET",
+            Validator::Allow,
+        ),
+        (
+            "/ajax-api/2.0/mlflow/gateway-proxy",
+            "POST",
+            Validator::Allow,
+        ),
+        (
+            "/ajax-api/3.0/mlflow/genai/evaluate/invoke",
+            "POST",
+            Validator::UpdateExperiment,
+        ),
+        (
+            "/ajax-api/3.0/mlflow/issues/invoke",
+            "POST",
+            Validator::UpdateExperiment,
+        ),
+        (
+            "/ajax-api/3.0/mlflow/scorer/invoke",
+            "POST",
+            Validator::Allow,
+        ),
+        (
+            "/ajax-api/3.0/mlflow/demo/generate",
+            "POST",
+            Validator::Allow,
+        ),
+        (
+            "/ajax-api/3.0/mlflow/demo/delete",
+            "POST",
+            Validator::SenderIsAdmin,
+        ),
+    ] {
+        d.exact.push(Route {
+            matcher: TemplateMatcher::compile(path),
+            method,
+            validator,
+        });
+    }
+
+    for tail in [
+        "/mlflow/server-info",
+        "/mlflow/gateway/supported-providers",
+        "/mlflow/gateway/supported-models",
+        "/mlflow/gateway/provider-config",
+        "/mlflow/gateway/secrets/config",
+    ] {
+        d.exact.push(Route {
+            matcher: TemplateMatcher::compile(&format!("/ajax-api/3.0{tail}")),
+            method: "GET",
+            validator: Validator::Allow,
+        });
+    }
+    d.exact.push(Route {
+        matcher: TemplateMatcher::compile("/api/3.0/mlflow/server-info"),
+        method: "GET",
+        validator: Validator::Allow,
+    });
+
+    for (path, method) in [
+        ("/ajax-api/3.0/mlflow/jobs/<job_id>", "GET"),
+        ("/ajax-api/3.0/mlflow/jobs/cancel/<job_id>", "PATCH"),
+        ("/ajax-api/3.0/jobs/<job_id>", "GET"),
+        ("/ajax-api/3.0/jobs/cancel/<job_id>", "PATCH"),
+    ] {
+        d.exact.push(Route {
+            matcher: TemplateMatcher::compile(path),
+            method,
+            validator: Validator::Allow,
+        });
+    }
+
     d
 }
 
@@ -525,10 +644,10 @@ pub enum Dispatched {
     /// A validator to run, with any captured path parameters (Flask's
     /// `request.view_args`).
     Validator(Validator, Vec<(String, String)>),
-    /// No validator matched and the path is not gated — allow (Python returns
-    /// `None` and `_before_request` falls through).
-    Allow,
-    /// Fail-closed deny (unknown `/mlflow/traces/` subpath).
+    /// No authorization decision matched. The middleware denies this by
+    /// default and only passes it when fail-closed is explicitly disabled.
+    NoDecision,
+    /// Fail-closed deny for an unknown subpath in a protected route family.
     Deny,
 }
 
@@ -552,11 +671,12 @@ fn dispatch_gateway_request(path: &str) -> Option<Dispatched> {
         ));
     }
 
-    const BODY_ENDPOINT_ROUTES: [&str; 5] = [
+    const BODY_ENDPOINT_ROUTES: [&str; 6] = [
         "/gateway/mlflow/v1/chat/completions",
         "/gateway/openai/v1/chat/completions",
         "/gateway/openai/v1/embeddings",
         "/gateway/openai/v1/responses",
+        "/gateway/openai/v1/responses/compact",
         "/gateway/anthropic/v1/messages",
     ];
     if BODY_ENDPOINT_ROUTES.contains(&path) {
@@ -646,7 +766,7 @@ pub fn dispatch_request(path: &str, method: &str) -> Dispatched {
     if path.contains("/mlflow/logged-models") {
         return match find(&d.logged_model, path, method) {
             Some((v, p)) => Dispatched::Validator(v, p),
-            None => Dispatched::Allow,
+            None => Dispatched::NoDecision,
         };
     }
 
@@ -654,7 +774,7 @@ pub fn dispatch_request(path: &str, method: &str) -> Dispatched {
     if path.contains("/mlflow/webhooks") {
         return match find(&d.webhook, path, method) {
             Some((v, p)) => Dispatched::Validator(v, p),
-            None => Dispatched::Allow,
+            None => Dispatched::NoDecision,
         };
     }
 
@@ -683,7 +803,19 @@ pub fn dispatch_request(path: &str, method: &str) -> Dispatched {
         }
     }
 
-    Dispatched::Allow
+    if path.starts_with("/ajax-api/3.0/mlflow/assistant/") {
+        return Dispatched::Validator(Validator::Allow, Vec::new());
+    }
+
+    if path.starts_with("/api/3.0/mlflow/datasets/")
+        || path.starts_with("/ajax-api/3.0/mlflow/datasets/")
+        || path.starts_with("/api/3.0/mlflow/issues/")
+        || path.starts_with("/ajax-api/3.0/mlflow/issues/")
+    {
+        return Dispatched::Deny;
+    }
+
+    Dispatched::NoDecision
 }
 
 // ---------------------------------------------------------------------------
@@ -719,6 +851,11 @@ fn build_after_routes() -> Vec<AfterRoute> {
             });
         }
     }
+    routes.push(AfterRoute {
+        matcher: TemplateMatcher::compile("/ajax-api/3.0/mlflow/gateway/secrets/config"),
+        method: "GET",
+        handler: AfterRequestHandler::RedactGatewaySecretsConfig,
+    });
     routes
 }
 
@@ -903,7 +1040,7 @@ mod tests {
     fn validator_of(d: Dispatched) -> Validator {
         match d {
             Dispatched::Validator(v, _) => v,
-            Dispatched::Allow => panic!("expected a validator, got Allow"),
+            Dispatched::NoDecision => panic!("expected a validator, got no decision"),
             Dispatched::Deny => panic!("expected a validator, got Deny"),
         }
     }
@@ -1001,6 +1138,164 @@ mod tests {
             validator_of(dispatch_request("/api/2.0/mlflow/runs/log-metric", "POST")),
             Validator::UpdateRun
         );
+    }
+
+    #[test]
+    fn datasets_and_issues_dispatch_fail_closed() {
+        for (path, method, expected) in [
+            (
+                "/api/3.0/mlflow/datasets/create",
+                "POST",
+                Validator::CreateDataset,
+            ),
+            (
+                "/ajax-api/3.0/mlflow/datasets/d-1",
+                "GET",
+                Validator::ReadDataset,
+            ),
+            (
+                "/api/3.0/mlflow/datasets/d-1/add-experiments",
+                "POST",
+                Validator::AddDatasetToExperiments,
+            ),
+            (
+                "/api/3.0/mlflow/issues/i-1",
+                "PATCH",
+                Validator::UpdateIssue,
+            ),
+            (
+                "/ajax-api/3.0/mlflow/issues/search",
+                "POST",
+                Validator::SearchIssues,
+            ),
+        ] {
+            assert_eq!(validator_of(dispatch_request(path, method)), expected);
+        }
+        for path in [
+            "/api/3.0/mlflow/datasets/d-1/unknown",
+            "/ajax-api/3.0/mlflow/issues/i-1/unknown",
+        ] {
+            assert!(matches!(dispatch_request(path, "GET"), Dispatched::Deny));
+        }
+    }
+
+    #[test]
+    fn gateway_config_demo_invoke_and_presigned_dispatch() {
+        for (path, method, expected) in [
+            (
+                "/api/3.0/mlflow/gateway/budgets/get",
+                "GET",
+                Validator::Allow,
+            ),
+            (
+                "/api/3.0/mlflow/gateway/guardrails/create",
+                "POST",
+                Validator::SenderIsAdmin,
+            ),
+            (
+                "/ajax-api/3.0/mlflow/gateway/guardrails/list-for-endpoint",
+                "GET",
+                Validator::ReadGatewayEndpointGuardrailConfig,
+            ),
+            (
+                "/ajax-api/3.0/mlflow/gateway/secrets/config",
+                "GET",
+                Validator::Allow,
+            ),
+            (
+                "/ajax-api/3.0/mlflow/demo/generate",
+                "POST",
+                Validator::Allow,
+            ),
+            (
+                "/ajax-api/3.0/mlflow/demo/delete",
+                "POST",
+                Validator::SenderIsAdmin,
+            ),
+            (
+                "/ajax-api/3.0/mlflow/issues/invoke",
+                "POST",
+                Validator::UpdateExperiment,
+            ),
+            (
+                "/api/2.0/mlflow/artifacts/presigned-upload-url",
+                "POST",
+                Validator::UpdateRun,
+            ),
+        ] {
+            assert_eq!(validator_of(dispatch_request(path, method)), expected);
+        }
+    }
+
+    #[test]
+    fn metric_history_bulk_interval_twins_are_gated() {
+        for prefix in ["/api/2.0", "/ajax-api/2.0"] {
+            assert_eq!(
+                validator_of(dispatch_request(
+                    &format!("{prefix}/mlflow/metrics/get-history-bulk-interval"),
+                    "GET"
+                )),
+                Validator::ReadMetricHistoryBulkInterval
+            );
+        }
+    }
+
+    #[test]
+    fn every_registered_route_has_an_auth_decision() {
+        for spec in mlflow_proto::ROUTE_TABLE {
+            if crate::handler_for(spec.service, spec.method, spec.http_method).is_none() {
+                continue;
+            }
+            for route in spec.expand("") {
+                assert!(
+                    !matches!(
+                        dispatch_request(&route.path, spec.http_method),
+                        Dispatched::NoDecision
+                    ),
+                    "missing auth decision for {} {} ({}/{})",
+                    spec.http_method,
+                    route.path,
+                    spec.service,
+                    spec.method
+                );
+            }
+        }
+
+        for (path, method) in [
+            ("/get-artifact", "GET"),
+            ("/ajax-api/2.0/mlflow/upload-artifact", "POST"),
+            ("/ajax-api/2.0/mlflow/gateway-proxy", "GET"),
+            ("/ajax-api/2.0/mlflow/gateway-proxy", "POST"),
+            ("/ajax-api/2.0/mlflow/experiments/search-datasets", "POST"),
+            ("/ajax-api/2.0/mlflow/metrics/get-history-bulk", "GET"),
+            ("/ajax-api/2.0/mlflow/runs/create-promptlab-run", "POST"),
+            ("/ajax-api/3.0/mlflow/get-trace-artifact", "GET"),
+            ("/v1/traces", "POST"),
+            ("/model-versions/get-artifact", "GET"),
+            (
+                "/ajax-api/2.0/mlflow/logged-models/m-1/artifacts/files",
+                "GET",
+            ),
+            ("/graphql", "GET"),
+            ("/graphql", "POST"),
+            ("/api/3.0/mlflow/server-info", "GET"),
+            ("/ajax-api/3.0/mlflow/gateway/supported-providers", "GET"),
+            ("/ajax-api/3.0/mlflow/jobs/job-1", "GET"),
+            ("/ajax-api/3.0/jobs/cancel/job-1", "PATCH"),
+            ("/ajax-api/3.0/mlflow/genai/evaluate/invoke", "POST"),
+            ("/ajax-api/3.0/mlflow/scorer/invoke", "POST"),
+            ("/ajax-api/3.0/mlflow/issues/invoke", "POST"),
+            ("/ajax-api/3.0/mlflow/demo/generate", "POST"),
+            ("/ajax-api/3.0/mlflow/assistant/providers", "GET"),
+            ("/api/3.0/mlflow/mcp-servers", "POST"),
+            ("/gateway/endpoint/mlflow/invocations", "POST"),
+            ("/api/3.0/mlflow/scorers/online-configs", "GET"),
+        ] {
+            assert!(
+                !matches!(dispatch_request(path, method), Dispatched::NoDecision),
+                "missing auth decision for {method} {path}"
+            );
+        }
     }
 
     #[test]
@@ -1102,7 +1397,7 @@ mod tests {
                 "/gateway/openai/v1/responses/compact",
                 "POST"
             )),
-            Validator::MissingGatewayEndpointName
+            Validator::UseGatewayEndpoint
         );
     }
 

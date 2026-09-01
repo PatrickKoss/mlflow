@@ -25,9 +25,8 @@
 //!
 //! ## Which hooks are ported (and which are seams)
 //!
-//! Python's `AFTER_REQUEST_PATH_HANDLERS` also carries gateway hooks. That REST
-//! surface is not served by this Rust binary, so its handlers remain absent.
-//! Scorer and review-queue filtering are ported with their respective routes.
+//! Gateway list responses are filtered by the same role-based read predicate,
+//! and the discovery secrets config hides its passphrase signal from non-admins.
 //!
 //! The workspace hooks (T10.4) **are** served: `filter_list_workspaces` filters
 //! the ListWorkspaces response to accessible workspaces (admins see all);
@@ -106,6 +105,10 @@ pub enum AfterRequestHandler {
     FilterListScorers,
     /// `filter_list_review_queues`.
     FilterListReviewQueues,
+    FilterListGatewayEndpoints,
+    FilterListGatewayModelDefinitions,
+    FilterListGatewaySecrets,
+    RedactGatewaySecretsConfig,
     /// `filter_list_workspaces` — drop workspaces the caller can't access from a
     /// ListWorkspaces response (T10.4). Admins skip.
     FilterListWorkspaces,
@@ -165,6 +168,9 @@ pub fn handler_for(service: &str, method: &str) -> Option<AfterRequestHandler> {
         ("MlflowService", "deleteGatewayEndpoint") => DeleteGrantsGatewayEndpoint,
         ("MlflowService", "createGatewayModelDefinition") => CreatorGrantGatewayModelDefinition,
         ("MlflowService", "deleteGatewayModelDefinition") => DeleteGrantsGatewayModelDefinition,
+        ("MlflowService", "listGatewayEndpoints") => FilterListGatewayEndpoints,
+        ("MlflowService", "listGatewayModelDefinitions") => FilterListGatewayModelDefinitions,
+        ("MlflowService", "listGatewaySecretInfos") => FilterListGatewaySecrets,
         ("ModelRegistryService", "createRegisteredModel") => CreatorGrantRegisteredModel,
         ("ModelRegistryService", "deleteRegisteredModel") => DeleteGrantsRegisteredModel,
         ("ModelRegistryService", "renameRegisteredModel") => RenameGrantsRegisteredModel,
@@ -349,6 +355,37 @@ async fn run_inner(
         FilterSearchLoggedModels => filter_search_logged_models(ctx, body_json(resp_body)?).await,
         FilterListScorers => filter_list_scorers(ctx, body_json(resp_body)?).await,
         FilterListReviewQueues => filter_list_review_queues(ctx, body_json(resp_body)?).await,
+        FilterListGatewayEndpoints => {
+            filter_gateway_list(
+                ctx,
+                body_json(resp_body)?,
+                "endpoints",
+                "endpoint_id",
+                "gateway_endpoint",
+            )
+            .await
+        }
+        FilterListGatewayModelDefinitions => {
+            filter_gateway_list(
+                ctx,
+                body_json(resp_body)?,
+                "model_definitions",
+                "model_definition_id",
+                "gateway_model_definition",
+            )
+            .await
+        }
+        FilterListGatewaySecrets => {
+            filter_gateway_list(
+                ctx,
+                body_json(resp_body)?,
+                "secrets",
+                "secret_id",
+                "gateway_secret",
+            )
+            .await
+        }
+        RedactGatewaySecretsConfig => redact_gateway_secrets_config(ctx, body_json(resp_body)?),
         FilterListWorkspaces => filter_list_workspaces(ctx, body_json(resp_body)?).await,
         FilterSearchMcpServers => filter_search_mcp_servers(ctx, body_json(resp_body)?).await,
         FilterGetMcpServer => filter_get_mcp_server(ctx, body_json(resp_body)?).await,
@@ -1329,6 +1366,47 @@ async fn readable_set(ctx: &AfterCtx<'_>, resource_type: &str) -> Result<Readabl
         wildcard,
         fallback,
     })
+}
+
+async fn filter_gateway_list(
+    ctx: &AfterCtx<'_>,
+    mut response: serde_json::Value,
+    collection_field: &str,
+    id_field: &str,
+    resource_type: &str,
+) -> Result<Option<Vec<u8>>, MlflowError> {
+    if ctx.is_admin {
+        return Ok(None);
+    }
+    let readable = readable_set(ctx, resource_type).await?;
+    if let Some(items) = response
+        .get_mut(collection_field)
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        items.retain(|item| {
+            item.get(id_field)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|resource_id| readable.allows(resource_id))
+        });
+    }
+    serde_json::to_vec(&response)
+        .map(Some)
+        .map_err(|error| MlflowError::internal_error(error.to_string()))
+}
+
+fn redact_gateway_secrets_config(
+    ctx: &AfterCtx<'_>,
+    mut response: serde_json::Value,
+) -> Result<Option<Vec<u8>>, MlflowError> {
+    if ctx.is_admin {
+        return Ok(None);
+    }
+    if let Some(object) = response.as_object_mut() {
+        object.remove("using_default_passphrase");
+    }
+    serde_json::to_vec(&response)
+        .map(Some)
+        .map_err(|error| MlflowError::internal_error(error.to_string()))
 }
 
 // ---------------------------------------------------------------------------

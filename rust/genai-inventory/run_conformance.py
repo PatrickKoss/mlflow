@@ -50,9 +50,11 @@ DEFAULT_REPORT_DIR = ROOT / "rust" / "compliance" / "report"
 CLASSIFICATIONS = ("server_reachable", "client_only")
 BACKENDS = ("sqlite", "postgres")
 SERVER_IMPLEMENTATIONS = ("python_http", "rust")
-SUITES = ("ledger", "mcp_server_registry", "gateway_budget_policy")
+SUITES = ("ledger", "auth", "mcp_server_registry", "gateway_budget_policy")
 MCP_CORPUS_PATH = ROOT / "rust" / "compliance" / "corpus" / "mcp_server_registry.yaml"
 GATEWAY_BUDGET_CORPUS_PATH = ROOT / "rust" / "genai-inventory" / "gateway_budget_policy.yaml"
+AUTH_MANIFEST_PATH = ROOT / "rust" / "genai-inventory" / "basic_auth.yaml"
+AUTH_REPLAY_REPORT_PATH = ROOT / "rust" / "compliance" / "report" / "last_run.json"
 _logger = logging.getLogger(__name__)
 
 # These cases exercise the public SDK/store boundary without optional provider
@@ -388,6 +390,62 @@ def _write_gateway_budget_report(args: argparse.Namespace) -> int:
     markdown_path.write_text("\n".join(lines) + "\n")
     _logger.info("Wrote %s and %s", json_path.relative_to(ROOT), markdown_path.relative_to(ROOT))
     return int(any(run["failed"] for run in runs))
+
+
+def _write_auth_report(args: argparse.Namespace) -> int:
+    """Run the auth differential and report the required T-S2 rows."""
+    command = [
+        sys.executable,
+        str(ROOT / "rust" / "compliance" / "replay.py"),
+        "-k",
+        "auth",
+    ]
+    replay = subprocess.run(command, cwd=ROOT, check=False)
+    manifest = yaml.safe_load(AUTH_MANIFEST_PATH.read_text()) or {}
+    required = manifest.get("cases", [])
+    replay_report = json.loads(AUTH_REPLAY_REPORT_PATH.read_text())
+    observed = {result["name"]: result for result in replay_report["results"]}
+    results = []
+    for row in required:
+        result = observed.get(row["name"])
+        passed = bool(
+            result and result["status_match"] and not result["diffs"] and result["error"] is None
+        )
+        results.append({
+            "name": row["name"],
+            "surface": row["surface"],
+            "passed": passed,
+            "result": result,
+        })
+
+    args.report_dir.mkdir(parents=True, exist_ok=True)
+    report = {
+        "schema_version": 1,
+        "task": "T-S2",
+        "suite": "auth",
+        "replay_exit_code": replay.returncode,
+        "cases": len(results),
+        "passed": sum(result["passed"] for result in results),
+        "failed": sum(not result["passed"] for result in results),
+        "results": results,
+    }
+    json_path = args.report_dir / "ts2_basic_auth.json"
+    markdown_path = args.report_dir / "ts2_basic_auth.md"
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    lines = [
+        "# T-S2 basic-auth conformance",
+        "",
+        "| Surface | Case | Result |",
+        "| --- | --- | --- |",
+        *(
+            f"| {result['surface']} | `{result['name']}` | "
+            f"{'passed' if result['passed'] else 'failed'} |"
+            for result in results
+        ),
+    ]
+    markdown_path.write_text("\n".join(lines) + "\n")
+    _logger.info("Wrote %s and %s", json_path.relative_to(ROOT), markdown_path.relative_to(ROOT))
+    return int(replay.returncode != 0 or report["failed"] != 0)
 
 
 def _free_port() -> int:
@@ -750,7 +808,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
 def main() -> int:
     args = _args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    suites = args.suite or ["ledger"]
+    suites = args.suite or (["auth", "ledger"] if args.profile == "required" else ["ledger"])
     implementations = args.server_implementation or (
         list(SERVER_IMPLEMENTATIONS) if args.profile == "full" else ["rust"]
     )
@@ -760,6 +818,9 @@ def main() -> int:
         return _write_mcp_registry_report(args)
     if suites == ["gateway_budget_policy"]:
         return _write_gateway_budget_report(args)
+    auth_exit_code = _write_auth_report(args) if "auth" in suites else 0
+    if suites == ["auth"]:
+        return auth_exit_code
     _run_checked(["uv", "run", "--no-sync", "python", str(HERE / "validate_ledger.py")])
     ledger = json.loads(LEDGER_PATH.read_text())
     args.report_dir.mkdir(parents=True, exist_ok=True)
@@ -829,7 +890,7 @@ def main() -> int:
     json_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     md_path.write_text(_render_markdown(report))
     _logger.info("Wrote %s and %s", json_path.relative_to(ROOT), md_path.relative_to(ROOT))
-    return int(any(run["exit_code"] != 0 for run in runs))
+    return int(auth_exit_code != 0 or any(run["exit_code"] != 0 for run in runs))
 
 
 if __name__ == "__main__":

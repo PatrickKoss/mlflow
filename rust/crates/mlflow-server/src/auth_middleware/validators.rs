@@ -150,6 +150,16 @@ impl RequestCtx<'_> {
         body.get(snake_case).or_else(|| body.get(camel_case))
     }
 
+    /// `_get_normalized_request_json`: Flask can expose a JSON string that
+    /// itself contains the request object. Issue validators accept both that
+    /// form and the ordinary object form.
+    fn normalized_json_body(&self) -> Option<Value> {
+        match self.json_body? {
+            Value::String(value) => serde_json::from_str(value).ok(),
+            value => Some(value.clone()),
+        }
+    }
+
     /// All query values for a repeated key (`request.args.to_dict(flat=False)`).
     fn query_multi(&self, param: &str) -> Vec<String> {
         self.query
@@ -194,6 +204,8 @@ pub enum Validator {
     ReadGatewayModelDefinition,
     UpdateGatewayModelDefinition,
     DeleteGatewayModelDefinition,
+    ReadGatewayEndpointGuardrailConfig,
+    UpdateGatewayEndpointGuardrailConfig,
     // ---- Runs (inherit experiment) ----
     ReadRun,
     UpdateRun,
@@ -235,10 +247,20 @@ pub enum Validator {
     ReadExperimentArtifactProxy,
     UpdateExperimentArtifactProxy,
     DeleteExperimentArtifactProxy,
-    // ---- Metrics / datasets ----
+    // ---- Metrics / datasets / issues ----
     ReadMetricHistoryBulk,
     ReadMetricHistoryBulkInterval,
     SearchDatasets,
+    ReadDataset,
+    UpdateDataset,
+    DeleteDataset,
+    CreateDataset,
+    SearchEvaluationDatasets,
+    AddDatasetToExperiments,
+    ReadIssue,
+    UpdateIssue,
+    CreateIssue,
+    SearchIssues,
     // ---- Label schemas (inherit experiment) ----
     CreateLabelSchema,
     ReadLabelSchema,
@@ -346,6 +368,16 @@ impl Validator {
                         .can_delete,
                 )
             }
+            ReadGatewayEndpointGuardrailConfig => {
+                Ok(gateway_permission(ctx, "gateway_endpoint", "endpoint_id")
+                    .await?
+                    .can_read)
+            }
+            UpdateGatewayEndpointGuardrailConfig => {
+                Ok(gateway_permission(ctx, "gateway_endpoint", "endpoint_id")
+                    .await?
+                    .can_update)
+            }
             // Runs inherit experiment.
             ReadRun => Ok(experiment_perm_from_run(ctx).await?.can_read),
             UpdateRun => Ok(experiment_perm_from_run(ctx).await?.can_update),
@@ -393,6 +425,18 @@ impl Validator {
             ReadMetricHistoryBulk => validate_metric_history_bulk(ctx, "run_id").await,
             ReadMetricHistoryBulkInterval => validate_metric_history_bulk(ctx, "run_ids").await,
             SearchDatasets => validate_search_datasets(ctx).await,
+            ReadDataset => validate_dataset_permission(ctx, ExperimentAction::Read).await,
+            UpdateDataset => validate_dataset_permission(ctx, ExperimentAction::Update).await,
+            DeleteDataset => validate_dataset_permission(ctx, ExperimentAction::Delete).await,
+            CreateDataset => validate_request_experiment_ids(ctx, ExperimentAction::Update).await,
+            SearchEvaluationDatasets => {
+                validate_request_experiment_ids(ctx, ExperimentAction::Read).await
+            }
+            AddDatasetToExperiments => validate_add_dataset_to_experiments(ctx).await,
+            ReadIssue => validate_issue_permission(ctx, ExperimentAction::Read).await,
+            UpdateIssue => validate_issue_permission(ctx, ExperimentAction::Update).await,
+            CreateIssue => validate_issue_request_experiment(ctx, ExperimentAction::Update).await,
+            SearchIssues => validate_issue_request_experiment(ctx, ExperimentAction::Read).await,
             CreateLabelSchema => Ok(experiment_perm_from_id_param(ctx).await?.can_manage),
             ReadLabelSchema => Ok(experiment_perm_from_label_schema(ctx).await?.can_read),
             ManageLabelSchema => Ok(experiment_perm_from_label_schema(ctx).await?.can_manage),
@@ -1558,6 +1602,120 @@ async fn validate_search_datasets(ctx: &RequestCtx<'_>) -> Result<bool, MlflowEr
         })
         .unwrap_or_default();
     all_can_read_experiments(ctx, &ids).await
+}
+
+#[derive(Clone, Copy)]
+enum ExperimentAction {
+    Read,
+    Update,
+    Delete,
+}
+
+fn permission_allows(permission: &Permission, action: ExperimentAction) -> bool {
+    match action {
+        ExperimentAction::Read => permission.can_read,
+        ExperimentAction::Update => permission.can_update,
+        ExperimentAction::Delete => permission.can_delete,
+    }
+}
+
+async fn all_experiments_allow(
+    ctx: &RequestCtx<'_>,
+    experiment_ids: &[String],
+    action: ExperimentAction,
+) -> Result<bool, MlflowError> {
+    if experiment_ids.is_empty() {
+        return Ok(false);
+    }
+    for experiment_id in experiment_ids {
+        if !permission_allows(experiment_permission(ctx, experiment_id).await?, action) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn request_experiment_ids(ctx: &RequestCtx<'_>) -> Vec<String> {
+    if let Some(body) = ctx.json_body.and_then(Value::as_object) {
+        return body
+            .get("experiment_ids")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    ctx.query_multi("experiment_ids")
+}
+
+async fn validate_dataset_permission(
+    ctx: &RequestCtx<'_>,
+    action: ExperimentAction,
+) -> Result<bool, MlflowError> {
+    let dataset_id = require_param(ctx, "dataset_id")?;
+    let experiment_ids = ctx
+        .tracking_store()?
+        .get_evaluation_dataset_experiment_ids(ctx.workspace, &dataset_id)
+        .await?;
+    all_experiments_allow(ctx, &experiment_ids, action).await
+}
+
+async fn validate_request_experiment_ids(
+    ctx: &RequestCtx<'_>,
+    action: ExperimentAction,
+) -> Result<bool, MlflowError> {
+    all_experiments_allow(ctx, &request_experiment_ids(ctx), action).await
+}
+
+async fn validate_add_dataset_to_experiments(ctx: &RequestCtx<'_>) -> Result<bool, MlflowError> {
+    if !validate_dataset_permission(ctx, ExperimentAction::Update).await? {
+        return Ok(false);
+    }
+    validate_request_experiment_ids(ctx, ExperimentAction::Update).await
+}
+
+async fn validate_issue_permission(
+    ctx: &RequestCtx<'_>,
+    action: ExperimentAction,
+) -> Result<bool, MlflowError> {
+    let issue_id = require_param(ctx, "issue_id")?;
+    let issue = match ctx
+        .tracking_store()?
+        .get_issue(ctx.workspace, &issue_id)
+        .await
+    {
+        Ok(issue) => issue,
+        Err(error) if error.error_code == ErrorCode::ResourceDoesNotExist => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(permission_allows(
+        experiment_permission(ctx, &issue.experiment_id).await?,
+        action,
+    ))
+}
+
+async fn validate_issue_request_experiment(
+    ctx: &RequestCtx<'_>,
+    action: ExperimentAction,
+) -> Result<bool, MlflowError> {
+    let Some(experiment_id) = ctx
+        .normalized_json_body()
+        .and_then(|body| {
+            body.get("experiment_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|experiment_id| !experiment_id.is_empty())
+    else {
+        return Ok(false);
+    };
+    Ok(permission_allows(
+        experiment_permission(ctx, &experiment_id).await?,
+        action,
+    ))
 }
 
 /// `_get_otel_validator` (`__init__.py:4441`): the experiment id comes from the

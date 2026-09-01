@@ -453,10 +453,8 @@ fn register_proto_routes(state: AppState, artifacts_only: bool) -> Router {
     // ---- end server-info (T11.5) ----
 
     // ---- AI Gateway discovery (T18.2, §12.8) ----
-    // AUTH GAP (D21 posture): Python's basic-auth app authenticates these
-    // ajax-only routes globally but gives them no resource-specific validator.
-    // Workspace resolution still runs first, while the catalog/config payload
-    // itself is intentionally workspace-independent just like Python.
+    // These ajax-only discovery routes explicitly allow any authenticated user.
+    // The secrets-config after hook removes the passphrase signal for non-admins.
     router = router.route(
         "/ajax-api/3.0/mlflow/gateway/supported-providers",
         get(gateway::supported_providers),
@@ -483,8 +481,8 @@ fn register_proto_routes(state: AppState, artifacts_only: bool) -> Router {
     // separate native FastAPI router (`job_api.py`) explicitly matched by
     // `_find_fastapi_validator`. Preserve both prefixes and their different
     // response shapes.
-    // AUTH GAP: both families are authenticated-only; Python applies no
-    // per-job authorization validator to generic jobs.
+    // Both families carry an explicit authenticated-only decision. Per-job
+    // ownership lands with the generic-jobs authorization task.
     router = router.route(
         "/ajax-api/3.0/mlflow/jobs/{job_id}",
         get(jobs::flask_get_job),
@@ -501,8 +499,8 @@ fn register_proto_routes(state: AppState, artifacts_only: bool) -> Router {
     // ---- end generic jobs ----
 
     // ---- GenAI invoke submissions (T17.4, §12.2-§12.4) ----
-    // AUTH GAP (D21): Python authenticates all three hand-written AJAX routes
-    // globally but registers no experiment/trace-specific validator for them.
+    // Issue detection and GenAI evaluation require experiment UPDATE. Scorer
+    // invocation is explicitly authenticated-only.
     router = router.route(
         "/ajax-api/3.0/mlflow/genai/evaluate/invoke",
         axum::routing::post(invoke::invoke_genai_evaluate),

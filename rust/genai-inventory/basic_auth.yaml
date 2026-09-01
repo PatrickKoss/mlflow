@@ -1,0 +1,12 @@
+cases:
+  - {surface: fail-closed, name: auth_fail_closed_unknown_route}
+  - {surface: datasets, name: auth_user_dataset_create_requires_update}
+  - {surface: datasets, name: auth_user_dataset_read_default_allowed}
+  - {surface: datasets, name: auth_user_dataset_search_must_be_scoped}
+  - {surface: issues, name: auth_user_issue_update_requires_update}
+  - {surface: issues, name: auth_user_create_issue_with_double_encoded_body}
+  - {surface: gateway-config, name: auth_user_gateway_discovery_allowed}
+  - {surface: gateway-config, name: auth_user_gateway_guardrails_admin_only}
+  - {surface: demo, name: auth_user_demo_generate_allowed}
+  - {surface: demo, name: auth_user_demo_delete_admin_only}
+  - {surface: presigned, name: auth_user_presigned_upload_requires_update}

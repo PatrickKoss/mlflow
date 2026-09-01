@@ -4,7 +4,7 @@
 //! ## Where this sits
 //!
 //! The tower auth middleware (T9.4) authenticates every request, including
-//! `/graphql`, but dispatches it as `Dispatched::Allow` (no REST validator) —
+//! `/graphql`, but dispatches it through the explicit authenticated-only validator.
 //! exactly Python's before-request treatment: `/graphql` is a protected route
 //! (401 when unauthenticated), yet `_find_validator` returns `None`, so any
 //! authenticated user passes the request-level gate. Fine-grained authorization
